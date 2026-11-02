@@ -48,7 +48,17 @@ jobs:
           if [[ "$rc" -eq 0 ]]; then
             exit 0
           fi
-          tail -n 60 tmp/ci-tests.log >tmp/ci-diag-tail.txt
+          awk '
+            /^FAIL/ {
+              if (n < 20) {
+                if (n == 0) print "FAIL断言:"
+                print NR ":" $0
+                n++
+              }
+            }
+            END { if (n > 0) print "---" }
+          ' tmp/ci-tests.log >tmp/ci-diag-tail.txt
+          tail -n 40 tmp/ci-tests.log >>tmp/ci-diag-tail.txt
           diag=$(head -c 16384 tmp/ci-diag-tail.txt)
           rm -f tmp/ci-diag-tail.txt
           if [[ -z "$diag" ]]; then
