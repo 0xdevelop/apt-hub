@@ -1,0 +1,322 @@
+name: ubuntu-publish
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: apt-hub-publish
+  cancel-in-progress: false
+
+jobs:
+  build_verify:
+    name: 构建校验并保存候选
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    outputs:
+      site_ok: ${{ steps.gate.outputs.site_ok }}
+      apt_data_sha: ${{ steps.save_apt_data.outputs.apt_data_sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: 安装 CI 临时依赖
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl jq gnupg dpkg-dev apt-utils
+
+      - name: 检查生产身份与签名 secret
+        env:
+          APT_HUB_GIT_NAME: ${{ vars.APT_HUB_GIT_NAME }}
+          APT_HUB_GIT_EMAIL: ${{ vars.APT_HUB_GIT_EMAIL }}
+          APT_HUB_GPG_PRIVATE_KEY: ${{ secrets.APT_HUB_GPG_PRIVATE_KEY }}
+          APT_HUB_GPG_FINGERPRINT: ${{ secrets.APT_HUB_GPG_FINGERPRINT }}
+          APT_HUB_GPG_PASSPHRASE: ${{ secrets.APT_HUB_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          missing=0
+          [[ -n "${APT_HUB_GIT_NAME:-}" ]] || { echo "缺少 vars.APT_HUB_GIT_NAME" >&2; missing=1; }
+          [[ -n "${APT_HUB_GIT_EMAIL:-}" ]] || { echo "缺少 vars.APT_HUB_GIT_EMAIL" >&2; missing=1; }
+          [[ -n "${APT_HUB_GPG_PRIVATE_KEY:-}" ]] || { echo "缺少 secrets.APT_HUB_GPG_PRIVATE_KEY" >&2; missing=1; }
+          [[ -n "${APT_HUB_GPG_FINGERPRINT:-}" ]] || { echo "缺少 secrets.APT_HUB_GPG_FINGERPRINT" >&2; missing=1; }
+          [[ -n "${APT_HUB_GPG_PASSPHRASE:-}" ]] || { echo "缺少 secrets.APT_HUB_GPG_PASSPHRASE" >&2; missing=1; }
+          [[ "$missing" -eq 0 ]] || exit 1
+          case "${APT_HUB_GIT_NAME}${APT_HUB_GIT_EMAIL}" in
+            *github-actions*|*[Bb]ot*|*[Aa]gent*|*Cursor*|*cursoragent*)
+              echo "拒绝使用 bot/agent 提交身份" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: 从 apt-data 恢复 previous
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p tmp/previous tmp/site tmp/verify tmp/gnupg
+          chmod 700 tmp/gnupg
+          if ! git ls-remote --heads origin apt-data > tmp/apt-data-refs.txt; then
+            echo "列出 apt-data 失败（网络或鉴权），不能当首轮空目录" >&2
+            exit 1
+          fi
+          if [[ ! -s tmp/apt-data-refs.txt ]]; then
+            echo "apt-data 分支不存在，使用空 previous"
+            : > tmp/apt-data-base.sha
+            exit 0
+          fi
+          git fetch origin refs/heads/apt-data:refs/remotes/origin/apt-data
+          sha=$(git rev-parse --verify origin/apt-data)
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "无法解析 apt-data SHA" >&2; exit 1; }
+          printf '%s\n' "$sha" > tmp/apt-data-base.sha
+          git archive "$sha" | tar -x -C tmp/previous
+          [[ -d tmp/previous ]] || { echo "恢复 apt-data 失败" >&2; exit 1; }
+
+      - name: 导入生产签名密钥到临时 gnupg
+        env:
+          APT_HUB_GPG_PRIVATE_KEY: ${{ secrets.APT_HUB_GPG_PRIVATE_KEY }}
+          APT_HUB_GPG_FINGERPRINT: ${{ secrets.APT_HUB_GPG_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          set +x
+          export GNUPGHOME="$PWD/tmp/gnupg"
+          mkdir -p "$GNUPGHOME"
+          chmod 700 "$GNUPGHOME"
+          printf '%s\n' 'pinentry-mode loopback' >"$GNUPGHOME/gpg.conf"
+          want=$(printf '%s' "$APT_HUB_GPG_FINGERPRINT" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
+          [[ "$want" =~ ^[A-F0-9]{40}$ ]] || { echo "fingerprint 必须是 40 位十六进制完整指纹" >&2; exit 1; }
+          printf '%s\n' "$APT_HUB_GPG_PRIVATE_KEY" | gpg --batch --import
+          if ! gpg --batch --with-colons --list-secret-keys --with-fingerprint -- "$want" \
+            | awk -F: -v want="$want" 'BEGIN{n=0} /^fpr:/ { if (toupper($10)==want) n++ } END { exit n>0 ? 0 : 1 }'; then
+            echo "导入密钥中没有指定指纹的私钥" >&2
+            exit 1
+          fi
+
+      - name: 生成发行版数据并构建候选站点
+        env:
+          APT_HUB_GPG_FINGERPRINT: ${{ secrets.APT_HUB_GPG_FINGERPRINT }}
+          GPG_PASSPHRASE: ${{ secrets.APT_HUB_GPG_PASSPHRASE }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$PWD/tmp/gnupg"
+          chmod a+x scripts/ubuntu_releases.sh scripts/sync.sh scripts/render.sh scripts/verify_ubuntu.sh
+          scripts/ubuntu_releases.sh --output tmp/releases.json
+          fpr=$(printf '%s' "$APT_HUB_GPG_FINGERPRINT" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
+          [[ "$fpr" =~ ^[A-F0-9]{40}$ ]] || { echo "fingerprint 必须是 40 位十六进制完整指纹" >&2; exit 1; }
+          scripts/sync.sh \
+            --catalog config/packages.json \
+            --releases tmp/releases.json \
+            --previous tmp/previous \
+            --output tmp/site \
+            --gnupghome "$GNUPGHOME" \
+            --fingerprint "$fpr"
+          scripts/verify_ubuntu.sh --site tmp/site --releases tmp/releases.json --work-dir tmp/verify
+          cp README.md tmp/README.md
+          scripts/render.sh --state tmp/site/state.json --readme tmp/README.md --site tmp/site
+
+      - name: 检查产物大小并无符号链接
+        id: gate
+        run: |
+          set -euo pipefail
+          if find tmp/site -type l -print | grep -q .; then
+            echo "候选站点含符号链接，拒绝" >&2
+            exit 1
+          fi
+          bytes=$(du -sb tmp/site | awk '{print $1}')
+          echo "site_bytes=$bytes"
+          if [[ "$bytes" -gt 1073741824 ]]; then
+            echo "候选站点超过 GitHub Pages 1GB 上限: $bytes" >&2
+            exit 1
+          fi
+          for name in pool dists apt-hub.gpg state.json index.html; do
+            [[ -e "tmp/site/$name" ]] || { echo "候选站点缺少 $name" >&2; exit 1; }
+          done
+          git_file_limit=104857600
+          over=0
+          while IFS= read -r -d '' f; do
+            sz=$(stat -c '%s' "$f")
+            if [[ "$sz" -gt "$git_file_limit" ]]; then
+              echo "候选单文件超过 GitHub 普通 Git 100MiB 限制: ${f#tmp/site/} (${sz} 字节)" >&2
+              over=1
+            fi
+          done < <(find tmp/site/pool tmp/site/dists tmp/site/apt-hub.gpg tmp/site/state.json tmp/site/index.html -type f -print0)
+          [[ "$over" -eq 0 ]] || exit 1
+          echo "site_ok=true" >>"$GITHUB_OUTPUT"
+
+      - name: 快进保存 apt-data
+        id: save_apt_data
+        env:
+          APT_HUB_GIT_NAME: ${{ vars.APT_HUB_GIT_NAME }}
+          APT_HUB_GIT_EMAIL: ${{ vars.APT_HUB_GIT_EMAIL }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          export GIT_AUTHOR_NAME="$APT_HUB_GIT_NAME"
+          export GIT_AUTHOR_EMAIL="$APT_HUB_GIT_EMAIL"
+          export GIT_COMMITTER_NAME="$APT_HUB_GIT_NAME"
+          export GIT_COMMITTER_EMAIL="$APT_HUB_GIT_EMAIL"
+          work="$PWD/tmp/apt-data-git"
+          rm -rf "$work"
+          mkdir -p "$work"
+          git -C "$work" init
+          AUTH=$(printf 'x-access-token:%s' "$GH_TOKEN" | openssl base64 -A)
+          git -C "$work" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git_auth() {
+            git -C "$work" -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${AUTH}" "$@"
+          }
+          copy_site() {
+            local name
+            local names=(pool dists apt-hub.gpg state.json index.html)
+            for name in "${names[@]}"; do
+              [[ -e "tmp/site/$name" ]] || { echo "候选站点缺少 $name" >&2; exit 1; }
+              rm -rf "$work/$name"
+              cp -a "tmp/site/$name" "$work/$name"
+            done
+            git -C "$work" add -- "${names[@]}"
+            if git -C "$work" rev-parse --verify HEAD >/dev/null 2>&1; then
+              git -C "$work" add -u -- "${names[@]}"
+            fi
+          }
+          refuse_non_whitelist() {
+            local rel dirty=0
+            while IFS= read -r rel; do
+              [[ -n "$rel" ]] || continue
+              case "$rel" in
+                pool|pool/*|dists|dists/*|apt-hub.gpg|state.json|index.html) ;;
+                *)
+                  echo "apt-data 含白名单外路径，拒绝保存: $rel" >&2
+                  dirty=1
+                  ;;
+              esac
+            done < <(git -C "$work" ls-files)
+            [[ "$dirty" -eq 0 ]] || exit 1
+          }
+          if [[ -s tmp/apt-data-base.sha ]]; then
+            base=$(tr -d '[:space:]' < tmp/apt-data-base.sha)
+            [[ "$base" =~ ^[0-9a-f]{40}$ ]] || { echo "apt-data 基线 SHA 非法" >&2; exit 1; }
+            git_auth fetch origin refs/heads/apt-data:refs/remotes/origin/apt-data
+            git -C "$work" checkout -B apt-data "$base"
+            refuse_non_whitelist
+            copy_site
+            refuse_non_whitelist
+            if git -C "$work" diff --cached --quiet; then
+              echo "apt-data 已与候选一致，无需新提交"
+            else
+              git -C "$work" -c "user.name=${APT_HUB_GIT_NAME}" -c "user.email=${APT_HUB_GIT_EMAIL}" commit -m "更新候选 APT 站点数据"
+            fi
+            if ! git_auth push origin apt-data; then
+              echo "apt-data 快进推送失败，禁止 force，请重跑" >&2
+              exit 1
+            fi
+          else
+            if git -C "$work" ls-remote --heads origin apt-data | grep -q .; then
+              echo "apt-data 在恢复后被创建，禁止把首轮快照覆到新分支上" >&2
+              exit 1
+            fi
+            git -C "$work" checkout -B apt-data
+            copy_site
+            refuse_non_whitelist
+            git -C "$work" -c "user.name=${APT_HUB_GIT_NAME}" -c "user.email=${APT_HUB_GIT_EMAIL}" commit -m "初始化候选 APT 站点数据"
+            if ! git_auth push -u origin apt-data; then
+              echo "创建 apt-data 失败（网络/鉴权/并发），不能当已发布" >&2
+              exit 1
+            fi
+          fi
+          saved=$(git -C "$work" rev-parse HEAD)
+          [[ "$saved" =~ ^[0-9a-f]{40}$ ]] || { echo "无法读取保存后的 apt-data SHA" >&2; exit 1; }
+          echo "apt_data_sha=$saved" >>"$GITHUB_OUTPUT"
+
+      - name: 上传 Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: tmp/site
+
+      - name: 清理临时密钥
+        if: always()
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$PWD/tmp/gnupg"
+          gpgconf --kill gpg-agent 2>/dev/null || true
+          rm -rf tmp/gnupg
+
+  deploy_pages:
+    name: 部署 GitHub Pages
+    needs: build_verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+  update_readme:
+    name: 部署成功后回写 README
+    needs:
+      - build_verify
+      - deploy_pages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: 安装 CI 临时依赖
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl jq
+
+      - name: 用已部署 state 更新 README
+        env:
+          APT_HUB_GIT_NAME: ${{ vars.APT_HUB_GIT_NAME }}
+          APT_HUB_GIT_EMAIL: ${{ vars.APT_HUB_GIT_EMAIL }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ -n "${APT_HUB_GIT_NAME:-}" && -n "${APT_HUB_GIT_EMAIL:-}" ]] || { echo "缺少 git 身份 vars" >&2; exit 1; }
+          case "${APT_HUB_GIT_NAME}${APT_HUB_GIT_EMAIL}" in
+            *github-actions*|*[Bb]ot*|*[Aa]gent*|*Cursor*|*cursoragent*)
+              echo "拒绝使用 bot/agent 提交身份" >&2
+              exit 1
+              ;;
+          esac
+          mkdir -p tmp/readme-site data
+          SHA="${{ needs.build_verify.outputs.apt_data_sha }}"
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "缺少已保存 apt-data SHA" >&2; exit 1; }
+          git fetch origin refs/heads/apt-data:refs/remotes/origin/apt-data
+          git cat-file -e "${SHA}^{commit}" || { echo "已部署 SHA 不在 apt-data 历史中" >&2; exit 1; }
+          git archive "$SHA" | tar -x -C tmp/readme-site
+          [[ -f tmp/readme-site/state.json ]] || { echo "apt-data 缺少 state.json" >&2; exit 1; }
+          chmod a+x scripts/render.sh
+          cp tmp/readme-site/state.json data/published.json
+          scripts/render.sh --state data/published.json --readme README.md --site tmp/readme-site
+          export GIT_AUTHOR_NAME="$APT_HUB_GIT_NAME"
+          export GIT_AUTHOR_EMAIL="$APT_HUB_GIT_EMAIL"
+          export GIT_COMMITTER_NAME="$APT_HUB_GIT_NAME"
+          export GIT_COMMITTER_EMAIL="$APT_HUB_GIT_EMAIL"
+          git add README.md data/published.json
+          if git diff --cached --quiet; then
+            echo "README 与已发布状态已一致"
+            exit 0
+          fi
+          git -c "user.name=${APT_HUB_GIT_NAME}" -c "user.email=${APT_HUB_GIT_EMAIL}" commit -m "回写已部署的软件列表"
+          if ! git push origin HEAD; then
+            echo "主分支有并发更新，禁止 force，请重跑工作流" >&2
+            exit 1
+          fi

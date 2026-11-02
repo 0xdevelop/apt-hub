@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "packages": [
+    {
+      "id": "rustdesk",
+      "repository": "rustdesk/rustdesk",
+      "package": "rustdesk",
+      "description": "开源远程桌面",
+      "source_url": "https://github.com/rustdesk/rustdesk",
+      "license": "AGPL-3.0",
+      "ubuntu_series": "supported",
+      "architectures": {
+        "amd64": "^rustdesk-[0-9][^-]*-x86_64\\.deb$",
+        "arm64": "^rustdesk-[0-9][^-]*-aarch64\\.deb$"
+      }
+    }
+  ]
+}

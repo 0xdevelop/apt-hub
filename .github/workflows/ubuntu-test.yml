@@ -1,0 +1,40 @@
+name: ubuntu-test
+
+on:
+  push:
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: ubuntu-test-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fixture_test:
+    name: 无私钥夹具测试
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: 安装 CI 临时依赖
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl jq gnupg dpkg-dev apt-utils
+
+      - name: 运行 A/B/C 夹具测试
+        run: |
+          set -euo pipefail
+          chmod a+x \
+            tests/ubuntu_test.sh tests/sync_test.sh tests/render_test.sh \
+            scripts/ubuntu_releases.sh scripts/verify_ubuntu.sh \
+            scripts/sync.sh scripts/render.sh git_tag.sh
+          tests/ubuntu_test.sh
+          tests/sync_test.sh
+          tests/render_test.sh
