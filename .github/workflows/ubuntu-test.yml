@@ -35,6 +35,33 @@ jobs:
             tests/ubuntu_test.sh tests/sync_test.sh tests/render_test.sh \
             scripts/ubuntu_releases.sh scripts/verify_ubuntu.sh \
             scripts/sync.sh scripts/render.sh git_tag.sh
-          tests/ubuntu_test.sh
-          tests/sync_test.sh
-          tests/render_test.sh
+          mkdir -p tmp
+          set +e
+          (
+            tests/ubuntu_test.sh &&
+            tests/sync_test.sh &&
+            tests/render_test.sh
+          ) >tmp/ci-tests.log 2>&1
+          rc=$?
+          set -e
+          cat tmp/ci-tests.log
+          if [[ "$rc" -eq 0 ]]; then
+            exit 0
+          fi
+          tail -n 60 tmp/ci-tests.log >tmp/ci-diag-tail.txt
+          diag=$(head -c 16384 tmp/ci-diag-tail.txt)
+          rm -f tmp/ci-diag-tail.txt
+          if [[ -z "$diag" ]]; then
+            diag='（ci-tests.log 末尾为空）'
+          fi
+          diag=${diag//'%'/'%25'}
+          diag=${diag//$'\r'/'%0D'}
+          diag=${diag//$'\n'/'%0A'}
+          title='夹具测试失败'
+          title=${title//'%'/'%25'}
+          title=${title//$'\r'/'%0D'}
+          title=${title//$'\n'/'%0A'}
+          title=${title//':'/'%3A'}
+          title=${title//','/'%2C'}
+          printf '%s\n' "::error title=${title}::${diag}"
+          exit "$rc"
