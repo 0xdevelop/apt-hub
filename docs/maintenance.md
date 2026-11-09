@@ -17,26 +17,38 @@
 
 ## 发布数据与列表
 
-- `apt-data` 分支保存候选仓库及不可变历史数据，包文件不进入主分支。
+- `apt-data` 分支保存签名索引、公开公钥、分流列表、已发布元数据和 `add_source.sh`，不保存 `.deb`；安装包由客户端从官方地址获取。
 - `data/published.json` 只记录成功部署后回写的状态，不手动填入尚未生效的软件。
 - `templates/readme_packages.md`、`templates/readme_empty.md` 控制列表表头与空态；`templates/index.html` 控制静态页。
 - `scripts/render.sh` 只替换 README 中 `APT-HUB:PACKAGES:BEGIN` / `END` 两条独占行之间的区域，区域外正文由人维护。缺失或重复标记会拒绝写入。
 
 签名与候选元数据每日续期，软件的 `updated_at` 不因扫描、重签而变化。Pages 部署失败不能更新主分支为“已生效”；回写失败也不强推覆盖同事提交，修复后重跑使状态收敛。
 
+## 一条命令检查并更新候选
+
+Actions 和本地维护共用 `scripts/update_sources.sh`。本地运行时提供已有签名密钥目录和公开指纹；指纹不是 Secret，Actions 会从导入的签名私钥取得。
+
+```bash
+bash scripts/update_sources.sh --catalog config/packages.json --previous tmp/previous --work-dir tmp/update-001 --gnupghome '<签名密钥目录>' --fingerprint '<公开指纹>' --site-url 'https://packages.example.test/tools'
+```
+
+其余参数是候选目录、站点和发行版数据输入；入口只生成候选，不上传、不推送、不部署。
+
+当前入口已接通官方 `.deb` 路径；Go 构包与统一发布衔接仍在实施，不能把候选成功等同于两款软件均已上线。
+
 ## 本地验证
 
-需要已有 Bash、curl、jq、GnuPG、dpkg 工具、`apt-ftparchive` 和 Ubuntu 官方 archive keyring。项目不自动在本机安装依赖。
+需要已有 Bash、curl、jq、GnuPG、dpkg 工具、`apt-ftparchive`、`readelf`、`xxd`、PATH 中可调用的 ShellCheck 和 Ubuntu 官方 archive keyring。项目不自动在本机安装依赖。
 
-测试在项目 `tmp/` 生成明确标注的测试包和测试密钥；不安装测试包、不改变系统软件源。Ubuntu 测试需要访问官方软件源，网络失败不是测试通过，也不应被标成软件依赖不兼容。
+测试在项目 `tmp/` 使用临时测试密钥和测试包；不安装测试包、不改变系统软件源。Ubuntu 测试需要访问官方软件源，网络失败不是测试通过。
 
 执行完整既有测试：
 
 ```bash
-bash tests/sync_test.sh && bash tests/render_test.sh && bash tests/ubuntu_test.sh
+bash tests/sync_test.sh && bash tests/render_test.sh && bash tests/workflow_test.sh && bash tests/add_source_test.sh && bash tests/update_sources_test.sh && bash tests/go_deb_test.sh && bash tests/ubuntu_test.sh
 ```
 
-临时测试密钥不可当生产密钥。开发用 `tmp/` 可再生成，不应承载唯一的生产密钥或人工维护数据；测试脚本自己的工作子目录不要混放用户文件。
+测试密钥只用于本地 `tmp/`，不放进生产 Actions Secret；测试目录不要混放用户文件。
 
 ## 本仓脚本版本
 
@@ -48,6 +60,6 @@ bash git_tag.sh --version 0.1.0
 
 该命令只在本地创建对应标签；不会提交、推送、删除或重写历史标签。软件源自动更新不调用它，本次开发也不自动运行本仓发版。
 
-## 容量与迁移
+## 上游与历史索引
 
-保留旧包和旧 by-hash 是兼容旧客户端的必要条件，不在定时同步时直接删掉。Pages 站点上限与 GitHub 单文件限制可能限制可接入包的体积；不通过拆包或变更上游 `.deb` 规避限制。若需要更大的承载容量，应先明确静态文件托管迁移方案，而不是扩成管理平台。
+保留必要的历史 by-hash 元数据。安装包不进入 Git 或 Pages，因此 Git 单文件大小不是接入软件包的限制；上游删除历史包后，本项目不承诺仍能下载该版本，也不静默转用第三方镜像。

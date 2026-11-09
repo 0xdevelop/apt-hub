@@ -1,8 +1,12 @@
 # apt-hub
 
-用少量 Shell 脚本和 GitHub Actions，为没有官方 Ubuntu APT 源、但发布官方 `.deb` 的软件维护第三方签名源。RustDesk 是首个接入对象；同步逻辑由清单驱动，不是单软件安装脚本。
+收集有官方发布下载、但没有官方 Ubuntu APT 源的软件，为其补齐符合 Ubuntu 规则的安装与升级来源。首批目标为 **Go（golang）与 RustDesk**，后续按软件条目和必要的适配脚本接入。
 
-**不做管理平台，不运行后端服务或数据库。** GitHub Pages 承载 APT 文件与简洁静态列表；软件更新由 Actions 定时扫描，README 列表由模板脚本维护。
+官方已有 `.deb` 时保留原包并从官方直下；只有归档包时需要生成真实 Debian 适配包，分别记录官方原始资产与适配包的版本、摘要和下载地址，不能把归档改后缀冒充 `.deb`。源码仓和 Pages 不存放安装包，适配包的正式交付路径须在发布前落实。
+
+> 当前正在从原镜像实现调整为元数据适配层，尚未完成新版验收；请先不要运行旧版发布工作流。软件列表保持真实发布状态。
+
+维护以 Shell + GitHub Actions 为主，优先复用标准 APT 的索引与下载分流能力；静态页和 README 展示已生效版本。
 
 ## 已生效的软件
 
@@ -12,18 +16,52 @@
 尚未完成首次发布
 <!-- APT-HUB:PACKAGES:END -->
 
+## 新增其他软件
+
+首批只做 **Go 与 RustDesk**，不预先接入其他软件。当前可用的条目模板针对官方 GitHub Releases `.deb`；这只是现有适配类型，不是项目只接收 `.deb` 的范围限制。Go 官方归档已能构建独立的 `apt-hub-go` Debian 包，并通过本地隔离验证；统一维护链、正式包下载地址和发布衔接尚未完成，当前不能宣称已上线。
+
+以后接入同类 `.deb` 软件，将下面的对象复制到 `config/packages.json` 的 `packages` 数组中，填写真实官方信息并保留已有条目，无需再复制一套同步脚本：
+
+```json
+{
+  "id": "example-app",
+  "repository": "official-owner/example-app",
+  "package": "example-app",
+  "description": "软件用途的简短说明",
+  "source_url": "https://github.com/official-owner/example-app",
+  "license": "MIT",
+  "ubuntu_series": "supported",
+  "architectures": {
+    "amd64": "^example-app_[0-9.]+_amd64\\.deb$",
+    "arm64": "^example-app_[0-9.]+_arm64\\.deb$"
+  }
+}
+```
+
+以上名称、许可和文件名均为占位示例，必须按上游实际情况填写：
+
+1. `id` 是唯一源标识，以 ASCII 字母或数字开头，只含字母、数字、`_`、`.`、`-`，不能含 `..`；`package` 必须等于官方包内的 `Package`。
+2. `repository` 必须是软件官方仓库。每个架构的正则须恰好匹配一个正式版本 `.deb`，且官方资产提供 SHA256 digest；缺摘要或匹配不唯一时拒绝发布，不自行补一个“官方摘要”。只填写上游实际提供的架构。
+3. `ubuntu_series` 可用 `"supported"`，也可按上游限制填写当前标准支持期内的代号数组；发布前仍逐项验证依赖。版本、文件大小和摘要由脚本读取，不手填、不把预发布版本当稳定版。
+4. 提交条目后，在自己的仓库手动运行 Actions 的 `ubuntu-publish`，或等待定时执行。维护侧共用 `scripts/update_sources.sh`，一次完成同步、验证和列表生成；本地显式参数示例见[维护说明](docs/maintenance.md#一条命令检查并更新候选)，生产签名与 Pages 的启用见[首次启用](docs/nees_user_read.md)。
+5. 只有部署成功，软件才进入上面的已生效列表；使用者复制对应的“一键加源”命令，此后按普通 APT 安装、升级。
+
+若上游只有 `tar.gz`，或使用其他官方发布渠道，应增加对应来源适配与必要构包步骤，再接入同一校验和发布流程；不能把当前模板当作已经支持这些来源的证据，也不为它们另造一套升级器。
+
 ## 文档
 
-- [首次启用与需要用户处理的事项](docs/nees_user_read.md)：签名密钥、Pages、提交身份及再分发条件。
+- [首次启用](docs/nees_user_read.md)：一个签名私钥和 Pages。
 - [维护说明](docs/maintenance.md)：软件清单、模板区域、定时更新与脚本版本的职责。
 - [本次验证记录](docs/verification.md)：真实包、Ubuntu/架构矩阵、隔离 APT 下载与未覆盖事项。
 - [实施计划与验收边界](docs/plan.md)：需求出处、Ubuntu 支持对齐、并行实施和失败处理。
 
 ## 更新流程
 
-软件清单 → 官方 GitHub Release 真实资产 → SHA256 与包身份/架构校验 → 签名 APT 候选仓库 → 对应 Ubuntu 版本与架构的官方源依赖解析 → Pages 部署 → 回写已发布状态 → 模板更新本列表。
+维护侧：软件条目 → 查询官方版本 → 校验原始资产 → 必要时构建 Debian 适配包 → 核对包版本、身份、架构和摘要 → 签名 APT 元数据 → Ubuntu 依赖与升级验证 → 发布候选 → 回写已生效状态和列表。维护入口统一执行这些步骤，失败不把半成品标为已生效。
 
-包原样保留，不执行包内安装脚本。历史包与 by-hash 索引保留，避免新发布打断仍读取旧索引的客户端；签名续期不冒充软件版本更新。任何一步失败都不能将候选版本写成“已生效”。
+使用侧：添加源后执行 `sudo apt update && sudo apt upgrade`；首次安装执行 `sudo apt install <软件包名>`。软件更新遵循 Debian 包版本比较、依赖关系和签名校验，不要求用户另跑专用升级器。没有版本变化时不伪造软件更新时间，签名索引仍定期续期。
+
+APT 的索引请求与安装包请求分流；原样官方包继续从官方获取，构包来源不得冒称官方 `.deb`。CI 临时下载不进入数据分支或 Pages；保留历史 by-hash 元数据，不承诺替上游保留被删除的官方安装包。任何一步失败都不能将候选版本写成“已生效”。
 
 ## Ubuntu 与软件支持
 
@@ -38,4 +76,4 @@
 
 ## 非破坏性原则
 
-本地开发与验收不改系统 APT 源、keyring 或 dpkg 状态，不安装 RustDesk，不改 Git/SSH、shell 配置或 OpenClash。生产签名密钥、Pages 设置及客户端添加源由用户掌握；首次部署前没有可承诺生效的公网源地址。
+本地开发与验收不改系统 APT 源、keyring 或 dpkg 状态，不安装 RustDesk，不改 Git/SSH、shell 配置或 OpenClash。生产签名私钥由用户放在 Actions Secret 中；公钥和指纹随源公开。首次部署前没有可承诺生效的公网源地址。

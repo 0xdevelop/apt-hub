@@ -26,21 +26,35 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates curl jq gnupg dpkg-dev apt-utils
+            ca-certificates curl jq gnupg dpkg-dev apt-utils shellcheck binutils xxd
 
-      - name: 运行 A/B/C 夹具测试
+      - name: ShellCheck 全仓 tracked shell
+        run: |
+          set -euo pipefail
+          mapfile -t scripts < <(
+            git ls-files -z -- '*.sh' | tr '\0' '\n' | awk 'NF'
+          )
+          [[ "${#scripts[@]}" -gt 0 ]] || { echo "未找到 tracked *.sh" >&2; exit 1; }
+          shellcheck -s bash -- "${scripts[@]}"
+
+      - name: 运行 A/B/C 夹具与 workflow 消费者测试
         run: |
           set -euo pipefail
           chmod a+x \
             tests/ubuntu_test.sh tests/sync_test.sh tests/render_test.sh \
+            tests/workflow_test.sh tests/add_source_test.sh tests/update_sources_test.sh \
             scripts/ubuntu_releases.sh scripts/verify_ubuntu.sh \
-            scripts/sync.sh scripts/render.sh git_tag.sh
+            scripts/sync.sh scripts/render.sh scripts/add_source.sh \
+            scripts/update_sources.sh git_tag.sh
           mkdir -p tmp
           set +e
           (
             tests/ubuntu_test.sh &&
             tests/sync_test.sh &&
-            tests/render_test.sh
+            tests/render_test.sh &&
+            tests/workflow_test.sh &&
+            tests/add_source_test.sh &&
+            tests/update_sources_test.sh
           ) >tmp/ci-tests.log 2>&1
           rc=$?
           set -e
@@ -56,7 +70,14 @@ jobs:
                 n++
               }
             }
-            END { if (n > 0) print "---" }
+            /: (error|warning|note): / {
+              if (s < 20) {
+                if (s == 0) print "ShellCheck:"
+                print NR ":" $0
+                s++
+              }
+            }
+            END { if (n > 0 || s > 0) print "---" }
           ' tmp/ci-tests.log >tmp/ci-diag-tail.txt
           tail -n 40 tmp/ci-tests.log >>tmp/ci-diag-tail.txt
           diag=$(head -c 16384 tmp/ci-diag-tail.txt)
@@ -67,11 +88,11 @@ jobs:
           diag=${diag//'%'/'%25'}
           diag=${diag//$'\r'/'%0D'}
           diag=${diag//$'\n'/'%0A'}
-          title='夹具测试失败'
-          title=${title//'%'/'%25'}
-          title=${title//$'\r'/'%0D'}
-          title=${title//$'\n'/'%0A'}
-          title=${title//':'/'%3A'}
-          title=${title//','/'%2C'}
-          printf '%s\n' "::error title=${title}::${diag}"
+          printf '%s\n' "::error title=夹具测试失败::${diag}"
           exit "$rc"
+
+      - name: Go 离线构包与 APT 升级夹具
+        run: |
+          set -euo pipefail
+          chmod a+x scripts/build_go_deb.sh tests/go_deb_test.sh
+          tests/go_deb_test.sh

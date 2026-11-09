@@ -129,6 +129,7 @@ if [[ -e "$html_dst" && ! -f "$html_dst" ]]; then
   die "site/index.html 不是普通文件"
 fi
 
+# shellcheck disable=SC2016 # jq 程序字面量，故意单引号不插值
 validate_jq='
 def fail($m): error($m);
 def need_string($path):
@@ -146,24 +147,56 @@ def need_utc($path):
 def need_sha256($path):
   need_string($path)
   | if (test("^[0-9a-fA-F]{64}$") | not) then fail($path + " 必须是 64 位 hex") else . end;
+def need_decimal_size($path):
+  need_string($path)
+  | if (test("^(0|[1-9][0-9]*)$") | not) then
+      fail($path + " 必须是十进制非负整数字符串")
+    else . end;
 def need_string_list($path):
   if type != "array" or length == 0 then fail($path + " 必须是非空数组") else . end
   | if (map(type == "string" and . != "") | all | not) then fail($path + " 元素必须是非空字符串") else . end
   | if (unique | length) != length then fail($path + " 不能重复") else . end;
+def need_official_filename($path):
+  need_string($path)
+  | if test("^https?://") then fail($path + " 不能是绝对 URL") else . end
+  | if test("^pool/") or test("/pool/") then fail($path + " 不能是 pool 路径") else . end
+  | if test("(^|/|\\\\)\\.\\.(/|$|\\\\)") then fail($path + " 不能含父目录段") else . end
+  | if test("[[:space:]]") then fail($path + " 不能含空白") else . end
+  | .;
+def need_apt_source_uri($path; $id):
+  need_string($path)
+  | . as $uri
+  | ("/repos/" + $id + "/mirror.list") as $suffix
+  | if (test("^mirror\\+(https|http)://") | not) or (endswith($suffix) | not) then
+      fail($path + " 必须是 mirror+https|http://站点/repos/" + $id + "/mirror.list")
+    else . end
+  | (sub("^mirror\\+"; "") | rtrimstr($suffix)) as $site
+  | if ($site | test("^https?://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]+)?(/[A-Za-z0-9._~/-]+)?$") | not) then
+      fail($path + " 站点根必须是无用户信息、查询、片段与编码字符的安全 URL")
+    else . end
+  | ($site | sub("^https?://[^/]+"; "")) as $site_path
+  | if ($site_path | test("(^|/)\\.\\.?(/|$)|//") or endswith("/")) then
+      fail($path + " 站点根不能含点目录或空路径段")
+    else . end
+  | if ($site | startswith("http://"))
+       and ($site | test("^http://(127\\.0\\.0\\.1|localhost)(:[0-9]+)?(/|$)") | not) then
+      fail($path + " HTTP 仅允许本地隔离夹具")
+    else $uri end;
 def need_asset($prefix):
   if type != "object" then fail($prefix + " 必须是对象") else . end
   | (.architecture | need_string($prefix + ".architecture")) as $_a
-  | (.filename | need_string($prefix + ".filename")) as $_f
+  | (.filename | need_official_filename($prefix + ".filename")) as $_f
   | (.sha256 | need_sha256($prefix + ".sha256")) as $_h
-  | (if (.size | type) != "number" or (.size | floor) != .size or .size < 0 then
-       fail($prefix + ".size 必须是非负整数")
-     else . end) as $_s
+  | (.size | need_decimal_size($prefix + ".size")) as $_s
   | (.url | need_https($prefix + ".url")) as $_u
   | .;
 def need_package($i):
   ("packages[" + ($i | tostring) + "]") as $p
   | if type != "object" then fail($p + " 必须是对象") else . end
-  | (.id | need_string($p + ".id")) as $_id
+  | (.id | need_string($p + ".id")
+      | if (test("^[A-Za-z0-9][A-Za-z0-9_.-]*$") | not) or contains("..") then
+          fail($p + ".id 不是安全源 id")
+        else . end) as $id
   | (.package | need_string($p + ".package")) as $_pkg
   | (.repository | need_string($p + ".repository")
       | if (test("^[^/[:space:]]+/[^/[:space:]]+$") | not) then
@@ -175,13 +208,17 @@ def need_package($i):
   | (.source_url | need_https($p + ".source_url")) as $_src
   | (if (.license | type) != "string" or .license == "" then fail($p + ".license 必须是非空字符串") else . end) as $_lic
   | (.updated_at | need_utc($p + ".updated_at")) as $_u
-  | (.ubuntu_series | need_string_list($p + ".ubuntu_series")) as $_s
+  | (.ubuntu_series | need_string_list($p + ".ubuntu_series")
+      | if (map(test("^[a-z][a-z0-9]*$")) | all | not) then
+          fail($p + ".ubuntu_series 必须是安全 Ubuntu 代号")
+        else . end) as $_s
   | (.architectures | need_string_list($p + ".architectures")) as $_arch
+  | (.apt_source_uri | need_apt_source_uri($p + ".apt_source_uri"; $id)) as $_asu
   | if (.assets | type) != "array" then fail($p + ".assets 必须是数组") else . end
   | (.assets | to_entries | map(. as $e | $e.value | need_asset($p + ".assets[" + ($e.key | tostring) + "]"))) as $_assets
   | .;
 if type != "object" then fail("state 必须是对象") else . end
-| if .schema_version != 1 then fail("schema_version 必须为 1") else . end
+| if .schema_version != "2" then fail("schema_version 必须为字符串 2") else . end
 | if (.packages | type) != "array" then fail("packages 必须是数组") else . end
 | if ((.packages | map(select(type == "object") | .id) | unique | length)
       != (.packages | map(select(type == "object") | .id) | length)) then
@@ -191,7 +228,24 @@ if type != "object" then fail("state 必须是对象") else . end
 | true
 '
 
-md_jq='
+# shellcheck disable=SC2016 # jq 程序字面量，故意单引号不插值
+command_jq='
+def one_click_command:
+  . as $pkg
+  | (.apt_source_uri | sub("^mirror\\+"; "")
+      | rtrimstr("/repos/" + $pkg.id + "/mirror.list")) as $site
+  | if ($site | startswith("https://")) then
+      ("curl -fsSL --proto '\''=https'\'' --proto-redir '\''=https'\'' -o add_source.sh '\''"
+        + $site + "/add_source.sh'\'' && chmod a+x ./add_source.sh && sudo ./add_source.sh --site-url '\''"
+        + $site + "'\'' --software '\''" + $pkg.id + "'\''")
+    else null end;
+'
+
+# shellcheck disable=SC2016 # jq 程序字面量，故意单引号不插值
+md_jq="$command_jq"'
+def one_click_cell:
+  one_click_command
+  | if . == null then "HTTP 夹具不支持一键加源" else "`" + . + "`" end;
 def md_cell:
   tostring
   | gsub("\r"; "")
@@ -208,14 +262,29 @@ def md_cell:
   | gsub("`"; "\\`")
   | gsub("\\*"; "\\*")
   | gsub("_"; "\\_");
+def sources_base:
+  .apt_source_uri
+  | sub("^mirror\\+"; "")
+  | sub("/mirror\\.list$"; "");
+def sources_cell:
+  . as $pkg
+  | ($pkg | sources_base) as $base
+  | ($pkg.ubuntu_series
+      | map("[" + (. | md_cell) + "](" + ($base + "/" + . + ".sources") + ")")
+      | join(" / "));
 if (.packages | length) == 0 then empty
 else
   .packages[]
-  | "| [\(.package | md_cell)](\(.release_url)) | \(.version | md_cell) | \(.ubuntu_series | join(", ") | md_cell) | \(.architectures | join(", ") | md_cell) | \(.updated_at | md_cell) | \(.description | md_cell) |"
+  | "| [\(.package | md_cell)](\(.release_url)) | \(.version | md_cell) | \(.ubuntu_series | join(", ") | md_cell) | \(.architectures | join(", ") | md_cell) | \(.updated_at | md_cell) | \(.description | md_cell) | \(sources_cell) | \(one_click_cell) |"
 end
 '
 
-html_jq='
+# shellcheck disable=SC2016 # jq 程序字面量，故意单引号不插值
+html_jq="$command_jq"'
+def one_click_cell:
+  one_click_command
+  | if . == null then "HTTP 夹具不支持一键加源"
+    else "<code>" + (. | @html | gsub("&apos;"; "&#39;")) + "</code>" end;
 def html_escape:
   tostring
   | gsub("&"; "&amp;")
@@ -223,18 +292,28 @@ def html_escape:
   | gsub(">"; "&gt;")
   | gsub("\""; "&quot;")
   | gsub("'\''"; "&#39;");
+def sources_base:
+  .apt_source_uri
+  | sub("^mirror\\+"; "")
+  | sub("/mirror\\.list$"; "");
+def sources_cell:
+  . as $pkg
+  | ($pkg | sources_base) as $base
+  | ($pkg.ubuntu_series
+      | map("<a href=\"" + ($base + "/" + . + ".sources" | html_escape) + "\">" + (. | html_escape) + "</a>")
+      | join(" / "));
 if (.packages | length) == 0 then
   "<p>" + ($empty | sub("\n+$";"") | html_escape) + "</p>"
 else
   (
     [
       "<table>",
-      "<thead><tr><th>软件</th><th>版本</th><th>Ubuntu</th><th>架构</th><th>最后更新UTC</th><th>简单说明</th></tr></thead>",
+      "<thead><tr><th>软件</th><th>版本</th><th>Ubuntu</th><th>架构</th><th>最后更新UTC</th><th>简单说明</th><th>添加源配置</th><th>一键加源</th></tr></thead>",
       "<tbody>"
     ]
     + [
         .packages[]
-        | "<tr><td><a href=\"\(.release_url | html_escape)\">\(.package | html_escape)</a></td><td>\(.version | html_escape)</td><td>\(.ubuntu_series | join(", ") | html_escape)</td><td>\(.architectures | join(", ") | html_escape)</td><td>\(.updated_at | html_escape)</td><td>\(.description | html_escape)</td></tr>"
+        | "<tr><td><a href=\"\(.release_url | html_escape)\">\(.package | html_escape)</a></td><td>\(.version | html_escape)</td><td>\(.ubuntu_series | join(", ") | html_escape)</td><td>\(.architectures | join(", ") | html_escape)</td><td>\(.updated_at | html_escape)</td><td>\(.description | html_escape)</td><td>\(sources_cell)</td><td>\(one_click_cell)</td></tr>"
       ]
     + ["</tbody>", "</table>"]
   ) | join("\n")

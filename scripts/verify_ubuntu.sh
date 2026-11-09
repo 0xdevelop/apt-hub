@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 在隔离 APT 根下，用 Ubuntu 官方签名源 + 站点 keyring 对每个 suite×arch 做精确版本依赖解析。
-# 不安装包、不运行维护脚本、不写系统 apt/dpkg；网络失败不记成依赖不兼容。
+# 在隔离 APT 根下，用 Ubuntu 官方签名源 + 每软件 repos 元数据（mirror+file 覆盖 type:index）做精确版本依赖解析。
+# 不修改候选 mirror.list/签名；不安装包；不写系统 apt/dpkg；网络失败不记成依赖不兼容。
 set -euo pipefail
 export LC_ALL=C
 export LANG=C
@@ -214,16 +214,24 @@ printf 'pid=%s\nstarted=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$work/.apt
 
 state="$site/state.json"
 keyring="$site/apt-hub.gpg"
+repos_root="$site/repos"
 [[ -f "$state" && ! -L "$state" ]] || die "缺少站点 state.json"
 [[ -f "$keyring" && ! -L "$keyring" && -s "$keyring" ]] || die "缺少站点 apt-hub.gpg"
+[[ -d "$repos_root" && ! -L "$repos_root" ]] || die "缺少站点 repos/ 目录"
 if find "$site" -type l -print -quit | grep -q .; then
   die "站点含符号链接，拒绝验证"
 fi
+if find "$site" -name '*.deb' -print -quit | grep -q .; then
+  die "候选站点含 .deb，拒绝验证"
+fi
 
-jq -e '.schema_version==1 and (.releases|type=="array" and length>0)
+# shellcheck disable=SC2016
+jq -e '(.schema_version==1 or .schema_version=="1") and (.releases|type=="array" and length>0)
   and all(.releases[]; .series and .version and .release_date and .eol_date)' \
   "$releases" >/dev/null || die "releases.json 结构无效"
-jq -e '.schema_version==1 and (.packages|type=="array")' "$state" >/dev/null || die "state.json 结构无效"
+# shellcheck disable=SC2016
+jq -e '.schema_version=="2" and (.packages|type=="array")' "$state" >/dev/null \
+  || die "state.json 须为 schema_version 字符串 \"2\""
 
 today=$(date -u +%Y-%m-%d)
 checked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -335,8 +343,8 @@ prepare_root() {
   : >"$root/etc/apt/trusted.gpg"
 }
 
-write_sources() {
-  local dest="$1" series="$2" arch="$3" site_path="$4" site_key="$5"
+write_ubuntu_sources() {
+  local dest="$1" series="$2" arch="$3"
   local archive security
   if [[ "$arch" == "amd64" ]]; then
     archive="$AMD64_ARCHIVE"
@@ -351,8 +359,41 @@ write_sources() {
 deb [arch=${arch} signed-by=${UBUNTU_KEYRING}] ${archive} ${series} ${COMPONENTS}
 deb [arch=${arch} signed-by=${UBUNTU_KEYRING}] ${archive} ${series}-updates ${COMPONENTS}
 deb [arch=${arch} signed-by=${UBUNTU_KEYRING}] ${security} ${series}-security ${COMPONENTS}
-deb [arch=${arch} signed-by=${site_key}] file:${site_path} ${series} main
 EOF
+}
+
+# 从候选 mirror.list 抽出 type:deb 行（TAB 分隔），不改候选文件。
+extract_deb_mirror_lines() {
+  local mirror_list="$1"
+  local out="$2"
+  : >"$out"
+  local line uri meta
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -n "$line" ]] || continue
+    [[ "$line" == \#* ]] && continue
+    uri=${line%%$'\t'*}
+    meta=${line#*$'\t'}
+    if [[ "$uri" == "$line" ]]; then
+      die "mirror.list 缺少 TAB 分隔: $mirror_list"
+    fi
+    if [[ "$meta" == *type:deb* ]]; then
+      printf '%s\t%s\n' "$uri" "$meta" >>"$out"
+    fi
+  done <"$mirror_list"
+  [[ -s "$out" ]] || die "mirror.list 无 type:deb 行: $mirror_list"
+}
+
+write_work_mirror_list() {
+  local repo_abs="$1" candidate_mirror="$2" dest="$3"
+  local deb_tmp
+  deb_tmp=$(mktemp -- "$tmp_root/ubuntu-verify-deb-lines.XXXXXX")
+  extract_deb_mirror_lines "$candidate_mirror" "$deb_tmp"
+  {
+    printf 'file:%s/\tpriority:1 type:index\n' "$repo_abs"
+    cat "$deb_tmp"
+  } >"$dest"
+  rm -f -- "$deb_tmp"
+  [[ -s "$dest" ]] || die "生成 work mirror.list 失败"
 }
 
 write_apt_conf() {
@@ -403,10 +444,10 @@ EOF
 combo_tmp=$(mktemp -- "$tmp_root/ubuntu-verify-combos.XXXXXX")
 trap 'rm -f -- "$combo_tmp"' EXIT
 
+# shellcheck disable=SC2016
 if ! jq -c --argjson supported "$supported_json" '
   .packages as $pkgs
   | ([$pkgs[].ubuntu_series[]] | unique) as $declared_series
-  | ([$pkgs[].architectures[]] | unique) as $declared_arch
   | ($declared_series - $supported) as $bad
   | if ($bad | length) > 0 then
       error("state 含非当前标准支持 series: " + ($bad | join(",")))
@@ -414,9 +455,12 @@ if ! jq -c --argjson supported "$supported_json" '
       [
         $pkgs[]
         | . as $p
+        | ($p.id // empty) as $id
         | ($p.package // empty) as $name
         | ($p.version // empty) as $ver
-        | if ($name == "" or $ver == "") then error("state 缺 package/version: " + ($p.id // "?")) else . end
+        | if ($id == "" or $name == "" or $ver == "") then
+            error("state 缺 id/package/version")
+          else . end
         | if ($p.ubuntu_series | type) != "array" or ($p.architectures | type) != "array" then
             error("state ubuntu_series/architectures 必须是数组")
           else . end
@@ -425,7 +469,7 @@ if ! jq -c --argjson supported "$supported_json" '
         | if ([($p.assets // [])[] | .architecture] | index($a)) == null then
             error("package " + $name + " 声明了 " + $a + " 但没有对应 asset")
           else
-            {series:$s, architecture:$a, package:$name, version:$ver, id:($p.id // $name)}
+            {series:$s, architecture:$a, package:$name, version:$ver, id:$id}
           end
       ]
     end
@@ -434,8 +478,44 @@ if ! jq -c --argjson supported "$supported_json" '
 fi
 
 if jq -e 'length==0' "$combo_tmp" >/dev/null; then
+  if [[ "$(jq '.packages|length' "$state")" -eq 0 ]]; then
+    summary="$work/summary.json"
+    # shellcheck disable=SC2016
+    write_json "$summary" \
+      --argjson schema_version 1 --arg checked_at "$checked_at" \
+      --argjson ok true --argjson results '[]' \
+      '{schema_version:$schema_version,checked_at:$checked_at,ok:$ok,results:$results}'
+    echo "verify_ubuntu: 证据 $summary ok=true (无软件)"
+    exit 0
+  fi
   die "state 没有可验证的 suite×arch 组合"
 fi
+
+# 校验每个 id 的 repos 布局与候选 mirror.list，并记录候选 mirror 哈希（事后对照未改）。
+mirror_hashes="$work/candidate-mirror.sha256"
+: >"$mirror_hashes"
+mapfile -t pkg_ids < <(jq -r '[.[].id] | unique[]' "$combo_tmp")
+for pkg_id in "${pkg_ids[@]}"; do
+  # 与 sync validate_catalog 同一安全路径字符集；额外拒 ..（字符集允许点）。
+  [[ "$pkg_id" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ && "$pkg_id" != *..* ]] \
+    || die "非法 package id: $pkg_id"
+  repo_dir="$repos_root/$pkg_id"
+  [[ -d "$repo_dir" && ! -L "$repo_dir" ]] || die "缺少 repos/$pkg_id"
+  candidate_mirror="$repo_dir/mirror.list"
+  [[ -f "$candidate_mirror" && ! -L "$candidate_mirror" && -s "$candidate_mirror" ]] \
+    || die "缺少 repos/$pkg_id/mirror.list"
+  while IFS= read -r fn; do
+    [[ -n "$fn" ]] || continue
+    case "$fn" in
+      pool/*|http://*|https://*|/*)
+        die "repos/$pkg_id asset.filename 非法（禁止 pool/绝对URL）: $fn"
+        ;;
+    esac
+  done < <(jq -r --arg id "$pkg_id" '
+    .packages[] | select(.id==$id) | .assets[]?.filename // empty
+  ' "$state")
+  sha256sum -- "$candidate_mirror" >>"$mirror_hashes"
+done
 
 results_json='[]'
 overall_ok=true
@@ -459,12 +539,28 @@ for group in "${groups[@]}"; do
   arch=${group##* }
   slot="$work/${series}-${arch}"
   root="$slot/apt-root"
-  mkdir -p -- "$slot/bin" "$root"
+  mkdir -p -- "$slot/bin" "$root" "$root/etc/apt/sources.list.d"
   wrapper="$slot/bin/dpkg"
   write_dpkg_wrapper "$wrapper"
   prepare_root "$root"
-  write_sources "$root/etc/apt/sources.list" "$series" "$arch" "$site" "$site_key_copy"
+  write_ubuntu_sources "$root/etc/apt/sources.list" "$series" "$arch"
   write_apt_conf "$root/etc/apt/apt.conf" "$root" "$arch" "$wrapper" "$sandbox_user"
+
+  # 本 suite×arch 涉及的每个软件：work 内 mirror+file，type:index->本地 repos/<id>，type:deb 沿用候选。
+  mapfile -t slot_ids < <(jq -r --arg s "$series" --arg a "$arch" \
+    '[.[] | select(.series==$s and .architecture==$a) | .id] | unique[]' "$combo_tmp")
+  for pkg_id in "${slot_ids[@]}"; do
+    repo_abs=$(realpath -e -- "$repos_root/$pkg_id")
+    candidate_mirror="$repos_root/$pkg_id/mirror.list"
+    work_mirror="$slot/${pkg_id}.mirror.list"
+    write_work_mirror_list "$repo_abs" "$candidate_mirror" "$work_mirror"
+    dist_dir="$repo_abs/dists/$series"
+    [[ -f "$dist_dir/InRelease" || -f "$dist_dir/Release" ]] \
+      || die "repos/$pkg_id 缺少 dists/$series 签名元数据"
+    printf 'deb [arch=%s signed-by=%s] mirror+file:%s %s main\n' \
+      "$arch" "$site_key_copy" "$work_mirror" "$series" \
+      >"$root/etc/apt/sources.list.d/apt-hub-${pkg_id}.list"
+  done
 
   pkgs_file="$slot/packages.txt"
   jq -r --arg s "$series" --arg a "$arch" \
@@ -538,19 +634,30 @@ for group in "${groups[@]}"; do
     overall_ok=false
   fi
 
+  # shellcheck disable=SC2016
   write_json "$result_file" \
     --arg series "$series" --arg architecture "$arch" \
     --argjson ok "$( [[ "$ok" == true ]] && echo true || echo false )" \
     --arg failure_class "$failure_class" --arg error "$error_msg" \
     --argjson update_exit "$update_rc" --argjson simulate_exit "$simulate_rc" \
-    --argjson packages "$(jq -c --arg s "$series" --arg a "$arch" '[.[] | select(.series==$s and .architecture==$a) | {id,package,version}]' "$combo_tmp")" \
+    --argjson packages "$(jq -c --arg s "$series" --arg a "$arch" \
+      '[.[] | select(.series==$s and .architecture==$a) | {id,package,version}]' "$combo_tmp")" \
     '{series:$series,architecture:$architecture,ok:$ok,failure_class:(if $failure_class=="" then null else $failure_class end),error:(if $error=="" then null else $error end),update_exit:$update_exit,simulate_exit:$simulate_exit,packages:$packages}'
 
   results_json=$(jq -c --slurpfile r "$result_file" '. + $r' <<<"$results_json")
   unset APT_CONFIG
 done
 
+# 候选 mirror.list 字节不得被验证过程改写。
+while IFS= read -r expected_hash path; do
+  [[ -n "${expected_hash:-}" && -n "${path:-}" ]] || continue
+  path=${path#\*}
+  actual_hash=$(sha256sum -- "$path" | awk '{print $1}')
+  [[ "$actual_hash" == "$expected_hash" ]] || die "候选 mirror.list 被改写: $path"
+done <"$mirror_hashes"
+
 summary="$work/summary.json"
+# shellcheck disable=SC2016
 write_json "$summary" \
   --argjson schema_version 1 --arg checked_at "$checked_at" \
   --argjson ok "$( [[ "$overall_ok" == true ]] && echo true || echo false )" \
