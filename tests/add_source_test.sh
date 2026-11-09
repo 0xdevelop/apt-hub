@@ -51,6 +51,7 @@ kill_gpg_home() {
 mkdir -p -- "${FIX}"
 kill_gpg_home "${GNUPG}"
 kill_gpg_home "${BASE}/gnupg-other"
+kill_gpg_home "${BASE}/gnupg-new"
 if [[ -n "${SERVER_PID:-}" ]]; then
   kill "${SERVER_PID}" 2>/dev/null || true
   wait "${SERVER_PID}" 2>/dev/null || true
@@ -80,6 +81,7 @@ cleanup_secrets() {
   fi
   kill_gpg_home "${GNUPG}"
   kill_gpg_home "${BASE}/gnupg-other"
+  kill_gpg_home "${BASE}/gnupg-new"
   rm -f -- "${TLS}/tls.key"
   if [[ -d "${GNUPG}" ]]; then
     find "${GNUPG}" -type f \( -name '*private*' -o -name 'private-keys-v1.d' \) -delete 2>/dev/null || true
@@ -87,6 +89,9 @@ cleanup_secrets() {
   fi
   if [[ -d "${BASE}/gnupg-other" ]]; then
     rm -rf -- "${BASE}/gnupg-other/private-keys-v1.d" 2>/dev/null || true
+  fi
+  if [[ -d "${BASE}/gnupg-new" ]]; then
+    rm -rf -- "${BASE}/gnupg-new/private-keys-v1.d" 2>/dev/null || true
   fi
 }
 
@@ -408,10 +413,15 @@ start_https() {
 # 生产 curl 不带 --noproxy；回环 DIRECT 只在本测试 APT 配置，不改系统代理。
 run_add() {
   local root="$1"
-  local software="${2:-${SOFTWARE_ID}}"
+  local software="${SOFTWARE_ID}"
+  shift
+  if [[ $# -gt 0 && "${1}" != --* ]]; then
+    software="$1"
+    shift
+  fi
   env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy -u all_proxy \
     "${ADD}" --site-url "${SITE_URL}" --software "${software}" --root "${root}" \
-    --architecture amd64 --cacert "${TLS}/tls.crt"
+    --architecture amd64 --cacert "${TLS}/tls.crt" "$@"
 }
 
 write_apt_conf_for_root() {
@@ -772,6 +782,157 @@ run_add "${Rswap}" >"${BASE}/keyswap-seed.log" 2>&1
 gpg --homedir "${OTHER_GPG}" --batch --export >"${Rswap}/etc/apt/keyrings/apt-hub.gpg"
 rc="$(capture_rc "${BASE}/keyswap.log" run_add "${Rswap}")"
 record_rc "refuse_key_swap" "${rc}" 1
+
+log "== 显式完整指纹换钥 =="
+NEW_GPG="${BASE}/gnupg-new"
+make_gpg_home "${NEW_GPG}"
+NEW_FP="$(gpg --homedir "${NEW_GPG}" --batch --list-keys --with-colons | awk -F: '$1=="fpr"{print $10; exit}')"
+NEW_FP="$(printf '%s' "${NEW_FP}" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')"
+log "fixture_new_fingerprint=${NEW_FP}"
+build_site "${BASE}/site-newkey" "${NEW_GPG}" "${SERIES}" "${SITE_URL}"
+
+Rrep="${BASE}/roots/replace-key"
+prepare_isolated_root "${Rrep}"
+run_add "${Rrep}" >"${BASE}/replace-seed.log" 2>&1
+run_add "${Rrep}" "${SOFTWARE_ID2}" >"${BASE}/replace-seed2.log" 2>&1
+key_sha_before="$(sha256sum -- "${Rrep}/etc/apt/keyrings/apt-hub.gpg" | awk '{print $1}')"
+src_sha_before="$(sha256sum -- "${Rrep}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" | awk '{print $1}')"
+src2_sha_before="$(sha256sum -- "${Rrep}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID2}.sources" | awk '{print $1}')"
+key_mode_before="$(stat -c '%a' "${Rrep}/etc/apt/keyrings/apt-hub.gpg")"
+
+start_https "${BASE}/site-newkey"
+rc="$(capture_rc "${BASE}/replace-noflag.log" run_add "${Rrep}")"
+record_rc "replace_key_without_flag_rejected" "${rc}" 1
+key_sha_mid="$(sha256sum -- "${Rrep}/etc/apt/keyrings/apt-hub.gpg" | awk '{print $1}')"
+src_sha_mid="$(sha256sum -- "${Rrep}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" | awk '{print $1}')"
+if [[ "${key_sha_mid}" == "${key_sha_before}" && "${src_sha_mid}" == "${src_sha_before}" ]]; then
+  pass "replace_key_without_flag_digests_unchanged"
+else
+  fail "replace_key_without_flag_digests_unchanged"
+fi
+
+WRONG_FP='AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+rc="$(capture_rc "${BASE}/replace-badfp.log" run_add "${Rrep}" --replace-key "${WRONG_FP}")"
+record_rc "replace_key_wrong_fp_rejected" "${rc}" 1
+key_sha_mid="$(sha256sum -- "${Rrep}/etc/apt/keyrings/apt-hub.gpg" | awk '{print $1}')"
+src_sha_mid="$(sha256sum -- "${Rrep}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" | awk '{print $1}')"
+if [[ "${key_sha_mid}" == "${key_sha_before}" && "${src_sha_mid}" == "${src_sha_before}" ]]; then
+  pass "replace_key_wrong_fp_digests_unchanged"
+else
+  fail "replace_key_wrong_fp_digests_unchanged"
+fi
+
+cp -a -- "${BASE}/site-newkey" "${BASE}/site-newkey-badsig"
+sig_in="${BASE}/site-newkey-badsig/repos/${SOFTWARE_ID}/dists/${SERIES}/InRelease"
+awk 'BEGIN{done=0} /^Suite: / && !done {sub(/noble/,"evil"); done=1} {print}' \
+  "${sig_in}" >"${sig_in}.bad"
+mv -- "${sig_in}.bad" "${sig_in}"
+start_https "${BASE}/site-newkey-badsig"
+rc="$(capture_rc "${BASE}/replace-badsig.log" run_add "${Rrep}" --replace-key "${NEW_FP}")"
+record_rc "replace_key_bad_signature_rejected" "${rc}" 1
+key_sha_mid="$(sha256sum -- "${Rrep}/etc/apt/keyrings/apt-hub.gpg" | awk '{print $1}')"
+src_sha_mid="$(sha256sum -- "${Rrep}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" | awk '{print $1}')"
+if [[ "${key_sha_mid}" == "${key_sha_before}" && "${src_sha_mid}" == "${src_sha_before}" ]]; then
+  pass "replace_key_bad_signature_digests_unchanged"
+else
+  fail "replace_key_bad_signature_digests_unchanged"
+fi
+
+# 异站共享钥：必须在旧站点 seed，再切到新站点换钥，才能触发替换路径上的同站校验
+start_https "${SITE}"
+Rdiff="${BASE}/roots/replace-diff-site"
+prepare_isolated_root "${Rdiff}"
+run_add "${Rdiff}" >"${BASE}/replace-diff-seed.log" 2>&1
+cat >"${Rdiff}/etc/apt/sources.list.d/apt-hub-othersite.sources" <<EOF
+Types: deb
+URIs: mirror+https://other.example.test/tools/repos/othersite/mirror.list
+Suites: ${SERIES}
+Components: main
+Signed-By: ${Rdiff}/etc/apt/keyrings/apt-hub.gpg
+Architectures: amd64 arm64
+EOF
+start_https "${BASE}/site-newkey"
+rc="$(capture_rc "${BASE}/replace-diff-site.log" run_add "${Rdiff}" --replace-key "${NEW_FP}")"
+record_rc "replace_key_shared_other_site_rejected" "${rc}" 1
+got_fp="$(gpg --batch --show-keys --with-colons -- "${Rdiff}/etc/apt/keyrings/apt-hub.gpg" 2>/dev/null | awk -F: '$1=="fpr"{print $10; exit}')"
+got_fp="$(printf '%s' "${got_fp}" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')"
+if [[ "${got_fp}" == "${FP}" ]]; then
+  pass "replace_key_shared_other_site_key_unchanged"
+else
+  fail "replace_key_shared_other_site_key_unchanged"
+fi
+
+start_https "${SITE}"
+Rrollkey="${BASE}/roots/replace-rollback"
+prepare_isolated_root "${Rrollkey}"
+run_add "${Rrollkey}" "${SOFTWARE_ID2}" >"${BASE}/replace-roll-seed.log" 2>&1
+roll_key_sha_before="$(sha256sum -- "${Rrollkey}/etc/apt/keyrings/apt-hub.gpg" | awk '{print $1}')"
+roll_key_mode_before="$(stat -c '%a' "${Rrollkey}/etc/apt/keyrings/apt-hub.gpg")"
+chmod a-w -- "${Rrollkey}/etc/apt/sources.list.d"
+start_https "${BASE}/site-newkey"
+rc="$(capture_rc "${BASE}/replace-rollback.log" run_add "${Rrollkey}" --replace-key "${NEW_FP}")"
+chmod u+w -- "${Rrollkey}/etc/apt/sources.list.d" || true
+record_rc "replace_key_sources_fail_rolls_back_key" "${rc}" 1
+roll_key_sha_after="$(sha256sum -- "${Rrollkey}/etc/apt/keyrings/apt-hub.gpg" | awk '{print $1}')"
+roll_key_mode_after="$(stat -c '%a' "${Rrollkey}/etc/apt/keyrings/apt-hub.gpg")"
+if [[ "${roll_key_sha_after}" == "${roll_key_sha_before}" && "${roll_key_mode_after}" == "${roll_key_mode_before}" ]]; then
+  pass "replace_key_sources_fail_key_bytes_mode_restored"
+else
+  fail "replace_key_sources_fail_key_bytes_mode_restored"
+fi
+if [[ ! -e "${Rrollkey}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" ]]; then
+  pass "replace_key_sources_fail_no_half_sources"
+else
+  fail "replace_key_sources_fail_no_half_sources"
+fi
+
+start_https "${BASE}/site-newkey"
+rc="$(capture_rc "${BASE}/replace-ok.log" run_add "${Rrep}" --replace-key "${NEW_FP}")"
+record_rc "replace_key_with_correct_fp" "${rc}" 0
+if [[ "${rc}" -eq 0 ]]; then
+  got_fp="$(gpg --batch --show-keys --with-colons -- "${Rrep}/etc/apt/keyrings/apt-hub.gpg" 2>/dev/null | awk -F: '$1=="fpr"{print $10; exit}')"
+  got_fp="$(printf '%s' "${got_fp}" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')"
+  if [[ "${got_fp}" == "${NEW_FP}" ]]; then
+    pass "replace_key_installed_new_fingerprint"
+  else
+    fail "replace_key_installed_new_fingerprint"
+  fi
+  src2_sha_after="$(sha256sum -- "${Rrep}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID2}.sources" | awk '{print $1}')"
+  if [[ "${src2_sha_after}" == "${src2_sha_before}" ]]; then
+    pass "replace_key_peer_sources_unchanged"
+  else
+    fail "replace_key_peer_sources_unchanged"
+  fi
+  key_mode_after="$(stat -c '%a' "${Rrep}/etc/apt/keyrings/apt-hub.gpg")"
+  if [[ "${key_mode_after}" == "${key_mode_before}" ]]; then
+    pass "replace_key_mode_preserved"
+  else
+    fail "replace_key_mode_preserved"
+  fi
+  write_apt_conf_for_root "${Rrep}" amd64 "${Rrep}/etc/apt/apt.conf"
+  arc="$(capture_rc "${BASE}/replace-apt-update.log" env APT_CONFIG="${Rrep}/etc/apt/apt.conf" timeout 90 apt-get update)"
+  record_rc "replace_key_apt_get_update" "${arc}" 0
+  if [[ "${arc}" -eq 0 ]]; then
+    if grep -R -l "${PKG_NAME}" "${Rrep}/var/lib/apt/lists" >/dev/null 2>&1; then
+      pass "replace_key_apt_lists_contain_package"
+    else
+      fail "replace_key_apt_lists_contain_package"
+    fi
+  else
+    head -n 60 "${BASE}/replace-apt-update.log" | tee -a "${EVIDENCE}" || true
+  fi
+fi
+
+rc="$(capture_rc "${BASE}/replace-idempotent.log" run_add "${Rrep}" --replace-key "${NEW_FP}")"
+record_rc "replace_key_already_installed_idempotent" "${rc}" 0
+if grep -q '幂等' "${BASE}/replace-idempotent.log"; then
+  pass "replace_key_idempotent_message"
+else
+  fail "replace_key_idempotent_message"
+fi
+
+# 恢复原站点供后续用例
+start_https "${SITE}"
 
 log "== 提交第二步失败回滚 =="
 Rroll="${BASE}/roots/rollback"

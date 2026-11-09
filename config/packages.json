@@ -13,6 +13,20 @@
         "amd64": "^rustdesk-[0-9][^-]*-x86_64\\.deb$",
         "arm64": "^rustdesk-[0-9][^-]*-aarch64\\.deb$"
       }
+    },
+    {
+      "id": "golang",
+      "package": "apt-hub-go",
+      "source_type": "go_official_archive",
+      "repository": "golang/go",
+      "description": "Go programming language toolchain from the official Linux archive",
+      "source_url": "https://go.dev",
+      "license": "BSD-3-Clause",
+      "ubuntu_series": "supported",
+      "architectures": {
+        "amd64": "^apt-hub-go_[0-9]+\\.[0-9]+\\.[0-9]+-[0-9]+_amd64\\.deb$",
+        "arm64": "^apt-hub-go_[0-9]+\\.[0-9]+\\.[0-9]+-[0-9]+_arm64\\.deb$"
+      }
     }
   ]
 }

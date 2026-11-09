@@ -134,7 +134,7 @@ else
 fi
 
 run_expect "usage_no_args" 2 "$RENDER"
-run_expect "git_tag_usage" 2 "$GIT_TAG"
+run_expect "git_tag_help" 2 "$GIT_TAG" --help
 
 make_readme() {
   local dest="$1"
@@ -653,13 +653,14 @@ else
 fi
 assert_no_workdir "dangling index 无 work 目录" "$dangle_site"
 
-# git_tag.sh：只在 tmp 仓库打标签，不动本仓。
+# git_tag.sh：--version 仅在隔离 tmp 仓本地打标签；auto/push 见 release_test。
 tag_repo="$EVIDENCE/tag-repo"
 mkdir -p -- "$tag_repo"
 git init --quiet "$tag_repo"
 printf '0.1.0\n' >"$tag_repo/VERSION"
 git -C "$tag_repo" add VERSION
 git -C "$tag_repo" -c user.name='apt-hub-render-test' -c user.email='apt-hub-render-test@invalid' commit --quiet -m 'test version'
+# 无 remote：--version 只建本地标签，不改 VERSION，不碰本仓。
 run_expect "git_tag_ok" 0 bash -c "cd \"$tag_repo\" && \"$GIT_TAG\" --version 0.1.0"
 if git -C "$tag_repo" rev-parse -q --verify refs/tags/v0.1.0 >/dev/null; then
   pass "tmp 仓库存在 v0.1.0"
@@ -672,12 +673,18 @@ run_expect "git_tag_mismatch" 1 bash -c "cd \"$tag_repo\" && \"$GIT_TAG\" --vers
 printf 'dirty\n' >"$tag_repo/dirty.txt"
 run_expect "git_tag_dirty" 1 bash -c "cd \"$tag_repo\" && \"$GIT_TAG\" --version 0.1.0"
 rm -f -- "$tag_repo/dirty.txt"
-run_expect "git_tag_force_flag" 2 bash -c "cd \"$tag_repo\" && \"$GIT_TAG\" --version 0.1.0 --force"
+run_expect "git_tag_force_flag" 1 bash -c "cd \"$tag_repo\" && \"$GIT_TAG\" --version 0.1.0 --force"
+run_expect "git_tag_unknown" 1 bash -c "cd \"$tag_repo\" && \"$GIT_TAG\" bogus-mode"
 
-if grep -E -q -- '(^|[[:space:]])git[[:space:]]+push([[:space:]]|$)|git[[:space:]]+add([[:space:]]|$)|tag[[:space:]].*-f|tag[[:space:]].*-d|git[[:space:]]+tag[[:space:]]+-d' "$GIT_TAG"; then
-  fail "git_tag.sh 含 push/add/force/delete"
+if grep -E -q -- 'tag[[:space:]]+-f[[:space:]]+latest|git[[:space:]]+push[[:space:]].*--delete|[[:space:]]git[[:space:]]+add[[:space:]]+-A'; then
+  fail "git_tag.sh 仍含 latest 强移/删远端/add -A"
 else
-  pass "git_tag.sh 无 push/add/force/delete"
+  pass "git_tag.sh 无 latest 强移与 add -A"
+fi
+if grep -E -q -- 'git[[:space:]]+push|git[[:space:]]+add --' "$GIT_TAG"; then
+  pass "git_tag.sh 含受控 push/精确 add（新契约）"
+else
+  fail "git_tag.sh 缺少 push/精确 add"
 fi
 
 mapfile -t MAIN_TAGS_AFTER < <(git -C "$ROOT" tag -l | sort)

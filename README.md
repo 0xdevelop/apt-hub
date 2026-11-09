@@ -2,7 +2,7 @@
 
 收集有官方发布下载、但没有官方 Ubuntu APT 源的软件，为其补齐符合 Ubuntu 规则的安装与升级来源。首批目标为 **Go（golang）与 RustDesk**，后续按软件条目和必要的适配脚本接入。
 
-官方已有 `.deb` 时保留原包并从官方直下；只有归档包时需要生成真实 Debian 适配包，分别记录官方原始资产与适配包的版本、摘要和下载地址，不能把归档改后缀冒充 `.deb`。源码仓和 Pages 不存放安装包，适配包的正式交付路径须在发布前落实。
+源码仓、数据分支和 Pages 只保存脚本、包信息及签名 APT 元数据。RustDesk 等官方已有 `.deb` 的软件原样核验、官方直下；Go 官方提供 Linux `tar.gz`，由本项目打成真正的 Debian 包并通过本仓 Releases assets 分发，不冒称官方 `.deb`。客户端始终使用标准 APT，不在安装脚本里联网拉取主程序。
 
 > 当前正在从原镜像实现调整为元数据适配层，尚未完成新版验收；请先不要运行旧版发布工作流。软件列表保持真实发布状态。
 
@@ -18,7 +18,7 @@
 
 ## 新增其他软件
 
-首批只做 **Go 与 RustDesk**，不预先接入其他软件。当前可用的条目模板针对官方 GitHub Releases `.deb`；这只是现有适配类型，不是项目只接收 `.deb` 的范围限制。Go 官方归档已能构建独立的 `apt-hub-go` Debian 包，并通过本地隔离验证；统一维护链、正式包下载地址和发布衔接尚未完成，当前不能宣称已上线。
+首批目标仍是 **Go 与 RustDesk**，不预先接入其他软件。官方已有 `.deb` 的条目复用下方模板；Go 由独立 `gen_deb_golang.sh` 核对官方归档后构包，`build.sh` 以扩展方式调用，双架构 `.deb`、摘要和来源记录作为本仓 Release assets。Go 包与官方原始归档分别记录摘要、大小与出处，只有完整构建、上传和索引验证成功后才列为已生效。
 
 以后接入同类 `.deb` 软件，将下面的对象复制到 `config/packages.json` 的 `packages` 数组中，填写真实官方信息并保留已有条目，无需再复制一套同步脚本：
 
@@ -46,7 +46,49 @@
 4. 提交条目后，在自己的仓库手动运行 Actions 的 `ubuntu-publish`，或等待定时执行。维护侧共用 `scripts/update_sources.sh`，一次完成同步、验证和列表生成；本地显式参数示例见[维护说明](docs/maintenance.md#一条命令检查并更新候选)，生产签名与 Pages 的启用见[首次启用](docs/nees_user_read.md)。
 5. 只有部署成功，软件才进入上面的已生效列表；使用者复制对应的“一键加源”命令，此后按普通 APT 安装、升级。
 
-若上游只有 `tar.gz`，或使用其他官方发布渠道，应增加对应来源适配与必要构包步骤，再接入同一校验和发布流程；不能把当前模板当作已经支持这些来源的证据，也不为它们另造一套升级器。
+只有归档包的上游需要像 Go 一样增加独立构包脚本，由 `build.sh` 扩展调用，再将真实 Debian 包、摘要与来源记录接入同一发布链。不能把归档改后缀冒充 `.deb`，也不在客户端安装脚本中临时下载主程序。
+
+## 维护者首次启用与签名密钥
+
+使用自己的公开仓库，启用 Actions，并将 **Settings → Pages → Source** 设为 **GitHub Actions**。只需手动配置一个仓库 Actions **Secret**：`APT_HUB_GPG_PRIVATE_KEY`；不是公开的 Variables。工作流自带的 `GITHUB_TOKEN` 无需另建，站点地址、发布者、公钥和指纹由流程取得。
+
+在自己的可信电脑、项目根目录执行下列一行命令（需要已有 GnuPG）。只生成本源专用的无口令签名钥，不改系统默认 GnuPG 密钥库：
+
+```bash
+umask 077 && mkdir -p tmp && key_dir="tmp/apt-hub-signing-$(date -u +%Y%m%dT%H%M%SZ)" && mkdir -m 700 "$key_dir" && gpg --homedir "$key_dir" --batch --pinentry-mode loopback --passphrase '' --quick-generate-key 'apt-hub APT signing' ed25519 sign 0 && fpr=$(gpg --homedir "$key_dir" --batch --with-colons --list-secret-keys | awk -F: '$1=="fpr"{print $10;exit}') && test "${#fpr}" -eq 40 && gpg --homedir "$key_dir" --batch --armor --export-secret-keys "$fpr" >"$key_dir/private-key.asc" && gpg --homedir "$key_dir" --batch --export "$fpr" >"$key_dir/apt-hub.gpg" && printf '%s\n' "$fpr" >"$key_dir/fingerprint.txt" && printf '私钥文件：%s/private-key.asc\n公开指纹：%s\n' "$key_dir" "$fpr"
+```
+
+将 `private-key.asc` **完整内容**（包括 `BEGIN/END PGP PRIVATE KEY BLOCK`）填入仓库 **Settings → Secrets and variables → Actions → New repository secret**，名称为 `APT_HUB_GPG_PRIVATE_KEY`。私钥是明文导出，文件权限为 `0600`：不要贴到聊天、提交 Git 或放进 Pages。离线备份整个专用密钥目录；`tmp/` 不是长期备份位置。公钥与完整指纹可以公开。
+
+配置后手动运行 Actions 的 `ubuntu-publish`；成功部署并出现已生效列表后再添加源。没有生产密钥时 CI 测试仍可通过，但不代表公网源已上线。
+
+### 私钥丢失或泄露后的维护者处理
+
+- **只丢失本地文件**：若离线备份仍在，恢复原密钥即可，使用者不需要换钥；若原签名钥已无法恢复，再生成新钥。
+- **私钥可能泄露**：立即撤销旧 Secret、暂停发布并公告换钥；有撤销证书时同时发布旧钥撤销信息。不能只换一个 Secret 就声称旧钥已不再被所有客户端信任，使用者还要替换本源公钥。
+
+用上面的命令生成另一套新钥，保存旧完整指纹，并更新同一个 `APT_HUB_GPG_PRIVATE_KEY` Secret。在 `ubuntu-publish` 的手动运行页面，将 `rotate_from` 填为旧的完整指纹。流程使用已发布旧公钥校验既有元数据，再以新钥签名，不需要旧私钥，也不删除 `apt-data`。发布成功后，从独立可信渠道公告**新完整指纹**；不要让使用者只信下载站点自己显示的短 Key ID。
+
+### 使用者可能看到的报错与修复
+
+下面是错误形态示例，尖括号内容是占位符，不是实际密钥：
+
+```text
+The following signatures couldn't be verified because the public key is not available: NO_PUBKEY <新钥的Key-ID>
+The following signatures were invalid: EXPKEYSIG <旧钥的Key-ID> <签名身份>
+E: The repository '<源地址> <Ubuntu代号> InRelease' is not signed.
+拒绝静默换钥/跨站点同名钥冲突: 已有=<旧完整指纹> 下载=<新完整指纹>
+```
+
+`NO_PUBKEY` 常见于维护者已换钥而本机仍装旧公钥；`EXPKEYSIG` 表示签名钥已过期，不能直接当成一次正常轮换。`BADSIG`、摘要不符或指纹与维护者公告不一致时先停止，不用关闭验签来“修复”。
+
+确认维护者通过独立可信渠道公布的新完整指纹后，填写下面三个值。`site_url` 是已上线的真实 Pages 根地址，`software` 是已添加的软件标识（如 `rustdesk` 或 `golang`），`new_fpr` 必须是公告中的 **40 位完整十六进制指纹**：
+
+```bash
+site_url='https://packages.example.test/tools' && software='rustdesk' && new_fpr='<维护者公告的新完整指纹>' && curl -fsSL --proto '=https' --proto-redir '=https' -o add_source.sh "$site_url/add_source.sh" && chmod a+x ./add_source.sh && sudo ./add_source.sh --site-url "$site_url" --software "$software" --replace-key "$new_fpr" && sudo apt update
+```
+
+上述地址和指纹是占位示例，先替换再执行。入口核对新指纹、签名与索引，只修复本源专用 `/etc/apt/keyrings/apt-hub.gpg` 和匹配的 `.sources`，不改其他软件源；失败保留旧配置，成功删除下载副本。共享同一专用公钥的本源软件不用逐一导入公钥。**不要使用 `trusted=yes`、`--allow-unauthenticated`、`apt-key`，也不要删除整个 `/etc/apt/sources.list.d/`。**
 
 ## 文档
 
@@ -57,11 +99,11 @@
 
 ## 更新流程
 
-维护侧：软件条目 → 查询官方版本 → 校验原始资产 → 必要时构建 Debian 适配包 → 核对包版本、身份、架构和摘要 → 签名 APT 元数据 → Ubuntu 依赖与升级验证 → 发布候选 → 回写已生效状态和列表。维护入口统一执行这些步骤，失败不把半成品标为已生效。
+维护侧：软件条目 → 固定本次官方版本与摘要 → 原包核验或独立构包 → 发版、构建并上传 assets、按引用清理冗余 → 校验真实包下载与签名 APT 元数据 → Ubuntu 依赖及升级验证 → 部署 → 回写已生效状态和列表。没有版本变化时复用已确认且不可变的产物；任一步失败，不将候选写成已生效。
 
 使用侧：添加源后执行 `sudo apt update && sudo apt upgrade`；首次安装执行 `sudo apt install <软件包名>`。软件更新遵循 Debian 包版本比较、依赖关系和签名校验，不要求用户另跑专用升级器。没有版本变化时不伪造软件更新时间，签名索引仍定期续期。
 
-APT 的索引请求与安装包请求分流；原样官方包继续从官方获取，构包来源不得冒称官方 `.deb`。CI 临时下载不进入数据分支或 Pages；保留历史 by-hash 元数据，不承诺替上游保留被删除的官方安装包。任何一步失败都不能将候选版本写成“已生效”。
+APT 的索引请求与包请求分流：签名索引来自 Pages；RustDesk 原样包来自官方，Go 生成包来自本仓 Releases assets。Git 源码与 `apt-data` 不存大包。清理只处理本项目生成包版本，仍被有效索引引用的 assets 必须保留；官方历史包被上游删除时不承诺兜底，也不静默换用第三方镜像。
 
 ## Ubuntu 与软件支持
 
@@ -69,10 +111,11 @@ APT 的索引请求与安装包请求分流；原样官方包继续从官方获�
 
 这里的验证证明包能被 APT 验签、获取并解析依赖，**不等于上游对所有 Ubuntu 版本作兼容承诺，也不等于已验证桌面显示、无人值守或目标硬件功能。** 上游明确限制版本或架构时须收窄清单，不以其他架构代替。
 
-## 两类版本互不混用
+## 版本职责
 
-- **源内软件版本**：由官方发布及 `.deb` 元数据决定，Actions 同步后更新列表。
-- **维护脚本版本**：由仓库 `VERSION` 与 `git_tag.sh` 管理；软件更新不触发脚本发版，标签工具不自动推送、不改历史标签。
+- **上游软件版本**：从官方发布取得，不手工追写一份 Go 版本文件。
+- **Debian 包修订**：`config/go.json` 的 `revision`，与上游版本组成 `上游版本-修订`；同一包版本不覆盖替换。
+- **维护脚本版本**：沿用根目录 `VERSION` 与 `git_tag.sh`，不再增加并行 `VERSION.txt`；用户执行发版命令才进行对应提交和标签操作，软件日常更新不冒用仓库脚本版本。
 
 ## 非破坏性原则
 

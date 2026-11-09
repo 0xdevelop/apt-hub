@@ -17,6 +17,10 @@ gnupghome=""
 fingerprint=""
 site_url=""
 releases_arg=""
+package_repository=""
+go_release_tag=""
+go_downloads_json=""
+rotate_from=""
 work=""
 lock_fd=""
 
@@ -27,7 +31,7 @@ die() {
 
 usage() {
   cat >&2 <<'EOF'
-用法: scripts/update_sources.sh --catalog <file> --previous <dir> --work-dir <全新/空目录> --gnupghome <dir> --fingerprint <完整指纹> --site-url <https> [--releases <已生成的官方发行版JSON>]
+用法: scripts/update_sources.sh --catalog <file> --previous <dir> --work-dir <全新/空目录> --gnupghome <dir> --fingerprint <完整指纹> --site-url <https> [--releases <已生成的官方发行版JSON>] [--package-repository <owner/repo>] [--go-release-tag <apt-hub-go-X.Y.Z-R>] [--go-downloads-json <file>] [--rotate-from <旧完整指纹>]
 EOF
   exit 2
 }
@@ -207,6 +211,18 @@ while [[ $# -gt 0 ]]; do
     --releases)
       [[ $# -ge 2 ]] || usage
       releases_arg="$2"; shift 2 ;;
+    --package-repository)
+      [[ $# -ge 2 ]] || usage
+      package_repository="$2"; shift 2 ;;
+    --go-release-tag)
+      [[ $# -ge 2 ]] || usage
+      go_release_tag="$2"; shift 2 ;;
+    --go-downloads-json)
+      [[ $# -ge 2 ]] || usage
+      go_downloads_json="$2"; shift 2 ;;
+    --rotate-from)
+      [[ $# -ge 2 ]] || usage
+      rotate_from="$2"; shift 2 ;;
     -h|--help)
       usage ;;
     *)
@@ -216,7 +232,7 @@ done
 
 [[ -n "${catalog}" && -n "${previous}" && -n "${work_arg}" && -n "${gnupghome}" && -n "${fingerprint}" && -n "${site_url}" ]] || usage
 
-require_cmd bash jq flock cp chmod mkdir mv rm find realpath stat date cmp sha256sum
+require_cmd bash jq flock cp chmod mkdir mv rm find realpath stat date cmp sha256sum curl
 
 [[ -d "${PROJECT_TMP}" ]] || die "缺少项目 tmp/ 目录"
 
@@ -227,10 +243,46 @@ work="$(assert_allowed_dir work-dir "${work_arg}" no)"
 fingerprint="$(strip_fp "${fingerprint}")"
 [[ "${fingerprint}" =~ ^[A-F0-9]{40}$ ]] || die "fingerprint 必须是 40 位十六进制完整指纹"
 site_url="$(assert_site_url "${site_url}")"
+if [[ -n "${rotate_from}" ]]; then
+  rotate_from="$(strip_fp "${rotate_from}")"
+  [[ "${rotate_from}" =~ ^[A-F0-9]{40}$ ]] || die "rotate-from 必须是 40 位十六进制完整指纹"
+fi
+if [[ -n "${go_downloads_json}" ]]; then
+  go_downloads_json="$(assert_allowed_file go-downloads-json "${go_downloads_json}")"
+fi
 
 releases=""
 if [[ -n "${releases_arg}" ]]; then
   releases="$(assert_allowed_file releases "${releases_arg}")"
+fi
+
+# catalog 含 Go 且未显式给 tag：可从官方索引 + config/go.json revision 派生，但不假造已上传。
+if jq -e '.packages|any((.source_type // "") == "go_official_archive")' "${catalog}" >/dev/null; then
+  [[ -n "${package_repository}" ]] || die "catalog 含 go_official_archive 时必须传 --package-repository"
+  if [[ -z "${go_release_tag}" ]]; then
+    go_cfg="${PROJECT_ROOT}/config/go.json"
+    [[ -f "${go_cfg}" && ! -L "${go_cfg}" ]] || die "缺少 config/go.json 无法派生 go-release-tag"
+    rev="$(jq -r '.revision|tostring' "${go_cfg}")"
+    [[ "${rev}" =~ ^[1-9][0-9]*$ ]] || die "config/go.json revision 非法"
+    dl_tmp="${PROJECT_TMP}/update-go-dl-$$.json"
+    if [[ -n "${go_downloads_json}" ]]; then
+      cp -- "${go_downloads_json}" "${dl_tmp}"
+    else
+      curl --fail --silent --show-error --location \
+        --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --connect-timeout 20 --max-time 60 \
+        -o "${dl_tmp}" -- 'https://go.dev/dl/?mode=json&include=all' \
+        || die "派生 go-release-tag 时拉取 go.dev 失败"
+    fi
+    ver_deb="$(jq -r '
+      ([.[] | select(.stable==true)][0].version // empty) as $v
+      | if ($v|startswith("go")) then $v[2:] else empty end
+    ' "${dl_tmp}")"
+    rm -f -- "${dl_tmp}"
+    [[ "${ver_deb}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "无法从官方索引派生 Go 版本"
+    go_release_tag="apt-hub-go-${ver_deb}-${rev}"
+    printf 'update_sources.sh: 派生 go-release-tag=%s（仍须上游已上传该 tag）\n' "${go_release_tag}"
+  fi
 fi
 
 assert_no_overlap "${work}" "${previous}" "work-dir 与 previous 重叠"
@@ -301,15 +353,21 @@ else
 fi
 [[ -f "${releases_work}" && ! -L "${releases_work}" ]] || die "work 内缺少 releases.json"
 
-# sync → 同 checkout 复制 add_source(0644) → verify → render
-"${SCRIPT_DIR}/sync.sh" \
-  --catalog "${catalog}" \
-  --releases "${releases_work}" \
-  --previous "${previous}" \
-  --output "${site_dir}" \
-  --gnupghome "${gnupghome}" \
-  --fingerprint "${fingerprint}" \
+# sync → 同 checkout 复制 add_source(0644) → verify(含真实下载) → render
+sync_args=(
+  --catalog "${catalog}"
+  --releases "${releases_work}"
+  --previous "${previous}"
+  --output "${site_dir}"
+  --gnupghome "${gnupghome}"
+  --fingerprint "${fingerprint}"
   --site-url "${site_url}"
+)
+[[ -n "${package_repository}" ]] && sync_args+=(--package-repository "${package_repository}")
+[[ -n "${go_release_tag}" ]] && sync_args+=(--go-release-tag "${go_release_tag}")
+[[ -n "${go_downloads_json}" ]] && sync_args+=(--go-downloads-json "${go_downloads_json}")
+[[ -n "${rotate_from}" ]] && sync_args+=(--rotate-from "${rotate_from}")
+"${SCRIPT_DIR}/sync.sh" "${sync_args[@]}"
 
 cp -- "${add_src}" "${site_dir}/add_source.sh"
 chmod 0644 -- "${site_dir}/add_source.sh"
@@ -320,7 +378,8 @@ cmp -s -- "${add_src}" "${site_dir}/add_source.sh" || die "add_source.sh 与本�
 "${SCRIPT_DIR}/verify_ubuntu.sh" \
   --site "${site_dir}" \
   --releases "${releases_work}" \
-  --work-dir "${verify_dir}"
+  --work-dir "${verify_dir}" \
+  --verify-downloads
 
 [[ -f "${verify_dir}/summary.json" && ! -L "${verify_dir}/summary.json" ]] || die "缺少 verify summary.json"
 jq -e '.ok==true' "${verify_dir}/summary.json" >/dev/null || die "verify summary ok!=true"

@@ -1,0 +1,203 @@
+name: Go 三段发版
+
+on:
+  workflow_call:
+    outputs:
+      go_release_tag:
+        description: 已上传/幂等的 apt-hub-go 精确 tag
+        value: ${{ jobs.Build.outputs.go_release_tag }}
+      downloads_json_artifact:
+        description: prepare 冻结索引 artifact 名
+        value: go-downloads-json
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: apt-hub-go-release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      go_release_tag: ${{ steps.prep.outputs.go_release_tag }}
+      go_version: ${{ steps.prep.outputs.go_version }}
+      source_sha: ${{ steps.prep.outputs.source_sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: 安装临时依赖
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl jq
+
+      - name: prepare
+        id: prep
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          chmod a+x scripts/release_golang.sh
+          rm -rf tmp/go-release-prepare
+          mkdir -p tmp/go-release-prepare
+          mapfile -t lines < <(
+            scripts/release_golang.sh prepare \
+              --repository "${REPOSITORY}" \
+              --config config/go.json \
+              --work-dir tmp/go-release-prepare
+          )
+          go_release_tag=""
+          go_version=""
+          downloads_json=""
+          for line in "${lines[@]}"; do
+            case "${line}" in
+              go_release_tag=*) go_release_tag="${line#go_release_tag=}" ;;
+              go_version=*) go_version="${line#go_version=}" ;;
+              downloads_json=*) downloads_json="${line#downloads_json=}" ;;
+            esac
+          done
+          [[ -n "${go_release_tag}" && -n "${go_version}" && -f "${downloads_json}" ]] \
+            || { echo "prepare 输出不完整" >&2; exit 1; }
+          [[ "${go_release_tag}" =~ ^apt-hub-go-[0-9]+\.[0-9]+\.[0-9]+-[1-9][0-9]*$ ]] \
+            || { echo "go_release_tag 非法: ${go_release_tag}" >&2; exit 1; }
+          source_sha="$(git rev-parse HEAD)"
+          [[ "${source_sha}" =~ ^[0-9a-f]{40}$ ]] || { echo "HEAD sha 非法" >&2; exit 1; }
+          echo "go_release_tag=${go_release_tag}" >>"$GITHUB_OUTPUT"
+          echo "go_version=${go_version}" >>"$GITHUB_OUTPUT"
+          echo "source_sha=${source_sha}" >>"$GITHUB_OUTPUT"
+          cp -a -- "${downloads_json}" tmp/go-downloads.json
+
+      - name: 上传冻结索引
+        uses: actions/upload-artifact@ea165f8effb378b5dd3ba8efd859910f14fbf599 # v4.6.2
+        with:
+          name: go-downloads-json
+          path: tmp/go-downloads.json
+          if-no-files-found: error
+
+  Build:
+    name: Build
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    outputs:
+      go_release_tag: ${{ steps.up.outputs.go_release_tag }}
+    steps:
+      - name: Checkout 固定出处 SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+
+      - name: 安装构包依赖
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl jq dpkg-dev binutils xxd
+
+      - name: 下载冻结索引
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: go-downloads-json
+          path: tmp
+
+      - name: 复用或构包并上传
+        id: up
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.go_release_tag }}
+          GO_VERSION: ${{ needs.prepare.outputs.go_version }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          chmod a+x build.sh gen_deb_golang.sh scripts/release_golang.sh
+          rm -rf tmp/go-release-assets
+          mkdir -p tmp
+          reused=0
+          mapfile -t st < <(
+            scripts/release_golang.sh status \
+              --repository "${REPOSITORY}" \
+              --tag "${TAG}" \
+              --fetch-dir tmp/go-release-assets
+          )
+          for line in "${st[@]}"; do
+            case "${line}" in
+              assets_reused=1) reused=1 ;;
+              release_state=draft)
+                echo "draft 半套不视 complete，将重建/补全" >&2
+                ;;
+            esac
+          done
+          if [[ "${reused}" -ne 1 ]]; then
+            rm -rf tmp/go-release-assets
+            ./build.sh \
+              --output tmp/go-release-assets \
+              --go-version "${GO_VERSION}" \
+              --downloads-json tmp/go-downloads.json
+          fi
+          [[ -f tmp/go-release-assets/provenance.json ]]
+          [[ -f tmp/go-release-assets/SHA256SUMS ]]
+          test -n "$(find tmp/go-release-assets -maxdepth 1 -name 'apt-hub-go_*.deb' -print -quit)"
+          # 直接上传 deb+manifest+摘要，不打 zip
+          mapfile -t lines < <(
+            scripts/release_golang.sh upload \
+              --repository "${REPOSITORY}" \
+              --tag "${TAG}" \
+              --asset-dir tmp/go-release-assets \
+              --source-sha "${SOURCE_SHA}"
+          )
+          go_release_tag=""
+          for line in "${lines[@]}"; do
+            case "${line}" in
+              go_release_tag=*) go_release_tag="${line#go_release_tag=}" ;;
+            esac
+          done
+          [[ -n "${go_release_tag}" ]] || { echo "upload 未输出 go_release_tag" >&2; exit 1; }
+          echo "go_release_tag=${go_release_tag}" >>"$GITHUB_OUTPUT"
+
+  RemoveOld:
+    name: RemoveOld
+    needs:
+      - prepare
+      - Build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: 安装临时依赖
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl jq
+
+      - name: prune
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ needs.Build.outputs.go_release_tag }}
+        run: |
+          set -euo pipefail
+          chmod a+x scripts/release_golang.sh
+          scripts/release_golang.sh prune \
+            --repository "${REPOSITORY}" \
+            --current-tag "${TAG}" \
+            --apt-data-ref apt-data \
+            --keep-recent 2

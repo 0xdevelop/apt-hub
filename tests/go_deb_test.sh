@@ -6,7 +6,7 @@ export LANG=C
 export LANGUAGE=C
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD="${ROOT}/scripts/build_go_deb.sh"
+BUILD="${ROOT}/gen_deb_golang.sh"
 CONFIG="${ROOT}/config/go.json"
 TMP="${ROOT}/tmp/go-build-v9"
 EVIDENCE="${TMP}/evidence.log"
@@ -452,6 +452,7 @@ record "fixture_build_ok" "${RC}" 0
 assert_file "${OUT_OK}/apt-hub-go_9.9.9-1_amd64.deb"
 assert_file "${OUT_OK}/apt-hub-go_9.9.9-1_arm64.deb"
 assert_file "${OUT_OK}/provenance.json"
+assert_file "${OUT_OK}/SHA256SUMS"
 
 set +e
 dpkg-deb -f "${OUT_OK}/apt-hub-go_9.9.9-1_amd64.deb" Package | grep -Fxq 'apt-hub-go'
@@ -500,6 +501,46 @@ jq -e '
 RC=$?
 set -e
 record "provenance_schema" "${RC}" 0
+
+# --version 锁定：冻结索引精确版本，不漂到其它 stable
+OUT_LOCK="${TMP}/out/fixture-version-lock"
+rm -rf -- "${OUT_LOCK}" "${OUT_LOCK}.work" "${OUT_LOCK}.scratch" "${OUT_LOCK}.staging" "${OUT_LOCK}.hold-empty" "${OUT_LOCK}.lock"
+set +e
+"${BUILD}" --config "${CONFIG}" --output "${OUT_LOCK}" \
+  --version go9.9.9 \
+  --downloads-json "${FIXTURE_JSON}" --archive-dir "${TMP}/test/archives"
+RC=$?
+set -e
+record "version_lock_ok" "${RC}" 0
+set +e
+jq -e '.upstream.version=="go9.9.9"' "${OUT_LOCK}/provenance.json" >/dev/null
+RC=$?
+set -e
+record "version_lock_provenance" "${RC}" 0
+
+OUT_LOCK_MISS="${TMP}/out/fixture-version-missing"
+rm -rf -- "${OUT_LOCK_MISS}" "${OUT_LOCK_MISS}.work" "${OUT_LOCK_MISS}.scratch" \
+  "${OUT_LOCK_MISS}.staging" "${OUT_LOCK_MISS}.hold-empty" "${OUT_LOCK_MISS}.lock"
+mkdir -p -- "${OUT_LOCK_MISS}"
+: >"${OUT_LOCK_MISS}/.keep-empty-marker"
+# 空目录哨兵：失败不得改用户目录内容语义；先清成空
+rm -f -- "${OUT_LOCK_MISS}/.keep-empty-marker"
+set +e
+"${BUILD}" --config "${CONFIG}" --output "${OUT_LOCK_MISS}" \
+  --version go8.8.8 \
+  --downloads-json "${FIXTURE_JSON}" --archive-dir "${TMP}/test/archives"
+RC=$?
+set -e
+record "version_lock_missing" "${RC}" 1
+set +e
+find -- "${OUT_LOCK_MISS}" -type f \( -name '*.deb' -o -name 'provenance.json' \) 2>/dev/null | grep -q .
+RC=$?
+set -e
+if [[ "${RC}" -eq 0 ]]; then
+  record "version_lock_missing_no_partial" 1 0
+else
+  record "version_lock_missing_no_partial" 0 0
+fi
 
 # 可复现：同输入重复构包字节相同
 OUT_OK2="${TMP}/out/fixture-ok-repeat"

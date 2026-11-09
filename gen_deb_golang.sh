@@ -7,7 +7,7 @@ export LANG=C
 export LANGUAGE=C
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+PROJECT_ROOT="${SCRIPT_DIR}"
 PROJECT_TMP="${PROJECT_ROOT}/tmp"
 
 HEX64='^[a-f0-9]{64}$'
@@ -21,6 +21,7 @@ config=""
 output=""
 downloads_json=""
 archive_dir=""
+version_lock=""
 work=""
 scratch=""
 staging=""
@@ -30,13 +31,13 @@ staging_owned=0
 success=0
 
 die() {
-  printf 'build_go_deb.sh: %s\n' "$*" >&2
+  printf 'gen_deb_golang.sh: %s\n' "$*" >&2
   exit 1
 }
 
 usage() {
   cat >&2 <<'EOF'
-用法: scripts/build_go_deb.sh --config <config/go.json> --output <全新/空的本项目tmp内目录> [--downloads-json <官方JSON普通文件>] [--archive-dir <已下载归档目录>]
+用法: ./gen_deb_golang.sh --config <config/go.json> --output <全新/空的本项目tmp内目录> [--version <goX.Y.Z>] [--downloads-json <官方JSON普通文件>] [--archive-dir <已下载归档目录>]
 EOF
   exit 2
 }
@@ -336,6 +337,16 @@ select_stable_version() {
   printf '%s\n' "${best_tag}"
 }
 
+resolve_version_tag() {
+  local index="$1" want="$2"
+  local count
+  [[ "${want}" =~ ${GO_TAG} ]] || die "非法 --version: ${want}"
+  count="$(jq -r --arg v "${want}" '[.[] | select(.version==$v)] | length' "${index}")" \
+    || die "查询索引版本失败"
+  [[ "${count}" == "1" ]] || die "索引中版本不唯一或不存在: ${want} count=${count}"
+  printf '%s\n' "${want}"
+}
+
 artifact_for_arch() {
   local index="$1" tag="$2" arch="$3"
   local count filename sha size kind os a
@@ -491,6 +502,11 @@ while [[ $# -gt 0 ]]; do
       archive_dir="$2"
       shift 2
       ;;
+    --version)
+      [[ $# -ge 2 ]] || usage
+      version_lock="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       ;;
@@ -604,7 +620,11 @@ else
 fi
 jq -e 'type=="array" and length>0' "${index_file}" >/dev/null || die "官方索引不是非空数组"
 
-tag="$(select_stable_version "${index_file}")" || die "选择稳定版本失败"
+if [[ -n "${version_lock}" ]]; then
+  tag="$(resolve_version_tag "${index_file}" "${version_lock}")" || die "锁定版本失败"
+else
+  tag="$(select_stable_version "${index_file}")" || die "选择稳定版本失败"
+fi
 upstream_ver="${tag#go}"
 # 同步写 scratch 并核 jq 退出码；禁止进程替换吞掉部分输出后的非 0。
 archs_file="${scratch}/architectures.txt"
@@ -714,6 +734,21 @@ for arch in "${archs[@]}"; do
     || die "staging 缺 deb: ${deb_name}"
 done
 
+sums_tmp="${scratch}/SHA256SUMS.tmp"
+: >"${sums_tmp}" || die "无法初始化 SHA256SUMS"
+(
+  cd -- "${staging}" || exit 1
+  sha256sum -- provenance.json || exit 1
+  for arch in "${archs[@]}"; do
+    deb_name="$(jq -r --arg a "${arch}" \
+      '.packages[]|select(.architecture==$a)|.filename' provenance.json)" \
+      || exit 1
+    sha256sum -- "${deb_name}" || exit 1
+  done
+) | LC_ALL=C sort -k2 >"${sums_tmp}" || die "计算 SHA256SUMS 失败"
+install -m 644 -- "${sums_tmp}" "${staging}/SHA256SUMS" || die "写入 SHA256SUMS 失败"
+[[ -s "${staging}/SHA256SUMS" ]] || die "staging 缺少 SHA256SUMS"
+
 # 提交前再核空目录与锁（fd9 仍持有）。
 if [[ -e "${output}" || -L "${output}" ]]; then
   [[ -d "${output}" && ! -L "${output}" ]] || die "提交前 output 不是普通目录"
@@ -742,10 +777,12 @@ fi
 
 [[ -f "${output}/provenance.json" && ! -L "${output}/provenance.json" ]] \
   || die "output 缺少 provenance.json"
+[[ -f "${output}/SHA256SUMS" && ! -L "${output}/SHA256SUMS" ]] \
+  || die "output 缺少 SHA256SUMS"
 dir_is_empty "${output}" && die "output 提交后为空"
 
 rm -rf -- "${work}" "${scratch}"
 work_owned=0
 scratch_owned=0
 success=1
-printf 'build_go_deb.sh: ok packages=%s version=%s-%s\n' "${#archs[@]}" "${upstream_ver}" "${revision}"
+printf 'gen_deb_golang.sh: ok packages=%s version=%s-%s\n' "${#archs[@]}" "${upstream_ver}" "${revision}"

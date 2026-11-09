@@ -399,7 +399,7 @@ fi
 log "== 发布者身份真实 run 段 =="
 ID_SCRIPT="${EVIDENCE}/runs/publisher.sh"
 set +e
-extract_step_run build_verify '解析发布者命令级身份' "${ID_SCRIPT}" \
+extract_step_run preflight '解析发布者命令级身份' "${ID_SCRIPT}" \
   >"${EVIDENCE}/runs/publisher-extract.log" 2>&1
 id_extract_rc=$?
 set -e
@@ -547,14 +547,25 @@ else
   fail "跳过身份执行：无抽取脚本"
 fi
 
-# build 保存与 README 回写消费同一 publisher 核验输出（经 job outputs 透传）。
-if grep -Fq 'steps.publisher.outputs.git_name' "${PUB}" \
-  && grep -Fq 'steps.publisher.outputs.git_email' "${PUB}" \
+# preflight 先核 publisher；build_verify/README 经 job outputs 透传同一身份。
+if grep -Fq 'needs.preflight.outputs.git_name' "${PUB}" \
+  && grep -Fq 'needs.preflight.outputs.git_email' "${PUB}" \
   && grep -Fq 'needs.build_verify.outputs.git_name' "${PUB}" \
   && grep -Fq 'needs.build_verify.outputs.git_email' "${PUB}"; then
   pass "保存/回写消费同一 publisher 核验输出"
 else
   fail "保存/回写未消费 publisher 核验输出"
+fi
+if grep -Eq 'go_release:[[:space:]]*$' "${PUB}" \
+  && awk '
+    $0 ~ /^  go_release:/ {hit=1}
+    hit && $0 ~ /^    needs:[[:space:]]*preflight[[:space:]]*$/ {found=1}
+    hit && /^  [a-zA-Z0-9_]+:/ && $0 !~ /go_release:/ {exit}
+    END {exit found?0:1}
+  ' "${PUB}"; then
+  pass "go_release 依赖 preflight（缺私钥不发版）"
+else
+  fail "go_release 未 needs preflight"
 fi
 
 # ---------- Go 离线构包 CI 步骤消费者回归（shim，非 Go 构包验收） ----------
@@ -594,15 +605,14 @@ if [[ -s "${GO_SCRIPT}" ]]; then
   else
     pass "Go 离线步骤无 --live"
   fi
-  if grep -Eq 'chmod a\+x[[:space:]].*scripts/build_go_deb\.sh' "${GO_SCRIPT}" \
-    && grep -Eq 'chmod a\+x[[:space:]].*tests/go_deb_test\.sh|chmod a\+x[[:space:]].*scripts/build_go_deb\.sh[[:space:]]+tests/go_deb_test\.sh' "${GO_SCRIPT}" \
+  if grep -Eq 'chmod a\+x[[:space:]].*gen_deb_golang\.sh' "${GO_SCRIPT}" \
+    && grep -Eq 'chmod a\+x[[:space:]].*tests/go_deb_test\.sh|chmod a\+x[[:space:]].*gen_deb_golang\.sh[[:space:]].*tests/go_deb_test\.sh' "${GO_SCRIPT}" \
     && grep -Eq '(^|[[:space:]])tests/go_deb_test\.sh([[:space:]]|$)' "${GO_SCRIPT}"; then
-    pass "Go 离线步骤 chmod 两脚本并调用 go_deb_test.sh"
+    pass "Go 离线步骤 chmod gen/build 与 go_deb_test.sh"
   else
-    # 允许单行 chmod 两个路径
-    if grep -Fq 'scripts/build_go_deb.sh' "${GO_SCRIPT}" \
+    if grep -Fq 'gen_deb_golang.sh' "${GO_SCRIPT}" \
       && grep -Fq 'tests/go_deb_test.sh' "${GO_SCRIPT}"; then
-      pass "Go 离线步骤引用 build_go_deb.sh 与 go_deb_test.sh"
+      pass "Go 离线步骤引用 gen_deb_golang.sh 与 go_deb_test.sh"
     else
       fail "Go 离线步骤未正确 chmod/调用 Go 测试入口"
     fi
@@ -613,8 +623,10 @@ if [[ -s "${GO_SCRIPT}" ]]; then
     local sandbox="$1"
     mkdir -p -- "${sandbox}/scripts" "${sandbox}/tests"
     # 占位：仅满足 chmod；非真实构包脚本。
-    printf '%s\n' '#!/usr/bin/env bash' '# SHIM placeholder build_go_deb — not real' 'exit 0' \
-      >"${sandbox}/scripts/build_go_deb.sh"
+    printf '%s\n' '#!/usr/bin/env bash' '# SHIM placeholder gen_deb_golang — not real' 'exit 0' \
+      >"${sandbox}/gen_deb_golang.sh"
+    printf '%s\n' '#!/usr/bin/env bash' '# SHIM placeholder build — not real' 'exit 0' \
+      >"${sandbox}/build.sh"
     cat >"${sandbox}/tests/go_deb_test.sh" <<'SHIM'
 #!/usr/bin/env bash
 # SHIM: workflow_test Go CI orchestration probe — NOT go_deb package acceptance.
@@ -639,7 +651,7 @@ if [[ $# -gt 0 ]]; then
 fi
 exit "$(tr -d '[:space:]' <"${RC_FILE}")"
 SHIM
-    chmod a+x -- "${sandbox}/scripts/build_go_deb.sh" "${sandbox}/tests/go_deb_test.sh"
+    chmod a+x -- "${sandbox}/gen_deb_golang.sh" "${sandbox}/build.sh" "${sandbox}/tests/go_deb_test.sh"
   }
 
   run_go_ci_step() {

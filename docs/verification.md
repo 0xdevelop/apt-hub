@@ -32,7 +32,14 @@
 - 隔离签名源下的 `apt -s upgrade` 与 `apt-get -s upgrade` 均选择 `apt-hub-go` 从明确标注的旧版状态夹具 `0.0.1-1` 升到 `1.27.3-1`，不删除包、不改 Ubuntu Go。它们是升级计划验证，不是实际安装升级。
 - 真实故障注入确认：无法枚举的输出目录不覆写用户文件；Go 树复制失败时不产出成功包；完整双架构产物与来源记录经目录切换一起提交；提交失败恢复原空目录的 inode 与权限。当前源码与系统保护摘要核对通过。
 
-证据在项目 `tmp/update-fix-parent/`、`tmp/go-final-parent/` 及其中的原始日志、退出码、来源记录和源码快照。Go 的统一维护接线、正式包承载、远端 CI 与生产部署尚未验收，不把上述本地结果写入已生效列表。
+证据在项目 `tmp/update-fix-parent/`、`tmp/go-final-parent/` 及其中的原始日志、退出码、来源记录和源码快照。以上证明本地构包与升级计划，不证明 Go 存在可供本源使用的官方 `.deb`。此前把未完成事项写成“正式包承载”不符合仅维护元数据的边界；不会为生成包另设本项目下载落点。后续阶段 CI 结果见下节，不把本地结果写入已生效列表。
+
+## 2026-11-09 阶段交付与来源边界核对
+
+- 提交 `322c3b64dbf325637790e42bfb2d240efe6dec55` 已推送 `main`，远端 [ubuntu-test](https://github.com/0xdevelop/apt-hub/actions/runs/42590643708) 为 `completed/success`；该阶段验证不等于生产部署。
+- 同步 `111`、渲染 `246`、工作流 `28`、加源 `54`、维护入口 `45`、Go 离线 `116` 项分别零失败。完整 Ubuntu 测试第一次因一个组合获取官方索引超时退出 `1`，随后完整重跑退出 `0`、`failures=0`，四个版本 × 两种架构均通过。原失败和重试日志分开保留。
+- 按用户再次明确的“仓库只存包信息、安装包从官方地址下载”，本项目不在 Releases 转存安装包。实际读取 [Go 官方发布索引](https://go.dev/dl/?mode=json) 和[安装说明](https://go.dev/doc/install)，当前 Linux 发布资产为 `tar.gz`；对已有且摘要匹配的官方归档执行 `dpkg-deb --info`，退出 `2`，报告“并非 Debian 格式的包文件”；用隔离配置执行 `apt-get -s install` 同一归档，退出 `100`，报告“不支持的文件”。这是格式差异，不是给索引补一个下载地址即可解决。
+- 本地 Go 构包结果与官方包直下的验收仍须分开，未将 Go 写入已生效列表，也未改动 RustDesk 已验证的直下链。原始证据在 `tmp/stage-publish-parent/`、`tmp/go-arch-resume-parent/` 和 `tmp/official-download-boundary/`。
 
 ## 修订前历史记录
 

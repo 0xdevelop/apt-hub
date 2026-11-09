@@ -22,6 +22,7 @@ software_id=""
 root_arg=""
 architecture=""
 cacert=""
+replace_key_fpr=""
 target_root="/"
 isolated=0
 series=""
@@ -32,6 +33,8 @@ lock_fd=""
 success=0
 created_key=0
 created_sources=0
+replaced_key=0
+key_backup_mode=""
 
 die() {
   printf 'add_source.sh: %s\n' "$*" >&2
@@ -40,7 +43,7 @@ die() {
 
 usage() {
   cat >&2 <<'EOF'
-用法: add_source.sh --site-url <https站点URL> --software <软件id> [--root <已存在隔离根>] [--architecture <架构>] [--cacert <仅隔离根>]
+用法: add_source.sh --site-url <https站点URL> --software <软件id> [--root <已存在隔离根>] [--architecture <架构>] [--cacert <仅隔离根>] [--replace-key <新公钥完整40hex指纹>]
 EOF
   exit 2
 }
@@ -143,6 +146,52 @@ public_key_fingerprint() {
   local keyfile="$1"
   gpg --batch --show-keys --with-colons -- "${keyfile}" 2>/dev/null \
     | awk -F: '$1=="fpr"{print $10; exit}'
+}
+
+# 主指纹：仅统计 pub 后的首个 fpr，忽略 subkey。
+primary_public_key_fingerprints() {
+  local keyfile="$1"
+  gpg --batch --show-keys --with-colons -- "${keyfile}" 2>/dev/null \
+    | awk -F: '
+      $1=="pub" { want=1; next }
+      $1=="sub" { want=0; next }
+      $1=="fpr" && want { print $10; want=0 }
+    '
+}
+
+assert_unique_primary_fingerprint() {
+  local keyfile="$1"
+  local expected="$2"
+  local fprs n got
+  fprs="$(primary_public_key_fingerprints "${keyfile}")"
+  n="$(printf '%s\n' "${fprs}" | grep -c . || true)"
+  [[ "${n}" -eq 1 ]] || die "下载公钥必须恰好一个主指纹，实际 ${n} 个"
+  got="$(strip_fp "$(printf '%s\n' "${fprs}" | head -n1)")"
+  [[ "${got}" =~ ^[A-F0-9]{40}$ ]] || die "无法读取下载公钥主指纹"
+  [[ "${got}" == "${expected}" ]] || die "下载公钥主指纹不符: 实际=${got} 期望=${expected}"
+}
+
+# 共享专用 keyring 的 apt-hub-*.sources 必须同站点。
+assert_shared_key_sources_same_site() {
+  local sources_dir="$1" site="$2"
+  local f signed_by uris
+  shopt -s nullglob
+  for f in "${sources_dir}"/apt-hub-*.sources; do
+    [[ -f "${f}" && ! -L "${f}" ]] || continue
+    signed_by="$(awk -F': ' '$1=="Signed-By"{print $2; exit}' "${f}")"
+    case "${signed_by}" in
+      /etc/apt/keyrings/apt-hub.gpg|*/etc/apt/keyrings/apt-hub.gpg) ;;
+      *) continue ;;
+    esac
+    uris="$(awk -F': ' '$1=="URIs"{print $2; exit}' "${f}")"
+    case "${uris}" in
+      "mirror+${site}/repos/"*/mirror.list) ;;
+      *)
+        die "共享钥的其他源不属于同一站点: ${f}"
+        ;;
+    esac
+  done
+  shopt -u nullglob
 }
 
 assert_site_url() {
@@ -428,6 +477,18 @@ rollback_created() {
   fi
 }
 
+# shellcheck disable=SC2317 # 提交失败路径调用
+restore_replaced_key() {
+  if [[ "${replaced_key}" -eq 1 && -n "${scratch}" && -f "${scratch}/apt-hub.gpg.backup" && ! -L "${scratch}/apt-hub.gpg.backup" ]]; then
+    if atomic_install_file "${scratch}/apt-hub.gpg.backup" "${key_path}" "${key_backup_mode}"; then
+      replaced_key=0
+      return 0
+    fi
+    return 1
+  fi
+  return 0
+}
+
 # 无写入预检目录目的：已存在组件无 symlink 且为目录；缺失叶允许。
 preflight_dest_dir() {
   local dir="$1"
@@ -538,6 +599,9 @@ while [[ $# -gt 0 ]]; do
     --cacert)
       [[ $# -ge 2 ]] || usage
       cacert="$2"; shift 2 ;;
+    --replace-key)
+      [[ $# -ge 2 ]] || usage
+      replace_key_fpr="$2"; shift 2 ;;
     -h|--help)
       usage ;;
     *)
@@ -546,10 +610,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "${site_url}" && -n "${software_id}" ]] || usage
-require_cmd bash curl gpg gpgv flock dpkg date awk sed grep tr chmod mkdir mv cp rm realpath sha256sum id readlink
+require_cmd bash curl gpg gpgv flock dpkg date awk sed grep tr chmod mkdir mv cp rm realpath sha256sum id readlink head stat
 
 site_url="$(assert_site_url "${site_url}")"
 software_id="$(assert_software_id "${software_id}")"
+if [[ -n "${replace_key_fpr}" ]]; then
+  replace_key_fpr="$(strip_fp "${replace_key_fpr}")"
+  [[ "${replace_key_fpr}" =~ ^[A-F0-9]{40}$ ]] || die "--replace-key 必须是 40 位十六进制完整指纹"
+fi
 resolve_target_root
 resolve_identity
 
@@ -625,13 +693,31 @@ chmod 0644 -- "${scratch}/final.gpg" "${scratch}/final.sources"
 
 new_fpr="$(strip_fp "$(public_key_fingerprint "${scratch}/final.gpg")")"
 [[ "${new_fpr}" =~ ^[A-F0-9]{40}$ ]] || die "无法读取下载公钥指纹"
+assert_unique_primary_fingerprint "${scratch}/final.gpg" "${new_fpr}"
+if [[ -n "${replace_key_fpr}" ]]; then
+  [[ "${new_fpr}" == "${replace_key_fpr}" ]] \
+    || die "下载公钥指纹与 --replace-key 不符: 下载=${new_fpr} 指定=${replace_key_fpr}"
+fi
+
+replacing_key=0
 if [[ -f "${key_path}" && ! -L "${key_path}" ]]; then
   old_fpr="$(strip_fp "$(public_key_fingerprint "${key_path}")")"
   [[ "${old_fpr}" =~ ^[A-F0-9]{40}$ ]] || die "无法读取已有公钥指纹"
-  [[ "${old_fpr}" == "${new_fpr}" ]] || die "拒绝静默换钥/跨站点同名钥冲突: 已有=${old_fpr} 下载=${new_fpr}"
+  if [[ "${old_fpr}" != "${new_fpr}" ]]; then
+    if [[ -z "${replace_key_fpr}" ]]; then
+      die "拒绝静默换钥/跨站点同名钥冲突: 已有=${old_fpr} 下载=${new_fpr}"
+    fi
+    replacing_key=1
+  fi
 fi
 
+if [[ "${replacing_key}" -eq 1 ]]; then
+  assert_shared_key_sources_same_site "${sources_dir}" "${site_url}"
+fi
+
+sources_missing=1
 if [[ -f "${sources_path}" && ! -L "${sources_path}" ]]; then
+  sources_missing=0
   if cmp -s -- "${sources_path}" "${scratch}/final.sources"; then
     if [[ -f "${key_path}" ]] && cmp -s -- "${key_path}" "${scratch}/final.gpg"; then
       printf '已添加（幂等）: %s\n' "${sources_path}"
@@ -650,17 +736,31 @@ if [[ ! -f "${key_path}" ]]; then
     die "写入公钥失败"
   fi
   created_key=1
-else
-  if ! cmp -s -- "${key_path}" "${scratch}/final.gpg"; then
-    die "已有公钥指纹相同但内容不同，拒绝覆盖"
+elif cmp -s -- "${key_path}" "${scratch}/final.gpg"; then
+  :
+elif [[ "${replacing_key}" -eq 1 ]]; then
+  key_backup_mode="$(stat -c '%a' "${key_path}")"
+  [[ "${key_backup_mode}" =~ ^[0-7]{3,4}$ ]] || die "无法读取已有公钥权限"
+  cp -f -- "${key_path}" "${scratch}/apt-hub.gpg.backup" || die "备份已有公钥失败"
+  chmod -- "${key_backup_mode}" "${scratch}/apt-hub.gpg.backup" || die "备份公钥权限失败"
+  if ! atomic_install_file "${scratch}/final.gpg" "${key_path}" "${key_backup_mode}"; then
+    die "替换公钥失败"
   fi
+  replaced_key=1
+else
+  die "已有公钥指纹相同但内容不同，拒绝覆盖"
 fi
 
-if ! atomic_install_file "${scratch}/final.sources" "${sources_path}" 0644; then
-  rollback_created "${key_path}" "${sources_path}"
-  die "写入 sources 失败（已回滚本次写入）"
+if [[ "${sources_missing}" -eq 1 ]] || ! cmp -s -- "${sources_path}" "${scratch}/final.sources"; then
+  if ! atomic_install_file "${scratch}/final.sources" "${sources_path}" 0644; then
+    if [[ "${replaced_key}" -eq 1 ]]; then
+      restore_replaced_key || true
+    fi
+    rollback_created "${key_path}" "${sources_path}"
+    die "写入 sources 失败（已回滚本次写入）"
+  fi
+  created_sources=1
 fi
-created_sources=1
 
 printf '已添加: %s\n' "${sources_path}"
 printf '下一步: apt update && apt install %s\n' "${package_name}"

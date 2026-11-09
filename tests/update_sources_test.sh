@@ -737,16 +737,28 @@ else
   fail "ci_missing_chmod_update_sources"
 fi
 
-# Go 尚未接入：报告侧在结果文件写明；此处断言生产 catalog 仍仅 rustdesk、入口未引入 go 打包
-if jq -e '[.packages[].id] == ["rustdesk"]' "${ROOT}/config/packages.json" >/dev/null; then
-  pass "catalog_still_rustdesk_only_go_pending"
+# 生产 catalog 含 rustdesk + golang；入口透传 Go/换钥参数且强制 --verify-downloads
+if jq -e '[.packages[].id] == ["rustdesk","golang"]
+  and (.packages[] | select(.id=="golang") | .source_type=="go_official_archive" and .package=="apt-hub-go")' \
+  "${ROOT}/config/packages.json" >/dev/null; then
+  pass "catalog_rustdesk_and_golang"
 else
   fail "catalog_unexpected_packages"
 fi
-if ! grep -Eiq 'golang|go-lang|go\.dev' "${UPD}" 2>/dev/null; then
-  pass "update_sources_no_go_packaging"
+if grep -Fq -- '--package-repository' "${UPD}" \
+  && grep -Fq -- '--go-release-tag' "${UPD}" \
+  && grep -Fq -- '--rotate-from' "${UPD}" \
+  && grep -Fq -- '--verify-downloads' "${UPD}"; then
+  pass "update_sources_go_rotate_verify_flags"
 else
-  fail "update_sources_mentions_go_packaging"
+  fail "update_sources_missing_go_rotate_verify_flags"
+fi
+if [[ -f "${WORK_REAL}/verify/summary.json" ]] \
+  && jq -e 'all(.results[]; .verify_downloads==true and (.download_exit|type=="number") and (.upgrade_exit|type=="number"))' \
+  "${WORK_REAL}/verify/summary.json" >/dev/null; then
+  pass "real_chain_verify_downloads_enabled"
+else
+  fail "real_chain_verify_downloads_missing"
 fi
 
 kill_own_gpg "${REAL}/gnupg-real"

@@ -7,7 +7,7 @@ export LANG=C
 export LANGUAGE=C
 
 usage() {
-  echo "用法: scripts/verify_ubuntu.sh --site <候选站点> --releases <releases.json> --work-dir <证据目录>" >&2
+  echo "用法: scripts/verify_ubuntu.sh --site <候选站点> --releases <releases.json> --work-dir <证据目录> [--verify-downloads]" >&2
   exit 2
 }
 
@@ -23,10 +23,12 @@ ARM64_PORTS='https://ports.ubuntu.com/ubuntu-ports'
 COMPONENTS='main restricted universe multiverse'
 UPDATE_TIMEOUT=300
 SIMULATE_TIMEOUT=120
+DOWNLOAD_TIMEOUT=600
 
 site_arg=""
 releases_arg=""
 work_arg=""
+verify_downloads=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --site)
@@ -43,6 +45,10 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || usage
       work_arg="$2"
       shift 2
+      ;;
+    --verify-downloads)
+      verify_downloads=1
+      shift
       ;;
     -h|--help)
       usage
@@ -61,6 +67,12 @@ command -v timeout >/dev/null 2>&1 || die "需要 timeout"
 command -v gpg >/dev/null 2>&1 || die "需要 gpg"
 command -v flock >/dev/null 2>&1 || die "需要 flock"
 command -v find >/dev/null 2>&1 || die "需要 find"
+if [[ "$verify_downloads" -eq 1 ]]; then
+  command -v dpkg-deb >/dev/null 2>&1 || die "需要 dpkg-deb"
+  command -v sha256sum >/dev/null 2>&1 || die "需要 sha256sum"
+  command -v curl >/dev/null 2>&1 || die "需要 curl"
+  command -v timeout >/dev/null 2>&1 || die "需要 timeout"
+fi
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 root_dir=$(cd -- "$script_dir/.." && pwd)
@@ -630,6 +642,139 @@ for group in "${groups[@]}"; do
     fi
   fi
 
+  download_rc=0
+  upgrade_rc=0
+  download_log="$slot/download.log"
+  upgrade_log="$slot/upgrade.log"
+  : >"$download_log"
+  : >"$upgrade_log"
+  if [[ "$ok" == true && "$verify_downloads" -eq 1 ]]; then
+    archives_dir="$root/var/cache/apt/archives"
+    mkdir -p -- "$archives_dir/partial"
+    # 与 sync 同源：curl 拉 state.asset.url 入隔离 archives，再核 hash/size/字段（非日志字符串冒充）。
+    while IFS=$'\t' read -r pkg_name pkg_ver pkg_id; do
+      [[ -n "$pkg_name" ]] || continue
+      expected_sha="$(jq -r --arg id "$pkg_id" --arg a "$arch" '
+        [.packages[]? | select(.id==$id) | .assets[]? | select(.architecture==$a) | .sha256][0] // empty
+      ' "$state")"
+      expected_size="$(jq -r --arg id "$pkg_id" --arg a "$arch" '
+        [.packages[]? | select(.id==$id) | .assets[]? | select(.architecture==$a) | (.size|tostring)][0] // empty
+      ' "$state")"
+      expected_fn="$(jq -r --arg id "$pkg_id" --arg a "$arch" '
+        [.packages[]? | select(.id==$id) | .assets[]? | select(.architecture==$a) | .filename][0] // empty
+      ' "$state")"
+      expected_url="$(jq -r --arg id "$pkg_id" --arg a "$arch" '
+        [.packages[]? | select(.id==$id) | .assets[]? | select(.architecture==$a) | .url][0] // empty
+      ' "$state")"
+      [[ "$expected_sha" =~ ^[a-f0-9]{64}$ ]] || die "state 缺少资产 sha256: $pkg_id $arch"
+      [[ "$expected_size" =~ ^[1-9][0-9]*$ ]] || die "state 缺少资产 size: $pkg_id $arch"
+      [[ "$expected_url" == https://* ]] || die "state 资产 url 非法: $pkg_id $arch"
+      dest_name="$(basename -- "$expected_fn")"
+      [[ "$dest_name" == *.deb && "$dest_name" != *..* && "$dest_name" != */* ]] \
+        || die "非法 deb 文件名: $dest_name"
+      dest_deb="$archives_dir/$dest_name"
+      set +e
+      timeout --signal=TERM --kill-after=10 "$DOWNLOAD_TIMEOUT" \
+        curl --fail --silent --show-error --location \
+        --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --connect-timeout 20 --max-time "$DOWNLOAD_TIMEOUT" \
+        --retry 2 --retry-delay 1 --max-redirs 5 \
+        -o "$dest_deb" -- "$expected_url" >>"$download_log" 2>&1
+      download_rc=$?
+      set -e
+      if [[ "$download_rc" -ne 0 || ! -f "$dest_deb" || -L "$dest_deb" ]]; then
+        ok=false
+        failure_class=network
+        error_msg="下载失败: $pkg_id url=$expected_url exit=$download_rc"
+        break
+      fi
+      got_size="$(stat -c '%s' -- "$dest_deb")"
+      got_sha="$(sha256sum -- "$dest_deb" | awk '{print $1}')"
+      if [[ "$got_size" != "$expected_size" || "$got_sha" != "$expected_sha" ]]; then
+        ok=false
+        failure_class=dependency
+        error_msg="下载摘要/大小不符: $pkg_id"
+        break
+      fi
+      deb_pkg="$(dpkg-deb -f -- "$dest_deb" Package)"
+      deb_ver="$(dpkg-deb -f -- "$dest_deb" Version)"
+      deb_arch="$(dpkg-deb -f -- "$dest_deb" Architecture)"
+      if [[ "$deb_pkg" != "$pkg_name" || "$deb_ver" != "$pkg_ver" || "$deb_arch" != "$arch" ]]; then
+        ok=false
+        failure_class=dependency
+        error_msg="下载 deb 字段不符: $pkg_id (Package/Version/Architecture)"
+        break
+      fi
+      packages_file="$repos_root/$pkg_id/dists/$series/main/binary-$arch/Packages"
+      [[ -f "$packages_file" && ! -L "$packages_file" ]] || {
+        ok=false
+        failure_class=dependency
+        error_msg="缺少 Packages: $pkg_id $series/$arch"
+        break
+      }
+      pkg_fn="$(awk -v want="$expected_sha" '
+        BEGIN { RS=""; FS="\n" }
+        {
+          sha=""
+          for (i=1;i<=NF;i++) if ($i ~ /^SHA256: /){split($i,a," "); sha=tolower(a[2])}
+          if (sha==want) {
+            for (i=1;i<=NF;i++) if ($i ~ /^Filename: /){sub(/^Filename: /,"",$i); print $i; exit}
+          }
+        }
+      ' "$packages_file")"
+      if [[ "$pkg_fn" != "$expected_fn" ]]; then
+        ok=false
+        failure_class=dependency
+        error_msg="Packages Filename 与 state 不符: $pkg_id"
+        break
+      fi
+      printf 'downloaded %s sha256=%s size=%s\n' "$dest_deb" "$got_sha" "$got_size" >>"$download_log"
+    done < <(jq -r --arg s "$series" --arg a "$arch" \
+      '.[] | select(.series==$s and .architecture==$a) | [.package,.version,.id] | @tsv' "$combo_tmp")
+
+    if [[ "$ok" == true ]]; then
+      # 显式离线旧版本夹具：写入 status Version=0~apt-hub-verify-fixture，再 apt-get -s upgrade（不安装）
+      status_file="$root/var/lib/dpkg/status"
+      : >"$status_file"
+      while IFS=$'\t' read -r pkg_name _pkg_ver _pkg_id; do
+        [[ -n "$pkg_name" ]] || continue
+        cat >>"$status_file" <<EOF
+Package: ${pkg_name}
+Status: install ok installed
+Priority: optional
+Section: misc
+Installed-Size: 1
+Maintainer: apt-hub-verify-fixture <invalid>
+Architecture: ${arch}
+Version: 0~apt-hub-verify-fixture
+Description: offline older-version fixture for apt-get -s upgrade
+
+EOF
+      done < <(jq -r --arg s "$series" --arg a "$arch" \
+        '.[] | select(.series==$s and .architecture==$a) | [.package,.version,.id] | @tsv' "$combo_tmp")
+      set +e
+      timeout --signal=TERM --kill-after=10 "$SIMULATE_TIMEOUT" \
+        env LC_ALL=C LANG=C LANGUAGE=C apt-get \
+        -c "$root/etc/apt/apt.conf" \
+        -o Debug::NoLocking=true \
+        -o APT::Get::Simulate=true \
+        --simulate \
+        -y \
+        upgrade >"$upgrade_log" 2>&1
+      upgrade_rc=$?
+      set -e
+      if [[ "$upgrade_rc" -ne 0 ]]; then
+        ok=false
+        failure_class=dependency
+        error_msg="apt-get -s upgrade 失败 exit=$upgrade_rc"
+      elif ! grep -Eq '^Inst ' "$upgrade_log"; then
+        ok=false
+        failure_class=dependency
+        error_msg="apt-get -s upgrade 未产生 Inst 行（旧版本夹具未触发升级）"
+      fi
+    fi
+  fi
+
   if [[ "$ok" != true ]]; then
     overall_ok=false
   fi
@@ -640,9 +785,11 @@ for group in "${groups[@]}"; do
     --argjson ok "$( [[ "$ok" == true ]] && echo true || echo false )" \
     --arg failure_class "$failure_class" --arg error "$error_msg" \
     --argjson update_exit "$update_rc" --argjson simulate_exit "$simulate_rc" \
+    --argjson download_exit "$download_rc" --argjson upgrade_exit "$upgrade_rc" \
+    --argjson verify_downloads "$( [[ "$verify_downloads" -eq 1 ]] && echo true || echo false )" \
     --argjson packages "$(jq -c --arg s "$series" --arg a "$arch" \
       '[.[] | select(.series==$s and .architecture==$a) | {id,package,version}]' "$combo_tmp")" \
-    '{series:$series,architecture:$architecture,ok:$ok,failure_class:(if $failure_class=="" then null else $failure_class end),error:(if $error=="" then null else $error end),update_exit:$update_exit,simulate_exit:$simulate_exit,packages:$packages}'
+    '{series:$series,architecture:$architecture,ok:$ok,failure_class:(if $failure_class=="" then null else $failure_class end),error:(if $error=="" then null else $error end),update_exit:$update_exit,simulate_exit:$simulate_exit,download_exit:$download_exit,upgrade_exit:$upgrade_exit,verify_downloads:$verify_downloads,packages:$packages}'
 
   results_json=$(jq -c --slurpfile r "$result_file" '. + $r' <<<"$results_json")
   unset APT_CONFIG

@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: "17 4 * * *"
   workflow_dispatch:
+    inputs:
+      rotate_from:
+        description: 旧公钥完整 40hex 指纹（可选，换钥时传入）
+        required: false
+        type: string
+        default: ""
 
 permissions: {}
 
@@ -12,28 +18,27 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build_verify:
-    name: 构建校验并保存候选
+  preflight:
+    name: 只读预检 Secret/Pages/actor
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 15
     permissions:
-      contents: write
+      contents: read
       pages: read
     outputs:
-      site_ok: ${{ steps.gate.outputs.site_ok }}
-      apt_data_sha: ${{ steps.save_apt_data.outputs.apt_data_sha }}
+      site_url: ${{ steps.pages.outputs.site_url }}
       git_name: ${{ steps.publisher.outputs.git_name }}
       git_email: ${{ steps.publisher.outputs.git_email }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: 安装 CI 临时依赖
+      - name: 安装临时依赖
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates curl jq gnupg dpkg-dev apt-utils
+            ca-certificates curl jq
 
       - name: 检查签名 secret 与 Pages URL
         id: pages
@@ -103,6 +108,60 @@ jobs:
           [[ "${login,,}" == "${ACTOR_LOGIN,,}" ]] || { echo "actor login 与上下文不一致" >&2; exit 1; }
           echo "git_name=${login}" >>"$GITHUB_OUTPUT"
           echo "git_email=${id}+${login}@users.noreply.github.com" >>"$GITHUB_OUTPUT"
+
+  go_release:
+    name: Go 构包发版
+    needs: preflight
+    uses: ./.github/workflows/release.yml
+    permissions:
+      contents: write
+    secrets: inherit
+
+  build_verify:
+    name: 构建校验并保存候选
+    needs:
+      - preflight
+      - go_release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: write
+      pages: read
+    outputs:
+      site_ok: ${{ steps.gate.outputs.site_ok }}
+      apt_data_sha: ${{ steps.save_apt_data.outputs.apt_data_sha }}
+      git_name: ${{ needs.preflight.outputs.git_name }}
+      git_email: ${{ needs.preflight.outputs.git_email }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: 安装 CI 临时依赖
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl jq gnupg dpkg-dev apt-utils binutils xxd
+
+      - name: 采用预检 Pages URL
+        id: pages
+        env:
+          SITE_URL: ${{ needs.preflight.outputs.site_url }}
+        run: |
+          set -euo pipefail
+          [[ -n "${SITE_URL:-}" ]] || { echo "缺少预检 site_url" >&2; exit 1; }
+          echo "site_url=${SITE_URL}" >>"$GITHUB_OUTPUT"
+
+      - name: 采用预检发布者身份
+        id: publisher
+        env:
+          GIT_NAME: ${{ needs.preflight.outputs.git_name }}
+          GIT_EMAIL: ${{ needs.preflight.outputs.git_email }}
+        run: |
+          set -euo pipefail
+          [[ -n "${GIT_NAME:-}" && -n "${GIT_EMAIL:-}" ]] || { echo "缺少预检发布者身份" >&2; exit 1; }
+          echo "git_name=${GIT_NAME}" >>"$GITHUB_OUTPUT"
+          echo "git_email=${GIT_EMAIL}" >>"$GITHUB_OUTPUT"
 
       - name: 从 apt-data 恢复 previous
         env:
@@ -178,11 +237,22 @@ jobs:
           fi
           echo "fingerprint=${fpr}" >>"$GITHUB_OUTPUT"
 
+      - name: 下载 Go 冻结索引（若有）
+        id: go_index
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: go-downloads-json
+          path: tmp
+
       - name: 生成发行版数据并构建候选站点
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SITE_URL: ${{ steps.pages.outputs.site_url }}
           APT_HUB_FINGERPRINT: ${{ steps.gpg.outputs.fingerprint }}
+          GO_RELEASE_TAG: ${{ needs.go_release.outputs.go_release_tag }}
+          PACKAGE_REPOSITORY: ${{ github.repository }}
+          ROTATE_FROM: ${{ inputs.rotate_from }}
         run: |
           set -euo pipefail
           set +x
@@ -191,15 +261,28 @@ jobs:
           fpr=$(printf '%s' "$APT_HUB_FINGERPRINT" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
           [[ "$fpr" =~ ^[A-F0-9]{40}$ ]] || { echo "fingerprint 非法" >&2; exit 1; }
           [[ -n "${SITE_URL:-}" ]] || { echo "缺少 Pages site_url" >&2; exit 1; }
+          [[ -n "${GO_RELEASE_TAG:-}" ]] || { echo "缺少 go_release_tag" >&2; exit 1; }
+          [[ -n "${PACKAGE_REPOSITORY:-}" ]] || { echo "缺少 package-repository" >&2; exit 1; }
           rm -rf tmp/update-candidate
           mkdir -p tmp/update-candidate
-          scripts/update_sources.sh \
-            --catalog config/packages.json \
-            --previous tmp/previous \
-            --work-dir tmp/update-candidate \
-            --gnupghome "$GNUPGHOME" \
-            --fingerprint "$fpr" \
+          update_args=(
+            --catalog config/packages.json
+            --previous tmp/previous
+            --work-dir tmp/update-candidate
+            --gnupghome "$GNUPGHOME"
+            --fingerprint "$fpr"
             --site-url "$SITE_URL"
+            --package-repository "${PACKAGE_REPOSITORY}"
+            --go-release-tag "${GO_RELEASE_TAG}"
+          )
+          if [[ -f tmp/go-downloads.json ]]; then
+            update_args+=(--go-downloads-json tmp/go-downloads.json)
+          fi
+          if [[ -n "${ROTATE_FROM:-}" ]]; then
+            [[ "${ROTATE_FROM}" =~ ^[0-9a-fA-F]{40}$ ]] || { echo "rotate_from 须为 40hex" >&2; exit 1; }
+            update_args+=(--rotate-from "${ROTATE_FROM}")
+          fi
+          scripts/update_sources.sh "${update_args[@]}"
           [[ -f tmp/update-candidate/success.json ]] || { echo "单入口未写出 success.json" >&2; exit 1; }
           jq -e '.ok==true' tmp/update-candidate/success.json >/dev/null \
             || { echo "success.json ok!=true" >&2; exit 1; }

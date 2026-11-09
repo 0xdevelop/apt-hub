@@ -43,9 +43,11 @@ jobs:
           chmod a+x \
             tests/ubuntu_test.sh tests/sync_test.sh tests/render_test.sh \
             tests/workflow_test.sh tests/add_source_test.sh tests/update_sources_test.sh \
+            tests/release_test.sh \
             scripts/ubuntu_releases.sh scripts/verify_ubuntu.sh \
             scripts/sync.sh scripts/render.sh scripts/add_source.sh \
-            scripts/update_sources.sh git_tag.sh
+            scripts/update_sources.sh scripts/release_golang.sh \
+            git_tag.sh build.sh gen_deb_golang.sh
           mkdir -p tmp
           set +e
           (
@@ -54,7 +56,8 @@ jobs:
             tests/render_test.sh &&
             tests/workflow_test.sh &&
             tests/add_source_test.sh &&
-            tests/update_sources_test.sh
+            tests/update_sources_test.sh &&
+            tests/release_test.sh
           ) >tmp/ci-tests.log 2>&1
           rc=$?
           set -e
@@ -94,5 +97,5 @@ jobs:
       - name: Go 离线构包与 APT 升级夹具
         run: |
           set -euo pipefail
-          chmod a+x scripts/build_go_deb.sh tests/go_deb_test.sh
+          chmod a+x gen_deb_golang.sh build.sh tests/go_deb_test.sh
           tests/go_deb_test.sh

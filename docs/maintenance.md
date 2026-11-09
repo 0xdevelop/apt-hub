@@ -34,7 +34,7 @@ bash scripts/update_sources.sh --catalog config/packages.json --previous tmp/pre
 
 其余参数是候选目录、站点和发行版数据输入；入口只生成候选，不上传、不推送、不部署。
 
-当前入口已接通官方 `.deb` 路径；Go 构包与统一发布衔接仍在实施，不能把候选成功等同于两款软件均已上线。
+当前入口已接通 RustDesk 官方 `.deb` 路径。Go 本地构包验证不代表官方提供了该 `.deb`；其官方 Linux `tar.gz` 与标准 APT 的安装格式差异尚未解决。不会通过本仓 Releases 或其他本项目下载落点转存安装包来绕过这一问题，两款软件不能因此记为均已上线。
 
 ## 本地验证
 
