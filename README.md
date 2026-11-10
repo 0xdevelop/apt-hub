@@ -58,35 +58,55 @@ umask 077 && mkdir -p tmp && key_dir=$(mktemp -d "$(pwd -P)/tmp/k.XXXXXX") && ch
 
 若路径长度检查未通过或 GnuPG 报 `File name too long`，换到绝对路径更短的项目副本重试。
 
-2. **保存私钥**：仓库 **Settings → Secrets and variables → Actions → New repository secret**，名称填 `APT_HUB_GPG_PRIVATE_KEY`，值填 `private-key.asc` **完整内容（含首尾标记）**，不是 Variables。离线备份整个密钥目录，不将私钥发到聊天或提交 Git；`tmp/` 不是备份位置。
-3. **启用 Pages**：**Settings → Pages → Source → GitHub Actions**。只需上述一个 Secret；公钥和指纹随源公开，`GITHUB_TOKEN` 由 Actions 自带。
-4. **发布**：触发 `ubuntu-publish`，首次 `rotate_from` 留空。部署成功后再用已生效列表中的加源命令；CI 通过不代表源已上线。
+2. **保存私钥**：仓库 **Settings → Secrets and variables → Actions → Secrets → New repository secret**，名称填 `APT_HUB_GPG_PRIVATE_KEY`，值填 `private-key.asc` **完整内容（含首尾标记）**。若误放在 **Variables**，请移到 **Secrets** 并删除同名 Variable；工作流只读取 Secret。离线备份整个密钥目录，不将私钥发到聊天或提交 Git；`tmp/` 不是备份位置。
+3. **启用 Pages**：**Settings → Pages → Source → GitHub Actions**。只需上述一个 Secret；`GITHUB_TOKEN` 由 Actions 自带。
+4. **发布**：**Actions → ubuntu-publish → Run workflow**，分支选 `main`，首次 `rotate_from` 留空。部署成功后再用已生效列表中的加源命令；CI 通过不代表源已上线。
 
-### 私钥丢失或泄露
+### 公钥放哪里、怎么读
 
-- 仅丢失本地文件且有备份：恢复原钥，无需使用者换钥。
-- 原钥无法恢复或疑似泄露：生成新钥，更新同一个 Secret；疑似泄露时先暂停发布并公告，有撤销证书则一并发布。
+公钥**不复制进 Markdown**。发布流程从私钥导出独立文件 `apt-hub.gpg`：仓库保存在 `apt-data` 分支根目录，部署后位于 **`<站点根地址>/apt-hub.gpg`**。加源脚本固定从该地址读取，并写入使用者的 `/etc/apt/keyrings/apt-hub.gpg`；不用额外的公钥 Secret 或另一套读取规则。
 
-换钥发布时，`rotate_from` 填**旧完整指纹**。流程用已发布旧公钥校验原索引，无需旧私钥，也不删除 `apt-data`。成功后通过独立可信渠道公告**新完整指纹**，使用者按下节修复。
-
-### 使用者换钥修复
-
-常见报错片段（尖括号为占位符）：
-
-```text
-NO_PUBKEY <新钥的Key-ID>
-EXPKEYSIG <旧钥的Key-ID> <签名身份>
-```
-
-`NO_PUBKEY` 表示缺公钥，`EXPKEYSIG` 表示钥已过期；须确认维护者已换钥再修复。`BADSIG`、摘要不符或指纹不符应停止，不关闭验签。
-
-将下列占位值替换为真实站点根地址、已添加的软件标识（如 `rustdesk` 或 `golang`），以及维护者通过独立可信渠道公告的 **40 位新完整指纹**：
+下面命令仅显示公钥和完整指纹，不导入默认密钥库。将站点地址替换为已部署的 Pages 根地址；首次发布前该文件尚不存在：
 
 ```bash
-site_url='https://packages.example.test/tools' && software='rustdesk' && new_fpr='<维护者公告的新完整指纹>' && curl -fsSL --proto '=https' --proto-redir '=https' -o add_source.sh "$site_url/add_source.sh" && chmod a+x ./add_source.sh && sudo ./add_source.sh --site-url "$site_url" --software "$software" --replace-key "$new_fpr" && sudo apt update
+site_url='https://packages.example.test/tools' && mkdir -p tmp && curl -fsSL --proto '=https' --proto-redir '=https' -o tmp/apt-hub-public.gpg "$site_url/apt-hub.gpg" && gpg --batch --show-keys --with-fingerprint tmp/apt-hub-public.gpg
 ```
 
-只替换本源专用公钥和匹配的 `.sources`，不改其他源；失败回滚，回滚失败则保留备份并显示恢复路径。成功后删除下载副本。共享该公钥的本源软件无需重复导入。
+下载文件可供程序直接读取；其指纹应与维护者公告的完整指纹一致，不能把同次下载显示的指纹当作独立证明。
+
+### 仓库维护者恢复
+
+**A. 原钥可用：不换钥**
+
+1. Actions Secret 仍有效则不用改；若 Secret 丢失，将备份 `private-key.asc` 的完整内容恢复到同名 Secret。
+2. **Actions → ubuntu-publish → Run workflow**，选 `main`，`rotate_from` **留空**。
+3. 发布成功即恢复。公钥没变，使用者无需操作。
+
+**B. 原钥无法恢复或疑似泄露：换新钥**
+
+1. 疑似泄露时先暂停发布；有撤销证书则公告旧钥撤销。以下步骤用于已经发布过的源。
+2. 在仓库根目录执行下列命令，从工作流要恢复的 `apt-data` 快照读取**旧完整指纹**：
+
+```bash
+mkdir -p tmp && git fetch origin refs/heads/apt-data && git show FETCH_HEAD:apt-hub.gpg >tmp/apt-hub-old.gpg && gpg --batch --show-keys --with-colons tmp/apt-hub-old.gpg >tmp/apt-hub-old.info && old_fpr=$(awk -F: '$1=="fpr" && !seen {print $10; seen=1}' tmp/apt-hub-old.info) && test "${#old_fpr}" -eq 40 && printf 'rotate_from=%s\n' "$old_fpr"
+```
+
+3. 用上面的生成命令创建新钥，将新 `private-key.asc` 完整内容更新到**同一个 Secret**。
+4. **Actions → ubuntu-publish → Run workflow**，选 `main`，`rotate_from` 填步骤 2 的**旧 40 位完整指纹**，不是新指纹。无需旧私钥，不删除 `apt-data`。
+5. 发布成功后，公告新钥生成目录中 `fingerprint.txt` 的**新完整指纹**，通知使用者按下节修复。
+
+### 使用者恢复
+
+- 维护者恢复的是原钥：不用换公钥，只执行 `sudo apt update`。
+- 维护者公告已换钥：先核实公告的**新 40 位完整指纹**，再执行下列命令。将占位值替换为真实站点根地址、自己已添加的软件标识（`golang` 或 `rustdesk`）和新指纹：
+
+```bash
+site_url='https://packages.example.test/tools' && software='golang' && new_fpr='<维护者公告的新完整指纹>' && mkdir -p tmp/apt-hub-repair && (cd tmp/apt-hub-repair && curl -fsSL --proto '=https' --proto-redir '=https' -o add_source.sh "$site_url/add_source.sh" && chmod a+x ./add_source.sh && sudo ./add_source.sh --site-url "$site_url" --software "$software" --replace-key "$new_fpr") && sudo apt update
+```
+
+脚本会下载新公钥、核对指纹及签名，只修复本源专用公钥和匹配的 `.sources`；共享该公钥的本源软件修复一次即可。成功后删除下载脚本；失败回滚，回滚失败则保留备份并显示恢复路径。
+
+常见报错：`NO_PUBKEY` 表示缺公钥，`EXPKEYSIG` 表示钥已过期；须确认维护者已换钥再执行换钥修复。`BADSIG`、摘要或指纹不符应停止，不关闭验签。
 
 ## 文档
 

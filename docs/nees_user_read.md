@@ -8,10 +8,10 @@
 
 1. 使用自己的公开仓库；启用 Actions。fork 的定时工作流需要手动启用。
 2. **Settings → Pages → Source** 选择 **GitHub Actions**。
-3. 在 **Settings → Secrets and variables → Actions** 只添加 `APT_HUB_GPG_PRIVATE_KEY`，值为 Actions 直接用于签名的 ASCII armored 私钥。私钥不提交 Git、不发到聊天。
+3. 在 **Settings → Secrets and variables → Actions → Secrets → New repository secret** 添加 `APT_HUB_GPG_PRIVATE_KEY`，值为完整的无口令 ASCII 私钥（含首尾标记）。不要放在 Variables、提交 Git 或发到聊天。
 4. 在 Actions 手动运行 `ubuntu-publish`。成功后使用 Pages 显示的站点地址；以后按工作流定时维护。
 
-公钥和指纹会随源公开；Pages 地址和发布者身份由 Actions 当前上下文取得。不需要第二个 Secret。
+公钥由流程导出到 `apt-data` 分支根目录的 `apt-hub.gpg`，部署后固定从 `<站点根地址>/apt-hub.gpg` 下载，不嵌入 Markdown。Pages 地址和发布者身份由 Actions 取得，不需要第二个 Secret。
 
 ## 只是使用已发布的源
 
@@ -29,4 +29,4 @@ curl -fsSL --proto '=https' --proto-redir '=https' -o add_source.sh 'https://pac
 
 索引来自该 Pages，由 APT 按签名索引校验包。RustDesk 等官方已有的 `.deb` 从软件官方地址下载；Go 官方提供归档，由本项目转换成真实 Debian 包后从本仓 Releases assets 下载。源码仓、数据分支和 Pages 不存安装包。不要关闭验签，不使用 `trusted=yes`。客户端须能访问 Pages、对应 GitHub Release 及其下载 CDN；Pages 不代替代理，也不兜底提供被上游删除的原包。
 
-签名密钥生成、离线备份、私钥丢失或泄露后的换钥，以及 `NO_PUBKEY` 等客户端修复指令，见 [README 的密钥说明](../README.md#维护者首次启用与签名密钥)。维护者只配置一个私钥 Secret；使用者只安装公开公钥，不接触维护者私钥。
+维护者按 [README 的恢复步骤](../README.md#仓库维护者恢复) 选择恢复原钥或换新钥；使用者按 [README 的修复命令](../README.md#使用者恢复) 操作。公钥读取命令见 [公钥放哪里、怎么读](../README.md#公钥放哪里怎么读)。使用者不接触私钥。
