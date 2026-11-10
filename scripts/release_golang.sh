@@ -13,7 +13,7 @@ PROJECT_TMP="${PROJECT_ROOT}/tmp"
 GO_TAG_RE='^go[0-9]+\.[0-9]+\.[0-9]+$'
 REPO_RE='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
 HEX40='^[a-f0-9]{40}$'
-REL_TAG_RE='^apt-hub-go-[0-9]+\.[0-9]+\.[0-9]+-[1-9][0-9]*$'
+REL_TAG_RE='^golang-[0-9]+\.[0-9]+\.[0-9]+-[1-9][0-9]*$'
 DEC_POS='^[1-9][0-9]*$'
 
 die() {
@@ -26,11 +26,11 @@ usage() {
 用法:
   scripts/release_golang.sh prepare --repository <owner/repo> --config <config/go.json>
       [--work-dir <tmp内目录>] [--downloads-json <已有索引>] [--version <goX.Y.Z>]
-  scripts/release_golang.sh status --repository <owner/repo> --tag <apt-hub-go-X.Y.Z-R>
+  scripts/release_golang.sh status --repository <owner/repo> --tag <golang-X.Y.Z-R>
       [--fetch-dir <tmp内目录>]
-  scripts/release_golang.sh upload --repository <owner/repo> --tag <apt-hub-go-X.Y.Z-R>
+  scripts/release_golang.sh upload --repository <owner/repo> --tag <golang-X.Y.Z-R>
       --asset-dir <构包输出> --source-sha <40hex> [--draft-body <文件>]
-  scripts/release_golang.sh prune --repository <owner/repo> --current-tag <apt-hub-go-X.Y.Z-R>
+  scripts/release_golang.sh prune --repository <owner/repo> --current-tag <golang-X.Y.Z-R>
       [--apt-data-ref <ref>] [--keep-recent <N>]
 EOF
   exit 2
@@ -43,31 +43,131 @@ require_cmd() {
   done
 }
 
-under_tmp() {
-  local abs="$1"
-  [[ "${abs}" == "${PROJECT_TMP}" || "${abs}" == "${PROJECT_TMP}/"* ]]
+under_dir() {
+  local parent="$1" child="$2"
+  [[ "${child}" == "${parent}" || "${child}" == "${parent}/"* ]]
+}
+
+assert_no_symlink_components() {
+  local path="$1"
+  local prefix="" part
+  [[ "${path}" == /* ]] || die "路径必须是绝对路径: ${path}"
+  prefix="/"
+  local -a parts=()
+  IFS=/ read -r -a parts <<< "${path#/}"
+  for part in "${parts[@]}"; do
+    [[ -n "${part}" ]] || continue
+    prefix="${prefix%/}/${part}"
+    if [[ -L "${prefix}" ]]; then
+      die "路径含符号链接: ${prefix}"
+    fi
+  done
 }
 
 abs_path() {
   local p="$1"
   [[ -n "${p}" ]] || die "空路径"
+  case "${p}" in
+    *..*) die "路径含 ..: ${p}" ;;
+  esac
   if [[ "${p}" != /* ]]; then
     p="${PWD%/}/${p}"
   fi
-  printf '%s\n' "${p%/}"
+  if [[ "${p}" != / ]]; then
+    p="${p%/}"
+  fi
+  printf '%s\n' "${p}"
+}
+
+# 用户/显式 tmp 目录：拒 symlink、拒根；已存在则必须可枚举且为空——绝不凭 marker 整目录删除。
+ensure_empty_tmp_dir() {
+  local role="$1" raw="$2"
+  local abs parent base listing=""
+  abs="$(abs_path "${raw}")"
+  parent="$(dirname -- "${abs}")"
+  base="$(basename -- "${abs}")"
+  [[ "${base}" != "." && "${base}" != ".." && "${base}" != "/" && "${base}" != "tmp" ]] \
+    || die "${role} 非法目录名"
+  [[ -e "${parent}" ]] || die "${role} 父目录不存在"
+  [[ -d "${parent}" && ! -L "${parent}" ]] || die "${role} 父目录非法"
+  assert_no_symlink_components "${parent}"
+  under_dir "${PROJECT_TMP}" "${abs}" || die "${role} 必须位于项目 tmp/ 下"
+  [[ "${abs}" != "${PROJECT_ROOT}" && "${abs}" != "${PROJECT_TMP}" ]] \
+    || die "${role} 不能是项目根或 tmp 根"
+  if [[ -e "${abs}" || -L "${abs}" ]]; then
+    [[ ! -L "${abs}" ]] || die "${role} 不能是符号链接"
+    [[ -d "${abs}" ]] || die "${role} 已存在且不是目录"
+    assert_no_symlink_components "${abs}"
+    listing="$(find -- "${abs}" -mindepth 1 -maxdepth 1 -print -quit)" || die "${role} 无法枚举"
+    [[ -z "${listing}" ]] || die "${role} 已有内容，拒绝覆盖（不删调用方输入）"
+  else
+    mkdir -m 755 -- "${abs}" || die "${role} 无法创建"
+    assert_no_symlink_components "${abs}"
+  fi
+  printf '%s\n' "${abs}"
+}
+
+# 本次独占 scratch：mktemp，退出时由调用方 cleanup_owned_dir 精确删除。
+make_scratch_tmp_dir() {
+  local prefix="$1"
+  local d
+  mkdir -p -- "${PROJECT_TMP}" || die "无法确保 tmp 根"
+  d="$(mktemp -d --tmpdir="${PROJECT_TMP}" "${prefix}.XXXXXX")" || die "mktemp 失败"
+  assert_no_symlink_components "${d}"
+  printf '%s\n' "${d}"
+}
+
+cleanup_owned_dir() {
+  local d="$1"
+  [[ -n "${d}" ]] || return 0
+  under_dir "${PROJECT_TMP}" "${d}" || return 0
+  [[ "${d}" != "${PROJECT_TMP}" && "${d}" != "${PROJECT_ROOT}" ]] || return 0
+  if [[ -d "${d}" && ! -L "${d}" ]]; then
+    rm -rf -- "${d}"
+  fi
+}
+
+assert_no_path_overlap() {
+  local a="$1" b="$2" msg="$3"
+  if under_dir "${a}" "${b}" || under_dir "${b}" "${a}"; then
+    die "${msg}"
+  fi
+}
+
+is_gzip_file() {
+  local f="$1"
+  local magic
+  [[ -f "${f}" && ! -L "${f}" ]] || return 1
+  magic="$(od -An -N2 -tx1 -- "${f}" | tr -d ' \n')"
+  [[ "${magic}" == "1f8b" ]]
 }
 
 select_stable_version() {
+  # 先完整落盘并核 jq 退出码，再消费；禁止 process substitution 吞部分成功后的非 0。
   local index="$1"
-  local best_tag="" best_ver="" tag ver
-  while IFS= read -r tag; do
-    [[ "${tag}" =~ ${GO_TAG_RE} ]] || die "拒绝非稳定 go 版本: ${tag}"
+  local best_tag="" best_ver="" tag ver tags_file jq_rc=0 bad=0 bad_msg=""
+  mkdir -p -- "${PROJECT_TMP}" || die "无法确保 tmp 根"
+  tags_file="$(mktemp --tmpdir="${PROJECT_TMP}" go-stable-tags.XXXXXX)" || die "mktemp stable 失败"
+  jq -r '.[] | select(.stable==true) | .version' "${index}" >"${tags_file}" || jq_rc=$?
+  if [[ "${jq_rc}" -ne 0 ]]; then
+    rm -f -- "${tags_file}"
+    die "枚举官方 stable 版本失败 rc=${jq_rc}"
+  fi
+  while IFS= read -r tag || [[ -n "${tag}" ]]; do
+    [[ -n "${tag}" ]] || continue
+    if ! [[ "${tag}" =~ ${GO_TAG_RE} ]]; then
+      bad=1
+      bad_msg="拒绝非稳定 go 版本: ${tag}"
+      break
+    fi
     ver="${tag#go}"
     if [[ -z "${best_ver}" ]] || dpkg --compare-versions "${ver}" gt "${best_ver}"; then
       best_ver="${ver}"
       best_tag="${tag}"
     fi
-  done < <(jq -r '.[] | select(.stable==true) | .version' "${index}")
+  done <"${tags_file}"
+  rm -f -- "${tags_file}"
+  [[ "${bad}" -eq 0 ]] || die "${bad_msg}"
   [[ -n "${best_tag}" ]] || die "官方索引无 stable 版本"
   printf '%s\n' "${best_tag}"
 }
@@ -90,6 +190,7 @@ cmd_prepare() {
 
   config="$(abs_path "${config}")"
   [[ -f "${config}" && ! -L "${config}" ]] || die "config 不是普通文件"
+  assert_no_symlink_components "$(dirname -- "${config}")"
   revision="$(jq -r '.revision' "${config}")" || die "读取 revision 失败"
   [[ "${revision}" =~ ${DEC_POS} ]] || die "revision 非法"
   index_url="$(jq -r '.release_index_url' "${config}")" || die "读取 release_index_url 失败"
@@ -98,15 +199,19 @@ cmd_prepare() {
   if [[ -z "${work_dir}" ]]; then
     work_dir="${PROJECT_TMP}/go-release-prepare"
   fi
+  # 先规范化全部路径并查重叠，再碰磁盘——禁止 claim 先删输入。
   work_dir="$(abs_path "${work_dir}")"
-  under_tmp "${work_dir}" || die "work-dir 必须在项目 tmp/ 下"
-  mkdir -p -- "${work_dir}"
-  [[ ! -L "${work_dir}" ]] || die "work-dir 不能是符号链接"
-
-  local index_file="${work_dir}/downloads.json"
   if [[ -n "${downloads_json}" ]]; then
     downloads_json="$(abs_path "${downloads_json}")"
     [[ -f "${downloads_json}" && ! -L "${downloads_json}" ]] || die "downloads-json 非法"
+    assert_no_symlink_components "$(dirname -- "${downloads_json}")"
+    assert_no_path_overlap "${downloads_json}" "${work_dir}" "downloads-json 与 work-dir 重叠"
+  fi
+  assert_no_path_overlap "${config}" "${work_dir}" "config 与 work-dir 重叠"
+  work_dir="$(ensure_empty_tmp_dir "work-dir" "${work_dir}")"
+
+  local index_file="${work_dir}/downloads.json"
+  if [[ -n "${downloads_json}" ]]; then
     cp -a -- "${downloads_json}" "${index_file}" || die "复制 downloads-json 失败"
   else
     curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
@@ -127,7 +232,7 @@ cmd_prepare() {
     tag="$(select_stable_version "${index_file}")" || die "选择稳定版本失败"
   fi
   local ver="${tag#go}"
-  local go_release_tag="apt-hub-go-${ver}-${revision}"
+  local go_release_tag="golang-${ver}-${revision}"
   [[ "${go_release_tag}" =~ ${REL_TAG_RE} ]] || die "派生 tag 非法: ${go_release_tag}"
 
   printf '%s\n' "${go_release_tag}" >"${work_dir}/go_release_tag"
@@ -192,15 +297,15 @@ required_asset_names() {
   printf '%s\n' "SHA256SUMS" "provenance.json"
   while IFS= read -r deb; do
     basename -- "${deb}"
-  done < <(find -- "${asset_dir}" -maxdepth 1 -type f -name 'apt-hub-go_*.deb' | LC_ALL=C sort)
+  done < <(find -- "${asset_dir}" -maxdepth 1 -type f -name 'golang*.deb' | LC_ALL=C sort)
 }
 
 # 双层：远端 size/digest + 本地 SHA256SUMS/control；忽略 provenance.generated_at_utc。
 provenance_packages_equal() {
   local a="$1" b="$2"
   jq -e --slurpfile other "${b}" '
-    (.packages | sort_by(.architecture)) as $p1
-    | ($other[0].packages | sort_by(.architecture)) as $p2
+    (.packages | sort_by(.package,.architecture)) as $p1
+    | ($other[0].packages | sort_by(.package,.architecture)) as $p2
     | ($p1|length) > 0
     and ($p1|length) == ($p2|length)
     and ([range(0; $p1|length) | $p1[.] == $p2[.]] | all)
@@ -208,60 +313,176 @@ provenance_packages_equal() {
 }
 
 verify_local_asset_set() {
+  # 可选第二参 expected_tag=golang-X.Y.Z-R：绑定版本/上游 URL，拒绝借别 tag 资产。
+  # 正式双 arch：四组合 (package,architecture) 唯一齐全；filename 唯一；
+  # manifest/SHA256SUMS/磁盘 deb 成员精确一致；拒重复/缺组合/孤儿坏包。
   local asset_dir="$1"
-  local sums prov
+  local expected_tag="${2-}"
+  local sums prov expected_fn_ver line fn hash ver_fn
+  local names_file rows_file disk_file jq_rc=0
+  local -a sum_files=() expected_files=() expected_debs=() disk_debs=()
   sums="${asset_dir}/SHA256SUMS"
   prov="${asset_dir}/provenance.json"
-  [[ -f "${sums}" && -f "${prov}" ]] || return 1
-  (cd -- "${asset_dir}" && sha256sum -c --strict SHA256SUMS) >/dev/null || return 1
+  [[ -f "${sums}" && ! -L "${sums}" && -f "${prov}" && ! -L "${prov}" ]] || return 1
   jq -e '
     .schema_version=="1"
-    and (.packages|type=="array" and length>=1)
+    and (.packages|type=="array" and length==4)
+    and (([.packages[] | [.package,.architecture]] | unique | length) == 4)
+    and (([.packages[].filename] | unique | length) == 4)
+    and (([.packages[] | .package + "/" + .architecture] | sort)
+         == ["golang-go/amd64","golang-go/arm64","golang/amd64","golang/arm64"])
+    and (.upstream.version|type=="string" and test("^go[0-9]+\\.[0-9]+\\.[0-9]+$"))
+    and (.upstream.epoch=="2")
+    and (.upstream.version_debian|type=="string" and test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))
     and all(.packages[];
       (.filename|type=="string")
+      and (.filename|test("^[^/\\\\]+$"))
+      and (.filename|contains("..")|not)
       and (.sha256|test("^[a-f0-9]{64}$"))
       and (.size|type=="string" and test("^[1-9][0-9]*$"))
       and (.architecture|test("^(amd64|arm64)$"))
-      and (.package=="apt-hub-go")
+      and (.package|test("^(golang|golang-go)$"))
+      and (.version|test("^2:[0-9]+\\.[0-9]+\\.[0-9]+-[1-9][0-9]*$"))
+      and (.upstream.url|type=="string")
+      and (.upstream.sha256|test("^[a-f0-9]{64}$"))
+      and (.upstream.size|type=="string" and test("^[1-9][0-9]*$"))
     )
   ' "${prov}" >/dev/null || return 1
-  local row fn arch ver pkg got_pkg got_ver got_arch got_sha got_sz
-  while IFS= read -r row; do
-    fn="$(jq -r '.filename' <<<"${row}")"
-    arch="$(jq -r '.architecture' <<<"${row}")"
-    ver="$(jq -r '.version' <<<"${row}")"
-    pkg="$(jq -r '.package' <<<"${row}")"
-    [[ -f "${asset_dir}/${fn}" ]] || return 1
-    got_pkg="$(dpkg-deb -f -- "${asset_dir}/${fn}" Package)"
-    got_ver="$(dpkg-deb -f -- "${asset_dir}/${fn}" Version)"
-    got_arch="$(dpkg-deb -f -- "${asset_dir}/${fn}" Architecture)"
-    [[ "${got_pkg}" == "${pkg}" && "${got_ver}" == "${ver}" && "${got_arch}" == "${arch}" ]] || return 1
-    got_sha="$(sha256sum -- "${asset_dir}/${fn}" | awk '{print $1}')"
-    got_sz="$(stat -c '%s' -- "${asset_dir}/${fn}")"
-    [[ "${got_sha}" == "$(jq -r '.sha256' <<<"${row}")" ]] || return 1
-    [[ "${got_sz}" == "$(jq -r '.size' <<<"${row}")" ]] || return 1
-  done < <(jq -c '.packages[]' "${prov}")
+
+  if [[ -n "${expected_tag}" ]]; then
+    [[ "${expected_tag}" =~ ${REL_TAG_RE} ]] || return 1
+    expected_fn_ver="${expected_tag#golang-}"
+    jq -e --arg v "2:${expected_fn_ver}" --arg gv "go${expected_fn_ver%-*}" --arg vd "${expected_fn_ver%-*}" '
+      (.upstream.version==$gv)
+      and (.upstream.version_debian==$vd)
+      and (.upstream.epoch=="2")
+      and all(.packages[]; .version==$v)
+    ' "${prov}" >/dev/null || return 1
+  fi
+
+  mkdir -p -- "${PROJECT_TMP}" || return 1
+  names_file="$(mktemp --tmpdir="${PROJECT_TMP}" go-asset-names.XXXXXX)" || return 1
+  jq_rc=0
+  jq -r '.packages[].filename' "${prov}" >"${names_file}" || jq_rc=$?
+  if [[ "${jq_rc}" -ne 0 ]]; then
+    rm -f -- "${names_file}"
+    return 1
+  fi
+  # 不用 sort -u 折叠重复名：四行必须四名。
+  mapfile -t expected_files <"${names_file}"
+  rm -f -- "${names_file}"
+  [[ "${#expected_files[@]}" -eq 4 ]] || return 1
+  expected_files+=("provenance.json")
+  mapfile -t expected_files < <(printf '%s\n' "${expected_files[@]}" | LC_ALL=C sort)
+
+  sum_files=()
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    [[ -n "${line}" ]] || continue
+    [[ "${line}" =~ ^[0-9a-f]{64}[[:space:]]{2}[^[:space:]]+$ ]] || return 1
+    hash="${line%%  *}"
+    fn="${line#*  }"
+    [[ "${#hash}" -eq 64 ]] || return 1
+    [[ "${fn}" != */* && "${fn}" != *\\* && "${fn}" != *..* ]] || return 1
+    sum_files+=("${fn}")
+  done <"${sums}"
+  mapfile -t sum_files < <(printf '%s\n' "${sum_files[@]}" | LC_ALL=C sort)
+  [[ "${#sum_files[@]}" -eq "${#expected_files[@]}" ]] || return 1
+  [[ "$(printf '%s\n' "${sum_files[@]}")" == "$(printf '%s\n' "${expected_files[@]}")" ]] || return 1
+
+  # 磁盘 golang*.deb 必须与清单 filename 精确一致（拒孤儿坏包）。
+  disk_file="$(mktemp --tmpdir="${PROJECT_TMP}" go-disk-debs.XXXXXX)" || return 1
+  if ! find -- "${asset_dir}" -maxdepth 1 -type f -name 'golang*.deb' -printf '%f\n' \
+    >"${disk_file}.raw"; then
+    rm -f -- "${disk_file}" "${disk_file}.raw"
+    return 1
+  fi
+  if ! LC_ALL=C sort -o "${disk_file}" "${disk_file}.raw"; then
+    rm -f -- "${disk_file}" "${disk_file}.raw"
+    return 1
+  fi
+  rm -f -- "${disk_file}.raw"
+  mapfile -t disk_debs <"${disk_file}"
+  rm -f -- "${disk_file}"
+  mapfile -t expected_debs < <(printf '%s\n' "${expected_files[@]}" | grep -E '^golang' | LC_ALL=C sort || true)
+  [[ "${#expected_debs[@]}" -eq 4 ]] || return 1
+  [[ "${#disk_debs[@]}" -eq 4 ]] || return 1
+  [[ "$(printf '%s\n' "${disk_debs[@]}")" == "$(printf '%s\n' "${expected_debs[@]}")" ]] || return 1
+
+  (cd -- "${asset_dir}" && sha256sum -c --strict SHA256SUMS) >/dev/null || return 1
+
+  local row arch ver pkg up_url got_pkg got_ver got_arch got_sha got_sz
+  local upstream_go
+  upstream_go="$(jq -r '.upstream.version' "${prov}")" || return 1
+  rows_file="$(mktemp --tmpdir="${PROJECT_TMP}" go-prov-rows.XXXXXX)" || return 1
+  jq_rc=0
+  jq -c '.packages[]' "${prov}" >"${rows_file}" || jq_rc=$?
+  if [[ "${jq_rc}" -ne 0 ]]; then
+    rm -f -- "${rows_file}"
+    return 1
+  fi
+  # 行数必须仍为 4；producer 半截不得当成功。
+  if [[ "$(wc -l <"${rows_file}" | tr -d ' ')" != "4" ]]; then
+    rm -f -- "${rows_file}"
+    return 1
+  fi
+  local row_ok=1
+  while IFS= read -r row || [[ -n "${row}" ]]; do
+    [[ -n "${row}" ]] || continue
+    fn="$(jq -r '.filename' <<<"${row}")" || { row_ok=0; break; }
+    arch="$(jq -r '.architecture' <<<"${row}")" || { row_ok=0; break; }
+    ver="$(jq -r '.version' <<<"${row}")" || { row_ok=0; break; }
+    pkg="$(jq -r '.package' <<<"${row}")" || { row_ok=0; break; }
+    up_url="$(jq -r '.upstream.url' <<<"${row}")" || { row_ok=0; break; }
+    ver_fn="${ver#2:}"
+    [[ "${ver}" == "2:${ver_fn}" ]] || { row_ok=0; break; }
+    [[ "${fn}" == "${pkg}_${ver_fn}_${arch}.deb" ]] || { row_ok=0; break; }
+    [[ "${up_url}" == "https://go.dev/dl/${upstream_go}.linux-${arch}.tar.gz" ]] || { row_ok=0; break; }
+    [[ -f "${asset_dir}/${fn}" && ! -L "${asset_dir}/${fn}" ]] || { row_ok=0; break; }
+    got_pkg="$(dpkg-deb -f -- "${asset_dir}/${fn}" Package)" || { row_ok=0; break; }
+    got_ver="$(dpkg-deb -f -- "${asset_dir}/${fn}" Version)" || { row_ok=0; break; }
+    got_arch="$(dpkg-deb -f -- "${asset_dir}/${fn}" Architecture)" || { row_ok=0; break; }
+    [[ "${got_pkg}" == "${pkg}" && "${got_ver}" == "${ver}" && "${got_arch}" == "${arch}" ]] || { row_ok=0; break; }
+    got_sha="$(sha256sum -- "${asset_dir}/${fn}" | awk '{print $1}')" || { row_ok=0; break; }
+    got_sz="$(stat -c '%s' -- "${asset_dir}/${fn}")" || { row_ok=0; break; }
+    [[ "${got_sha}" == "$(jq -r '.sha256' <<<"${row}")" ]] || { row_ok=0; break; }
+    [[ "${got_sz}" == "$(jq -r '.size' <<<"${row}")" ]] || { row_ok=0; break; }
+  done <"${rows_file}"
+  rm -f -- "${rows_file}"
+  [[ "${row_ok}" -eq 1 ]] || return 1
   return 0
 }
 
+assert_release_identity() {
+  local rel_json="$1" repository="$2" tag="$3"
+  local got_tag html expect
+  got_tag="$(jq -r '.tag_name // empty' "${rel_json}")"
+  html="$(jq -r '.html_url // empty' "${rel_json}")"
+  [[ "${got_tag}" == "${tag}" ]] || die "release.tag_name 与请求 tag 不一致"
+  [[ -n "${html}" ]] || die "release.html_url 缺失"
+  expect="https://github.com/${repository}/releases/tag/${tag}"
+  [[ "${html}" == "${expect}" ]] || die "release.html_url 与仓库/tag 不匹配"
+}
+
 remote_release_asset_complete() {
-  # 仅 published 可 complete；draft 永远不完整。
+  # 仅 published 可 complete；draft 永远不完整；单架构不算 complete。
   local rel_json="$1"
-  local state name sz
+  local state name sz amd_n arm_n
   state="$(jq -r 'if .draft then "draft" elif .prerelease then "prerelease" else "published" end' "${rel_json}")"
   [[ "${state}" == "published" ]] || return 1
   for name in SHA256SUMS provenance.json; do
     sz="$(jq -r --arg n "${name}" '[.assets[]|select(.name==$n)|.size]|first|tostring' "${rel_json}")"
     [[ "${sz}" =~ ^[1-9][0-9]*$ ]] || return 1
   done
-  local deb_count
-  deb_count="$(jq -r '[.assets[]|select(.name|test("^apt-hub-go_.*\\.deb$"))]|length' "${rel_json}")"
-  [[ "${deb_count}" =~ ^[1-9][0-9]*$ ]] || return 1
+  # 每 arch 须同时有 golang_ 与 golang-go_ 两 deb。
+  amd_n="$(jq -r '[.assets[]|select(.name|test("^(golang|golang-go)_.*_amd64\\.deb$"))]|length' "${rel_json}")"
+  arm_n="$(jq -r '[.assets[]|select(.name|test("^(golang|golang-go)_.*_arm64\\.deb$"))]|length' "${rel_json}")"
+  [[ "${amd_n}" == "2" && "${arm_n}" == "2" ]] || return 1
   return 0
 }
 
 cmd_status() {
   local repository="" tag="" fetch_dir=""
+  local work=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --repository) [[ $# -ge 2 ]] || usage; repository="$2"; shift 2 ;;
@@ -276,8 +497,9 @@ cmd_status() {
   [[ -n "${GH_TOKEN:-}" ]] || die "缺少 GH_TOKEN"
   require_cmd jq curl sha256sum gh dpkg-deb
 
-  local work="${PROJECT_TMP}/go-release-status"
-  mkdir -p -- "${work}"
+  work="$(make_scratch_tmp_dir "go-release-status")"
+  # shellcheck disable=SC2064
+  trap 'cleanup_owned_dir "'"${work}"'"' RETURN
   local rel_json="${work}/release.json"
   local code
   code="$(gh_api_code GET "/repos/${repository}/releases/tags/${tag}" "${rel_json}")"
@@ -288,6 +510,7 @@ cmd_status() {
     return 0
   fi
   [[ "${code}" == "200" ]] || die "查询 release 失败 HTTP ${code}"
+  assert_release_identity "${rel_json}" "${repository}" "${tag}"
   local state
   state="$(jq -r 'if .draft then "draft" elif .prerelease then "prerelease" else "published" end' "${rel_json}")"
   printf 'release_state=%s\n' "${state}"
@@ -309,17 +532,19 @@ cmd_status() {
     return 0
   fi
 
+  # 先 abs + 拒已有用户内容，再下载；绝不凭 marker 整目录删除。
   fetch_dir="$(abs_path "${fetch_dir}")"
-  under_tmp "${fetch_dir}" || die "fetch-dir 必须在项目 tmp/ 下"
-  rm -rf -- "${fetch_dir}"
-  mkdir -p -- "${fetch_dir}"
+  fetch_dir="$(ensure_empty_tmp_dir "fetch-dir" "${fetch_dir}")"
   local name
   while IFS= read -r name; do
     [[ -n "${name}" ]] || continue
+    case "${name}" in
+      *..*|*/|*\\*) die "非法资产名: ${name}" ;;
+    esac
     GH_REPO="${repository}" gh release download "${tag}" -p "${name}" -D "${fetch_dir}" \
       || die "下载资产失败: ${name}"
   done < <(jq -r '.assets[].name' "${rel_json}")
-  verify_local_asset_set "${fetch_dir}" || die "远端 published 资产核验失败（hash/size/control）"
+  verify_local_asset_set "${fetch_dir}" "${tag}" || die "远端 published 资产核验失败（hash/size/control/tag）"
   printf 'assets_complete=1\n'
   printf 'assets_reused=1\n'
   printf 'fetch_dir=%s\n' "${fetch_dir}"
@@ -347,18 +572,22 @@ cmd_upload() {
 
   asset_dir="$(abs_path "${asset_dir}")"
   [[ -d "${asset_dir}" && ! -L "${asset_dir}" ]] || die "asset-dir 非法"
-  [[ -f "${asset_dir}/provenance.json" && -f "${asset_dir}/SHA256SUMS" ]] \
-    || die "asset-dir 缺少 provenance.json 或 SHA256SUMS"
-  mapfile -t debs < <(find -- "${asset_dir}" -maxdepth 1 -type f -name 'apt-hub-go_*.deb' | LC_ALL=C sort)
-  [[ "${#debs[@]}" -ge 1 ]] || die "asset-dir 无 deb"
+  assert_no_symlink_components "${asset_dir}"
+  # 任何 create/upload/edit 之前完整本地核验：半套/错 hash/traversal/未知成员一律拒绝。
+  verify_local_asset_set "${asset_dir}" "${tag}" || die "本地 asset-dir 未通过 hash/size/control/成员核验"
+  mapfile -t debs < <(find -- "${asset_dir}" -maxdepth 1 -type f -name 'golang*.deb' | LC_ALL=C sort)
+  [[ "${#debs[@]}" -eq 4 ]] || die "asset-dir 必须恰好四个 deb（golang+golang-go × 双 arch）"
 
-  local work="${PROJECT_TMP}/go-release-upload"
-  mkdir -p -- "${work}"
+  local work
+  work="$(make_scratch_tmp_dir "go-release-upload")"
+  # shellcheck disable=SC2064
+  trap 'cleanup_owned_dir "'"${work}"'"' RETURN
   local rel_json="${work}/release.json"
   local code
   code="$(gh_api_code GET "/repos/${repository}/releases/tags/${tag}" "${rel_json}")"
   local state="" release_id=""
   if [[ "${code}" == "200" ]]; then
+    assert_release_identity "${rel_json}" "${repository}" "${tag}"
     state="$(jq -r 'if .draft then "draft" elif .prerelease then "prerelease" else "published" end' "${rel_json}")"
     release_id="$(jq -r '.id|tostring' "${rel_json}")"
   elif [[ "${code}" == "404" ]]; then
@@ -368,7 +597,6 @@ cmd_upload() {
   fi
 
   if [[ "${state}" == "published" ]]; then
-    verify_local_asset_set "${asset_dir}" || die "本地 asset-dir 未通过 hash/size/control 核验"
     if ! remote_release_asset_complete "${rel_json}"; then
       die "已 published 但远端资产不完整，拒绝覆盖/续传"
     fi
@@ -426,6 +654,7 @@ cmd_upload() {
       || die "创建 draft release 失败"
     code="$(gh_api_code GET "/repos/${repository}/releases/tags/${tag}" "${rel_json}")"
     [[ "${code}" == "200" ]] || die "创建后无法读取 draft HTTP ${code}"
+    assert_release_identity "${rel_json}" "${repository}" "${tag}"
     release_id="$(jq -r '.id|tostring' "${rel_json}")"
     state="draft"
   fi
@@ -456,6 +685,7 @@ cmd_upload() {
     # 重新读取并逐文件核 size（及 digest 若有）
     code="$(gh_api_code GET "/repos/${repository}/releases/tags/${tag}" "${rel_json}")"
     [[ "${code}" == "200" ]] || die "上传后读取 release 失败 HTTP ${code}"
+    assert_release_identity "${rel_json}" "${repository}" "${tag}"
     for f in "${debs[@]}" "${asset_dir}/provenance.json" "${asset_dir}/SHA256SUMS"; do
       bn="$(basename -- "${f}")"
       remote_size="$(jq -r --arg n "${bn}" \
@@ -481,27 +711,89 @@ cmd_upload() {
   printf 'go_release_tag=%s\n' "${tag}"
 }
 
+extract_tags_from_bytes() {
+  local src="$1" out="$2"
+  # grep 无匹配是正常；管道失败才拒。在 || 上下文须显式返回，不靠 set -e。
+  local grc=0
+  grep -oE 'golang-[0-9]+\.[0-9]+\.[0-9]+-[1-9][0-9]*' "${src}" >>"${out}" || grc=$?
+  if [[ "${grc}" -eq 0 || "${grc}" -eq 1 ]]; then
+    return 0
+  fi
+  printf 'release_golang.sh: 解析引用 grep 失败 rc=%s\n' "${grc}" >&2
+  return 1
+}
+
 extract_referenced_go_tags() {
-  # 从 apt-data 树提取 Filename 里引用的 apt-hub-go-* release 资产线索 → tag 集合。
+  # Packages / Packages.gz / by-hash：按内容魔数识别 gzip，不按后缀。
+  # 调用方若写 `extract_referenced_go_tags ... || die`，本函数内每步须显式传播失败。
   local root="$1"
   local out="$2"
-  : >"${out}"
-  local f
-  while IFS= read -r -d '' f; do
-    case "${f}" in
-      *.gz)
-        gzip -dc -- "${f}" 2>/dev/null | grep -oE 'apt-hub-go-[0-9]+\.[0-9]+\.[0-9]+-[1-9][0-9]*' \
-          >>"${out}" || true
-        ;;
-      *)
-        grep -oE 'apt-hub-go-[0-9]+\.[0-9]+\.[0-9]+-[1-9][0-9]*' "${f}" >>"${out}" || true
-        ;;
-    esac
-  done < <(find -- "${root}" \( -name 'Packages' -o -name 'Packages.gz' -o -path '*/by-hash/*' \) \
-    -type f -print0 2>/dev/null)
-  if [[ -s "${out}" ]]; then
-    LC_ALL=C sort -u -o "${out}" "${out}"
+  local list="${out}.files"
+  : >"${out}" || return 1
+  : >"${list}" || return 1
+  if ! find -- "${root}" \( -name 'Packages' -o -name 'Packages.gz' -o -path '*/by-hash/*' \) \
+    -type f -print0 >"${list}.0"; then
+    printf 'release_golang.sh: 枚举 apt-data 索引失败\n' >&2
+    return 1
   fi
+  local f tmp
+  while IFS= read -r -d '' f; do
+    if [[ ! -f "${f}" || -L "${f}" ]]; then
+      printf 'release_golang.sh: 索引路径非法: %s\n' "${f}" >&2
+      return 1
+    fi
+    tmp="${out}.chunk"
+    if is_gzip_file "${f}"; then
+      if ! gzip -dc -- "${f}" >"${tmp}"; then
+        printf 'release_golang.sh: gzip 解压失败: %s\n' "${f}" >&2
+        rm -f -- "${tmp}"
+        return 1
+      fi
+      if ! extract_tags_from_bytes "${tmp}" "${out}"; then
+        rm -f -- "${tmp}"
+        return 1
+      fi
+      rm -f -- "${tmp}"
+    else
+      extract_tags_from_bytes "${f}" "${out}" || return 1
+    fi
+  done <"${list}.0"
+  rm -f -- "${list}.0"
+  if [[ -s "${out}" ]]; then
+    LC_ALL=C sort -u -o "${out}" "${out}" || return 1
+  fi
+  return 0
+}
+
+list_all_releases_json() {
+  # 完整分页；任页失败不删除。
+  local repository="$1" out="$2"
+  local page=1 chunk="${out}.page" acc="${out}.acc"
+  printf '[]\n' >"${acc}"
+  while [[ "${page}" -le 50 ]]; do
+    if ! GH_REPO="${repository}" gh api \
+      "repos/${repository}/releases?per_page=100&page=${page}" \
+      >"${chunk}"; then
+      die "列出 releases 第 ${page} 页失败，拒绝清理"
+    fi
+    jq -e 'type=="array"' "${chunk}" >/dev/null || die "releases 第 ${page} 页不是数组"
+    local n
+    n="$(jq -r 'length' "${chunk}")" || die "解析 releases 页长度失败"
+    [[ "${n}" =~ ^[0-9]+$ ]] || die "releases 页长度非法"
+    jq -s 'add' "${acc}" "${chunk}" >"${acc}.next" || die "合并 releases 页失败"
+    mv -f -- "${acc}.next" "${acc}"
+    [[ "${n}" -eq 0 || "${n}" -lt 100 ]] && break
+    page=$((page + 1))
+  done
+  [[ "${page}" -le 50 ]] || die "releases 分页超过上限，拒绝清理"
+  # 归一为 prune 使用的字段
+  jq '[.[] | {
+    tagName: .tag_name,
+    isDraft: .draft,
+    isLatest: (.make_latest=="true" or .make_latest==true),
+    createdAt: .created_at
+  }]' "${acc}" >"${out}" || die "归一 releases 列表失败"
+  rm -f -- "${chunk}" "${acc}"
 }
 
 cmd_prune() {
@@ -520,21 +812,18 @@ cmd_prune() {
   [[ "${current_tag}" =~ ${REL_TAG_RE} ]] || die "current-tag 非法"
   [[ "${keep_recent}" =~ ^[1-9][0-9]*$ ]] || die "keep-recent 非法"
   [[ -n "${GH_TOKEN:-}" ]] || die "缺少 GH_TOKEN"
-  require_cmd jq curl gh gzip git
+  require_cmd jq curl gh gzip git od
 
-  local work="${PROJECT_TMP}/go-release-prune"
-  rm -rf -- "${work}"
-  mkdir -p -- "${work}/apt-data" "${work}/lists"
+  local work
+  work="$(make_scratch_tmp_dir "go-release-prune")"
+  # shellcheck disable=SC2064
+  trap 'cleanup_owned_dir "'"${work}"'"' RETURN
+  mkdir -p -- "${work}/apt-data" "${work}/lists" || die "无法创建 prune 工作目录"
 
-  # 真实列 release；失败拒绝清理。
   local list_json="${work}/lists/releases.json"
-  if ! GH_REPO="${repository}" gh release list --limit 200 --json tagName,isDraft,isLatest,createdAt \
-    >"${list_json}"; then
-    die "列出 releases 失败，拒绝清理"
-  fi
+  list_all_releases_json "${repository}" "${list_json}"
   jq -e 'type=="array"' "${list_json}" >/dev/null || die "releases 列表非法"
 
-  # apt-data：首轮不存在可识别；网络/鉴权失败拒绝。
   local protected="${work}/lists/protected.txt"
   printf '%s\n' "${current_tag}" >"${protected}"
   local refs_out="${work}/lists/apt-data-refs.txt"
@@ -546,7 +835,6 @@ cmd_prune() {
     local sha
     sha="$(awk '{print $1}' "${refs_out}" | head -n1)"
     [[ "${sha}" =~ ${HEX40} ]] || die "apt-data SHA 非法"
-    # tarball 必须 octet-stream（json Accept 会得到非归档）；跟随 redirect。
     if ! curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
       -H "Authorization: Bearer ${GH_TOKEN}" \
       -H "Accept: application/vnd.github.raw" \
@@ -559,6 +847,24 @@ cmd_prune() {
     fi
     tar -tzf "${work}/apt-data.tgz" >/dev/null 2>&1 \
       || die "apt-data 下载内容不是 tar.gz，拒绝清理"
+    # 枚举成功后才解压；拒越界/绝对路径/链接/特殊成员。
+    local members="${work}/lists/tar-members.txt"
+    tar -tzf "${work}/apt-data.tgz" >"${members}" || die "列举 apt-data tar 失败，拒绝清理"
+    if grep -E '(^|/)\.\.(/|$)|^/' "${members}" >/dev/null; then
+      die "apt-data tar 含越界路径，拒绝清理"
+    fi
+    if tar -tvzf "${work}/apt-data.tgz" | awk '
+      {
+        mode=$1
+        # 链接 / 设备 / fifo / 其它非 - 或 d
+        if (mode ~ /^[lcbp]/ || mode ~ /^[Hh]/) { bad=1; exit }
+      }
+      END { exit bad ? 1 : 0 }
+    '; then
+      :
+    else
+      die "apt-data tar 含链接或特殊文件，拒绝清理"
+    fi
     tar -xzf "${work}/apt-data.tgz" -C "${work}/apt-data" --strip-components=1 \
       || die "解压 apt-data 失败，拒绝清理"
     extract_referenced_go_tags "${work}/apt-data" "${work}/lists/referenced.txt" \
@@ -570,27 +876,37 @@ cmd_prune() {
     printf 'prune_note=apt-data_absent_first_run\n'
   fi
 
-  # 最近 keep_recent 个已发布（非 draft）同族 tag（按 X.Y.Z-R 版本序）。
+  # 最近 keep_recent 个已发布（非 draft）同族 tag。
+  local recent_rc=0
   jq -r '.[] | select(.isDraft==false) | .tagName' "${list_json}" \
-    | grep -E '^apt-hub-go-[0-9]+\.[0-9]+\.[0-9]+-[1-9][0-9]*$' \
-    | sed -E 's/^(apt-hub-go-)(.*)$/\1\2\t\2/' \
+    >"${work}/lists/published-tags.txt" || die "提取已发布 tag 失败"
+  if grep -E '^golang-[0-9]+\.[0-9]+\.[0-9]+-[1-9][0-9]*$' \
+    "${work}/lists/published-tags.txt" >"${work}/lists/family-published.txt"; then
+    :
+  else
+    recent_rc=$?
+    [[ "${recent_rc}" -eq 1 ]] || die "筛选同族已发布 tag 失败"
+    : >"${work}/lists/family-published.txt"
+  fi
+  sed -E 's/^(golang-)(.*)$/\1\2\t\2/' "${work}/lists/family-published.txt" \
     | sort -t$'\t' -k2,2V -r \
     | awk -F'\t' -v n="${keep_recent}" 'NR<=n {print $1}' \
-    >>"${protected}" || true
-  LC_ALL=C sort -u -o "${protected}" "${protected}"
+    >>"${protected}" || die "计算最近成功版本保护集失败"
+  LC_ALL=C sort -u -o "${protected}" "${protected}" || die "保护集排序失败"
+  [[ -s "${protected}" ]] || die "保护集为空，拒绝清理"
 
   local cand del_list="${work}/lists/delete.txt"
   : >"${del_list}"
+  jq -r '.[].tagName' "${list_json}" >"${work}/lists/all-tags.txt" || die "提取全部 tag 失败"
   while IFS= read -r cand; do
     [[ "${cand}" =~ ${REL_TAG_RE} ]] || continue
     if grep -Fxq -- "${cand}" "${protected}"; then
       continue
     fi
-    # 真实查 ref 存在才删
     if GH_REPO="${repository}" gh release view "${cand}" >/dev/null 2>&1; then
       printf '%s\n' "${cand}" >>"${del_list}"
     fi
-  done < <(jq -r '.[].tagName' "${list_json}" | grep -E '^apt-hub-go-' || true)
+  done <"${work}/lists/all-tags.txt"
 
   if [[ ! -s "${del_list}" ]]; then
     printf 'prune_deleted=0\n'
@@ -601,10 +917,8 @@ cmd_prune() {
   local t
   while IFS= read -r t; do
     [[ -n "${t}" ]] || continue
-    # 只删同族 Release 与同名 tag；不动 latest / 仓 v*。
     GH_REPO="${repository}" gh release delete "${t}" -y \
       || die "删除 release 失败: ${t}"
-    # 删同名 git tag（若仍在）
     git push "https://x-access-token:${GH_TOKEN}@github.com/${repository}.git" ":refs/tags/${t}" \
       >/dev/null 2>&1 || true
     printf 'prune_deleted_tag=%s\n' "${t}"

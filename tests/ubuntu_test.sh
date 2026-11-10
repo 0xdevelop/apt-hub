@@ -490,6 +490,27 @@ if "$VER" --site "$pos_site" --releases "$pos_rel" --work-dir "$pos_work"; then
     fail "APT 配置缺少 Error-Mode=any"
   fi
   expect_rc "已有非空 work 拒绝" 1 "$VER" --site "$pos_site" --releases "$pos_rel" --work-dir "$pos_work"
+  # find 失败且 stdout 空：不得当空目录；拒前无 .owned
+  find_fail_work="$BASE/verify-find-exit2"
+  find_fail_bin="$BASE/bin-find-exit2"
+  rm -rf -- "$find_fail_work" "$find_fail_bin"
+  mkdir -p -- "$find_fail_work" "$find_fail_bin"
+  cat >"$find_fail_bin/find" <<'EOF'
+#!/bin/sh
+exit 2
+EOF
+  chmod 0755 -- "$find_fail_bin/find"
+  set +e
+  PATH="$find_fail_bin:$PATH" "$VER" --site "$pos_site" --releases "$pos_rel" --work-dir "$find_fail_work" \
+    >"$BASE/verify-find-exit2.stdout" 2>"$BASE/verify-find-exit2.stderr"
+  find_fail_rc=$?
+  set -e
+  if [[ "$find_fail_rc" -ne 0 ]] && [[ ! -e "$find_fail_work/.apt-hub-verify.owned" ]] \
+    && grep -Fq '不可访问' "$BASE/verify-find-exit2.stderr"; then
+    pass "find exit2 空 stdout 拒绝且无 owned"
+  else
+    fail "find exit2 未按完整性拒绝 rc=$find_fail_rc"
+  fi
 else
   fail "正向 verify_ubuntu 失败，见 $pos_work"
   find "$pos_work" -name 'result.json' -o -name '*.log' 2>/dev/null | while read -r f; do

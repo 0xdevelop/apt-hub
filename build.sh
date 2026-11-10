@@ -25,7 +25,7 @@ die() {
 usage() {
   cat >&2 <<'EOF'
 用法: ./build.sh --output <全新/空的本项目tmp内目录> [--go-version <goX.Y.Z>] [--downloads-json <官方JSON>] [--archive-dir <已下载归档目录>]
-产物（单平面）: output/{双deb,provenance.json,SHA256SUMS}
+产物（单平面）: output/{golang+golang-go 各 arch deb,provenance.json,SHA256SUMS}
 EOF
   exit 2
 }

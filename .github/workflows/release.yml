@@ -4,7 +4,7 @@ on:
   workflow_call:
     outputs:
       go_release_tag:
-        description: 已上传/幂等的 apt-hub-go 精确 tag
+        description: 已上传/幂等的 golang 精确 tag
         value: ${{ jobs.Build.outputs.go_release_tag }}
       downloads_json_artifact:
         description: prepare 冻结索引 artifact 名
@@ -17,7 +17,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: apt-hub-go-release-${{ github.workflow }}-${{ github.ref }}
+  group: golang-release-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -50,13 +50,23 @@ jobs:
           set -euo pipefail
           chmod a+x scripts/release_golang.sh
           rm -rf tmp/go-release-prepare
-          mkdir -p tmp/go-release-prepare
-          mapfile -t lines < <(
-            scripts/release_golang.sh prepare \
-              --repository "${REPOSITORY}" \
-              --config config/go.json \
-              --work-dir tmp/go-release-prepare
-          )
+          mkdir -p tmp
+          outf=$(mktemp tmp/prepare-out.XXXXXX)
+          set +e
+          scripts/release_golang.sh prepare \
+            --repository "${REPOSITORY}" \
+            --config config/go.json \
+            --work-dir tmp/go-release-prepare \
+            >"${outf}"
+          prep_rc=$?
+          set -e
+          if [[ "${prep_rc}" -ne 0 ]]; then
+            echo "prepare 失败 rc=${prep_rc}" >&2
+            cat -- "${outf}" >&2 || true
+            exit "${prep_rc}"
+          fi
+          mapfile -t lines <"${outf}"
+          rm -f -- "${outf}"
           go_release_tag=""
           go_version=""
           downloads_json=""
@@ -69,7 +79,7 @@ jobs:
           done
           [[ -n "${go_release_tag}" && -n "${go_version}" && -f "${downloads_json}" ]] \
             || { echo "prepare 输出不完整" >&2; exit 1; }
-          [[ "${go_release_tag}" =~ ^apt-hub-go-[0-9]+\.[0-9]+\.[0-9]+-[1-9][0-9]*$ ]] \
+          [[ "${go_release_tag}" =~ ^golang-[0-9]+\.[0-9]+\.[0-9]+-[1-9][0-9]*$ ]] \
             || { echo "go_release_tag 非法: ${go_release_tag}" >&2; exit 1; }
           source_sha="$(git rev-parse HEAD)"
           [[ "${source_sha}" =~ ^[0-9a-f]{40}$ ]] || { echo "HEAD sha 非法" >&2; exit 1; }
@@ -124,15 +134,24 @@ jobs:
         run: |
           set -euo pipefail
           chmod a+x build.sh gen_deb_golang.sh scripts/release_golang.sh
-          rm -rf tmp/go-release-assets
           mkdir -p tmp
           reused=0
-          mapfile -t st < <(
-            scripts/release_golang.sh status \
-              --repository "${REPOSITORY}" \
-              --tag "${TAG}" \
-              --fetch-dir tmp/go-release-assets
-          )
+          stf=$(mktemp tmp/status-out.XXXXXX)
+          set +e
+          scripts/release_golang.sh status \
+            --repository "${REPOSITORY}" \
+            --tag "${TAG}" \
+            --fetch-dir tmp/go-release-assets \
+            >"${stf}"
+          st_rc=$?
+          set -e
+          if [[ "${st_rc}" -ne 0 ]]; then
+            echo "status 失败 rc=${st_rc}" >&2
+            cat -- "${stf}" >&2 || true
+            exit "${st_rc}"
+          fi
+          mapfile -t st <"${stf}"
+          rm -f -- "${stf}"
           for line in "${st[@]}"; do
             case "${line}" in
               assets_reused=1) reused=1 ;;
@@ -150,15 +169,26 @@ jobs:
           fi
           [[ -f tmp/go-release-assets/provenance.json ]]
           [[ -f tmp/go-release-assets/SHA256SUMS ]]
-          test -n "$(find tmp/go-release-assets -maxdepth 1 -name 'apt-hub-go_*.deb' -print -quit)"
-          # 直接上传 deb+manifest+摘要，不打 zip
-          mapfile -t lines < <(
-            scripts/release_golang.sh upload \
-              --repository "${REPOSITORY}" \
-              --tag "${TAG}" \
-              --asset-dir tmp/go-release-assets \
-              --source-sha "${SOURCE_SHA}"
-          )
+          test -n "$(find tmp/go-release-assets -maxdepth 1 -name 'golang_*.deb' -print -quit)"
+          test -n "$(find tmp/go-release-assets -maxdepth 1 -name 'golang-go_*.deb' -print -quit)"
+          # 直接上传 deb+manifest+摘要，不打包 zip
+          upf=$(mktemp tmp/upload-out.XXXXXX)
+          set +e
+          scripts/release_golang.sh upload \
+            --repository "${REPOSITORY}" \
+            --tag "${TAG}" \
+            --asset-dir tmp/go-release-assets \
+            --source-sha "${SOURCE_SHA}" \
+            >"${upf}"
+          up_rc=$?
+          set -e
+          if [[ "${up_rc}" -ne 0 ]]; then
+            echo "upload 失败 rc=${up_rc}" >&2
+            cat -- "${upf}" >&2 || true
+            exit "${up_rc}"
+          fi
+          mapfile -t lines <"${upf}"
+          rm -f -- "${upf}"
           go_release_tag=""
           for line in "${lines[@]}"; do
             case "${line}" in

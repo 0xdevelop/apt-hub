@@ -43,7 +43,7 @@ jobs:
           chmod a+x \
             tests/ubuntu_test.sh tests/sync_test.sh tests/render_test.sh \
             tests/workflow_test.sh tests/add_source_test.sh tests/update_sources_test.sh \
-            tests/release_test.sh \
+            tests/release_test.sh tests/go_source_test.sh \
             scripts/ubuntu_releases.sh scripts/verify_ubuntu.sh \
             scripts/sync.sh scripts/render.sh scripts/add_source.sh \
             scripts/update_sources.sh scripts/release_golang.sh \
@@ -57,6 +57,7 @@ jobs:
             tests/workflow_test.sh &&
             tests/add_source_test.sh &&
             tests/update_sources_test.sh &&
+            tests/go_source_test.sh &&
             tests/release_test.sh
           ) >tmp/ci-tests.log 2>&1
           rc=$?

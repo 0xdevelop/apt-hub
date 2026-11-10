@@ -6,16 +6,24 @@ export LANG=C
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 UPD="${ROOT}/scripts/update_sources.sh"
-BASE="${ROOT}/tmp/update-sources-fix/test"
+BASE="${ROOT}/tmp/accept-v18-core-fix-worker/update-sources-test"
 EVIDENCE="${BASE}/evidence.log"
 SITE_URL='https://apt-hub.example.test'
+FIXTURE_JS_SRC="${ROOT}/tests/apt_release_fixture.mjs"
 PASS=0
 FAIL=0
 RESTRICTED_WORK=""
+HTTPS_SERVER_PID=""
 
-mkdir -p -- "${ROOT}/tmp"
+mkdir -p -- "${ROOT}/tmp/accept-v18-core-fix-worker"
 rm -rf -- "${BASE}"
 mkdir -p -- "${BASE}"
+# 隔离副本也带上 HTTPS helper，不把缺文件报成产品问题。
+if [[ -f "${FIXTURE_JS_SRC}" ]]; then
+  cp -- "${FIXTURE_JS_SRC}" "${BASE}/apt_release_fixture.mjs"
+fi
+FIXTURE_JS="${BASE}/apt_release_fixture.mjs"
+[[ -f "${FIXTURE_JS}" ]] || FIXTURE_JS="${FIXTURE_JS_SRC}"
 
 {
   echo "date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -92,6 +100,10 @@ restore_restricted_work() {
 # shellcheck disable=SC2317 # EXIT trap 调用
 cleanup_test() {
   restore_restricted_work || true
+  if [[ -n "${HTTPS_SERVER_PID}" ]] && kill -0 "${HTTPS_SERVER_PID}" 2>/dev/null; then
+    kill "${HTTPS_SERVER_PID}" 2>/dev/null || true
+    wait "${HTTPS_SERVER_PID}" 2>/dev/null || true
+  fi
   kill_own_gpg "${BASE}/gnupg-real" || true
   kill_own_gpg "${BASE}/iso/tmp/gnupg" || true
   kill_own_gpg "${BASE}/real/gnupg-real" || true
@@ -544,7 +556,6 @@ Package: ${pkg}
 Version: ${ver}
 Architecture: ${arch}
 Maintainer: apt-hub-test <apt-hub-test@invalid>
-Depends: libc6
 Description: update_sources fixture ${pkg}
 EOF
   printf 'payload %s %s %s\n' "${pkg}" "${ver}" "${arch}" >"${root}/usr/share/doc/${pkg}/README"
@@ -580,6 +591,45 @@ printf '%s\t%s\n' \
   'https://github.com/fixture/alpha/releases/download/1.0.0/alpha-1.0.0-aarch64.deb' "${REAL}/debs/alpha-1.0.0-aarch64.deb" \
   >>"${REAL}/curl-map.tsv"
 export CURL_FIXTURE_MAP="${REAL}/curl-map.tsv"
+
+# 真 APT type:deb 下载：回环 HTTPS + CONNECT 代理 github.com，不物化 file:。
+https_ready=0
+HTTPS_PROXY_URL=""
+if ! command -v node >/dev/null 2>&1; then
+  fail "node_unavailable_for_apt_https_fixture"
+elif [[ ! -f "${FIXTURE_JS}" ]]; then
+  fail "missing_apt_release_fixture_mjs"
+else
+  mkdir -p -- "${REAL}/tls" "${REAL}/https-meta" \
+    "${REAL}/https-assets/fixture/alpha/releases/download/1.0.0"
+  cp -- "${REAL}/debs/alpha-1.0.0-x86_64.deb" \
+    "${REAL}/https-assets/fixture/alpha/releases/download/1.0.0/"
+  cp -- "${REAL}/debs/alpha-1.0.0-aarch64.deb" \
+    "${REAL}/https-assets/fixture/alpha/releases/download/1.0.0/"
+  openssl req -x509 -newkey rsa:2048 -noenc -days 2 -subj '/CN=apt-hub update-sources fixture' \
+    -addext 'subjectAltName=IP:127.0.0.2,DNS:github.com' \
+    -keyout "${REAL}/tls/key.pem" -out "${REAL}/tls/cert.pem" >"${REAL}/tls/gen.log" 2>&1
+  chmod 600 -- "${REAL}/tls/key.pem"
+  : >"${REAL}/https-access.jsonl"
+  rm -f -- "${REAL}/https-ready.json"
+  node "${FIXTURE_JS}" "${REAL}/https-meta" "${REAL}/https-assets" \
+    "${REAL}/tls/cert.pem" "${REAL}/tls/key.pem" \
+    "${REAL}/https-ready.json" "${REAL}/https-access.jsonl" \
+    >"${REAL}/https-server.log" 2>&1 &
+  HTTPS_SERVER_PID=$!
+  for _try in $(seq 1 50); do
+    if [[ -f "${REAL}/https-ready.json" ]]; then https_ready=1; break; fi
+    sleep 0.1
+  done
+  if [[ "${https_ready}" -ne 1 ]]; then
+    fail "https_fixture_not_ready"
+    cat "${REAL}/https-server.log" >>"${EVIDENCE}" || true
+  else
+    pass "https_fixture_ready"
+    HTTPS_PROXY_URL="$(jq -r .proxy_url "${REAL}/https-ready.json")"
+    log "https_fixture proxy=${HTTPS_PROXY_URL} pid=${HTTPS_SERVER_PID}"
+  fi
+fi
 
 jq -n '{
   schema_version:1,
@@ -627,6 +677,8 @@ mkdir -p -- "${WORK_REAL}"
 
 if [[ ! -f "${UPD}" ]]; then
   fail "red_real_chain_missing_script"
+elif [[ "${https_ready}" -ne 1 || -z "${HTTPS_PROXY_URL}" ]]; then
+  fail "real_chain_skipped_without_https_fixture"
 else
   export PATH="${REAL}/bin:${PATH}"
   rc="$(capture_rc "${BASE}/real-chain.log" \
@@ -637,7 +689,9 @@ else
       --gnupghome "${REAL}/gnupg-real" \
       --fingerprint "${FP}" \
       --site-url "${SITE_URL}" \
-      --releases "${REAL}/releases.json")"
+      --releases "${REAL}/releases.json" \
+      --acquire-https-ca "${REAL}/tls/cert.pem" \
+      --github-https-proxy "${HTTPS_PROXY_URL}")"
   cat "${BASE}/real-chain.log" >>"${EVIDENCE}"
   echo "real_chain_rc=${rc}" | tee -a "${EVIDENCE}"
   record_rc "real_chain_rc" "${rc}" 0 || true
@@ -660,6 +714,19 @@ else
     else
       fail "real_chain_verify_summary $(cat "${WORK_REAL}/verify/summary.json" 2>/dev/null || true)"
     fi
+    if jq -e 'all(.results[]; .verify_downloads==true and .download_exit==0 and .upgrade_exit==0)' \
+      "${WORK_REAL}/verify/summary.json" >/dev/null; then
+      pass "real_chain_verify_download_upgrade_ok"
+    else
+      fail "real_chain_verify_download_upgrade"
+    fi
+    # 候选 type:deb 仍指向 github.com；work mirror 不得改成 file: type:deb
+    if grep -Fq $'https://github.com/\ttype:deb' "${WORK_REAL}/site/repos/alpha/mirror.list" \
+      && ! grep -E $'file:.*\ttype:deb' "${WORK_REAL}/verify/"*/*.mirror.list >/dev/null 2>&1; then
+      pass "real_chain_keeps_type_deb_origin"
+    else
+      fail "real_chain_type_deb_rewritten"
+    fi
     if [[ -f "${WORK_REAL}/site/add_source.sh" ]] \
       && [[ "$(stat -c '%a' "${WORK_REAL}/site/add_source.sh")" == 644 ]] \
       && cmp -s "${ROOT}/scripts/add_source.sh" "${WORK_REAL}/site/add_source.sh"; then
@@ -676,6 +743,12 @@ else
       pass "real_chain_render_mentions_alpha"
     else
       fail "real_chain_render_content"
+    fi
+    if jq -e 'select(.role=="release-fixture" and .method=="GET" and .status==200)' \
+      "${REAL}/https-access.jsonl" >/dev/null; then
+      pass "real_chain_release_fixture_get"
+    else
+      fail "real_chain_release_fixture_missed"
     fi
     SITE_SHA="$(sha_of "${WORK_REAL}/site/state.json")"
     SUM_SHA="$(sha_of "${WORK_REAL}/verify/summary.json")"
@@ -739,7 +812,7 @@ fi
 
 # 生产 catalog 含 rustdesk + golang；入口透传 Go/换钥参数且强制 --verify-downloads
 if jq -e '[.packages[].id] == ["rustdesk","golang"]
-  and (.packages[] | select(.id=="golang") | .source_type=="go_official_archive" and .package=="apt-hub-go")' \
+  and (.packages[] | select(.id=="golang") | .source_type=="go_official_archive" and .package=="golang")' \
   "${ROOT}/config/packages.json" >/dev/null; then
   pass "catalog_rustdesk_and_golang"
 else
@@ -748,7 +821,9 @@ fi
 if grep -Fq -- '--package-repository' "${UPD}" \
   && grep -Fq -- '--go-release-tag' "${UPD}" \
   && grep -Fq -- '--rotate-from' "${UPD}" \
-  && grep -Fq -- '--verify-downloads' "${UPD}"; then
+  && grep -Fq -- '--verify-downloads' "${UPD}" \
+  && grep -Fq -- '--acquire-https-ca' "${UPD}" \
+  && grep -Fq -- '--github-https-proxy' "${UPD}"; then
   pass "update_sources_go_rotate_verify_flags"
 else
   fail "update_sources_missing_go_rotate_verify_flags"

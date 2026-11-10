@@ -19,7 +19,9 @@ REPO_NAME='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
 PKG_NAME='^[a-z0-9][a-z0-9.+-]+$'
 DATE_ISO='^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
 GITHUB_TAG='^[A-Za-z0-9._+-]+$'
-GO_RELEASE_TAG_RE='^apt-hub-go-[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$'
+GO_RELEASE_TAG_RE='^golang-[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$'
+GO_META_PACKAGE='golang'
+GO_TOOL_PACKAGE='golang-go'
 SITE_URL_RE='^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]+)?(/[A-Za-z0-9._~/-]*)?$'
 GO_DOWNLOADS_DEFAULT_URL='https://go.dev/dl/?mode=json&include=all'
 
@@ -50,7 +52,7 @@ die() {
 
 usage() {
   cat >&2 <<'EOF'
-用法: scripts/sync.sh --catalog <file> --releases <file> --previous <dir> --output <dir> --gnupghome <dir> --fingerprint <完整指纹> --site-url <https站点URL> [--package-repository <owner/repo>] [--go-release-tag <apt-hub-go-X.Y.Z-R>] [--go-downloads-json <file>] [--rotate-from <旧完整指纹>]
+用法: scripts/sync.sh --catalog <file> --releases <file> --previous <dir> --output <dir> --gnupghome <dir> --fingerprint <完整指纹> --site-url <https站点URL> [--package-repository <owner/repo>] [--go-release-tag <golang-X.Y.Z-R>] [--go-downloads-json <file>] [--rotate-from <旧完整指纹>]
 EOF
   exit 2
 }
@@ -381,13 +383,33 @@ load_go_downloads_index() {
 
 assert_go_release_tag_matches_provenance() {
   local tag="$1" prov="$2"
-  local ver_deb rev expect
+  local ver_deb rev epoch expect
   ver_deb="$(jq -r '.upstream.version_debian // empty' "${prov}")"
   rev="$(jq -r '.upstream.revision // empty' "${prov}")"
+  epoch="$(jq -r '.upstream.epoch // empty' "${prov}")"
   [[ "${ver_deb}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "provenance version_debian 非法"
   [[ "${rev}" =~ ^[1-9][0-9]*$ ]] || die "provenance revision 非法"
-  expect="apt-hub-go-${ver_deb}-${rev}"
+  [[ "${epoch}" == "2" ]] || die "provenance upstream.epoch 必须是 \"2\""
+  expect="golang-${ver_deb}-${rev}"
   [[ "${tag}" == "${expect}" ]] || die "go-release-tag 与 provenance 不符: ${tag} != ${expect}"
+}
+
+go_expected_deb_version() {
+  local prov="$1"
+  local ver_deb rev epoch
+  ver_deb="$(jq -r '.upstream.version_debian // empty' "${prov}")"
+  rev="$(jq -r '.upstream.revision // empty' "${prov}")"
+  epoch="$(jq -r '.upstream.epoch // empty' "${prov}")"
+  [[ "${epoch}" == "2" && "${ver_deb}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "${rev}" =~ ^[1-9][0-9]*$ ]] \
+    || die "provenance 无法派生 deb Version"
+  printf '%s:%s-%s\n' "${epoch}" "${ver_deb}" "${rev}"
+}
+
+assert_not_legacy_apt_hub_go() {
+  local label="$1" text="$2"
+  if grep -Eq 'apt-hub-go' <<<"${text}"; then
+    die "${label} 含已废止 apt-hub-go 形状，拒绝"
+  fi
 }
 
 cross_check_go_upstream_tar() {
@@ -476,8 +498,12 @@ reconfirm_retained_upstream_identity() {
         || die "存量 ${id} 缺少分层 upstream 字段，请纳入 catalog 复验"
       cross_check_go_upstream_tar "${downloads}" "${arch}" "${up_url}" "${up_sha}" "${up_size}" "${version_go}"
       jq -e --arg a "${arch}" --arg f "$(basename -- "$(jq -r '.filename' <<<"${asset}")")" \
-        --arg h "$(jq -r '.sha256' <<<"${asset}")" --arg s "$(jq -r '.size|tostring' <<<"${asset}")" '
-        .packages[]? | select(.architecture==$a and .filename==$f and .sha256==$h and ((.size|tostring)==$s))
+        --arg h "$(jq -r '.sha256' <<<"${asset}")" --arg s "$(jq -r '.size|tostring' <<<"${asset}")" \
+        --arg p "$(jq -r '.package // empty' <<<"${asset}")" '
+        .packages[]? | select(
+          .architecture==$a and .filename==$f and .sha256==$h and ((.size|tostring)==$s)
+          and ($p=="" or .package==$p)
+        )
       ' "${prov_path}" >/dev/null || die "存量 ${id} provenance 与 state 资产不符: ${arch}"
     done < <(jq -c '.assets[]' <<<"${prev_row}")
   fi
@@ -654,9 +680,11 @@ validate_catalog() {
     [[ -n "${desc}" && -n "${src}" && -n "${lic}" ]] || die "软件 ${id} 缺少 description/source_url/license"
     [[ "${src}" == https://* ]] || die "软件 ${id} 的 source_url 必须是 https"
     if [[ "${st}" == "go_official_archive" ]]; then
-      [[ "${pkg}" == "apt-hub-go" ]] || die "go_official_archive 的 package 必须是 apt-hub-go: ${id}"
+      [[ "${pkg}" == "${GO_META_PACKAGE}" ]] || die "go_official_archive 的 package 必须是 ${GO_META_PACKAGE}: ${id}"
+      [[ "${id}" == "golang" ]] || die "go_official_archive 的 id 必须是 golang: ${id}"
       [[ "${src}" == "https://go.dev" || "${src}" == "https://go.dev/" ]] \
         || die "go_official_archive source_url 必须是 https://go.dev: ${id}"
+      assert_not_legacy_apt_hub_go "catalog ${id}" "${pkgjson}"
     fi
     series_type="$(jq -r 'if .ubuntu_series=="supported" then "supported" elif (.ubuntu_series|type)=="array" then "list" else "bad" end' <<<"${pkgjson}")"
     [[ "${series_type}" != "bad" ]] || die "软件 ${id} 的 ubuntu_series 必须是 supported 或官方 series 数组"
@@ -813,6 +841,7 @@ load_previous_state() {
     id="$(jq -r '.id // empty' <<<"${row}")"
     [[ -n "${id}" ]] || die "previous state 缺少 id"
     assert_safe_package_id "${id}" "previous id"
+    assert_not_legacy_apt_hub_go "previous state ${id}" "${row}"
     if grep -Fxq -- "${id}" "${seen_ids}"; then
       die "previous state 重复 id: ${id}"
     fi
@@ -1342,6 +1371,15 @@ assert_previous_signing_identity "${previous}"
 copy_previous_byhash "${previous}" "${work}"
 load_previous_state "${previous}" "${scratch}"
 
+# 换钥：previous 中全部将复制/比对/保留的 repo 先用旧公钥 pin 认证正文+hash/size。
+if [[ "${key_rotation}" -eq 1 ]]; then
+  while IFS= read -r prev_id; do
+    [[ -n "${prev_id}" ]] || continue
+    verify_previous_repo_indexes "${prev_id}" \
+      || die "换钥拒绝：previous repos/${prev_id} 未通过旧公钥索引认证"
+  done < <(jq -r '.packages[]?.id // empty' "${scratch}/prev-state.json")
+fi
+
 now_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 state_rows="${scratch}/state-rows.jsonl"
 : >"${state_rows}"
@@ -1402,7 +1440,8 @@ while IFS= read -r pkgjson; do
     load_go_downloads_index "${go_downloads_path}"
     go_version="$(jq -r '.upstream.version // empty' "${go_prov_path}")"
     [[ "${go_version}" =~ ^go[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "provenance upstream.version 非法"
-    go_upstream_meta="$(jq -c '{version:.upstream.version,version_debian:.upstream.version_debian,revision:(.upstream.revision|tostring)}' "${go_prov_path}")"
+    go_upstream_meta="$(jq -c '{version:.upstream.version,version_debian:.upstream.version_debian,revision:(.upstream.revision|tostring),epoch:(.upstream.epoch|tostring)}' "${go_prov_path}")"
+    assert_not_legacy_apt_hub_go "provenance ${id}" "$(cat -- "${go_prov_path}")"
     state_source_url="${src}"
     release_tag_out="${tag}"
   else
@@ -1439,147 +1478,197 @@ while IFS= read -r pkgjson; do
 
   while IFS= read -r arch; do
     regex="$(jq -r --arg a "${arch}" '.architectures[$a]' <<<"${pkgjson}")"
-    asset="$(match_unique_asset "${release_json}" "${regex}")"
-    name="$(jq -r '.name' <<<"${asset}")"
-    size="$(jq -r '.size|tostring' <<<"${asset}")"
-    url="$(jq -r '.browser_download_url // empty' <<<"${asset}")"
-    official="$(official_sha256 "${asset}")"
-    [[ "${size}" =~ ^[1-9][0-9]*$ ]] || die "官方 size 非法: ${id} ${name}"
-    assert_github_asset_url "${download_repo}" "${tag}" "${name}" "${url}"
-    rel="$(origin_relative_path "${url}")"
-    origin="$(https_origin_of "${url}")"
-    if [[ -z "${official_origin}" ]]; then
-      official_origin="${origin}"
-    else
-      [[ "${official_origin}" == "${origin}" ]] || die "同一软件官方 origin 不一致: ${id}"
-    fi
-
-    up_json="{}"
+    : >"${stanza_dir}/${arch}.stanza"
+    arch_unit_specs=()
     if [[ "${source_type}" == "go_official_archive" ]]; then
-      jq -e --arg a "${arch}" --arg f "${name}" --arg h "${official}" --arg s "${size}" \
-        --arg pkg "${pkg}" '
-        .packages[]? | select(
-          .architecture==$a and .filename==$f and .sha256==$h
-          and ((.size|tostring)==$s) and .package==$pkg
-        )
-      ' "${go_prov_path}" >/dev/null || die "provenance 与 GitHub deb 资产不符: ${id} ${arch}"
-      up_url="$(jq -r --arg a "${arch}" --arg f "${name}" '
-        [.packages[]? | select(.architecture==$a and .filename==$f)][0].upstream.url // empty
-      ' "${go_prov_path}")"
-      up_sha="$(jq -r --arg a "${arch}" --arg f "${name}" '
-        [.packages[]? | select(.architecture==$a and .filename==$f)][0].upstream.sha256 // empty
-      ' "${go_prov_path}" | tr '[:upper:]' '[:lower:]')"
-      up_size="$(jq -r --arg a "${arch}" --arg f "${name}" '
-        ([.packages[]? | select(.architecture==$a and .filename==$f)][0].upstream.size|tostring) // empty
-      ' "${go_prov_path}")"
-      cross_check_go_upstream_tar "${go_downloads_path}" "${arch}" "${up_url}" "${up_sha}" "${up_size}" "${go_version}"
-      up_json="$(jq -n --arg url "${up_url}" --arg sha256 "${up_sha}" --arg size "${up_size}" \
-        '{url:$url,sha256:$sha256,size:$size}')"
+      # catalog 正则锚定主包；同 arch 工具包从 provenance 清单取。
+      match_unique_asset "${release_json}" "${regex}" >/dev/null
+      go_arch_count="$(jq --arg a "${arch}" '[.packages[]? | select(.architecture==$a)] | length' "${go_prov_path}")"
+      [[ "${go_arch_count}" == "2" ]] || die "Go provenance ${arch} 必须恰好 2 个包，实际 ${go_arch_count}"
+      jq -e --arg a "${arch}" --arg m "${GO_META_PACKAGE}" --arg t "${GO_TOOL_PACKAGE}" '
+        ([.packages[]? | select(.architecture==$a) | .package] | sort) == ([$m,$t] | sort)
+      ' "${go_prov_path}" >/dev/null || die "Go provenance ${arch} 必须是 ${GO_META_PACKAGE}+${GO_TOOL_PACKAGE}"
+      go_units_file="${scratch}/go-units-${id}-${arch}.jsonl"
+      jq -c --arg a "${arch}" '.packages[] | select(.architecture==$a)' "${go_prov_path}" \
+        >"${go_units_file}" || die "枚举 Go provenance ${arch} 失败"
+      while IFS= read -r prov_row; do
+        arch_unit_specs+=("${prov_row}")
+      done <"${go_units_file}"
+    else
+      asset="$(match_unique_asset "${release_json}" "${regex}")"
+      name="$(jq -r '.name' <<<"${asset}")"
+      size="$(jq -r '.size|tostring' <<<"${asset}")"
+      url="$(jq -r '.browser_download_url // empty' <<<"${asset}")"
+      official="$(official_sha256 "${asset}")"
+      arch_unit_specs+=("$(jq -n \
+        --arg package "${pkg}" --arg filename "${name}" --arg architecture "${arch}" \
+        --arg sha256 "${official}" --arg size "${size}" --arg url "${url}" \
+        '{package:$package,filename:$filename,architecture:$architecture,sha256:$sha256,size:$size,url:$url}')")
     fi
 
-    reused=0
-    # 换钥后不得仅凭旧签名复用 control；active 必须重新官方资产校验。
-    if [[ "${key_rotation}" -eq 0 && -n "${prev_row}" ]]; then
-      prev_asset="$(jq -c --arg a "${arch}" --arg u "${url}" --arg h "${official}" --arg s "${size}" '
-        .assets[]? | select(.architecture==$a and .url==$u and .sha256==$h and (.size|tostring)==$s)
-      ' <<<"${prev_row}" || true)"
-      if [[ -n "${prev_asset}" ]]; then
-        prev_fn="$(jq -r '.filename' <<<"${prev_asset}")"
-        [[ "${prev_fn}" == "${rel}" ]] || die "previous filename 与官方相对路径不一致: ${id} ${arch}"
-        if try_reuse_control_stanza "${id}" "${arch}" "${official}" "${scratch}/series-${id}.txt" "${stanza_dir}/${arch}.stanza"; then
-          reused=1
-        else
-          die "previous 元数据无法通过签名/Packages 校验，拒绝盲复用: ${id} ${arch}"
+    for unit_spec in "${arch_unit_specs[@]}"; do
+      bin_pkg="$(jq -r '.package // empty' <<<"${unit_spec}")"
+      [[ -n "${bin_pkg}" ]] || die "资产缺少 package 字段: ${id} ${arch}"
+      if [[ "${source_type}" == "go_official_archive" ]]; then
+        name="$(jq -r '.filename // empty' <<<"${unit_spec}")"
+        [[ -n "${name}" ]] || die "provenance 缺少 filename: ${id} ${arch}"
+        asset="$(jq -c --arg n "${name}" '
+          [.assets[]? | select(.name==$n)] | if length==1 then .[0] else empty end
+        ' <<<"${release_json}")"
+        [[ -n "${asset}" ]] || die "GitHub release 缺少资产: ${name}"
+        size="$(jq -r '.size|tostring' <<<"${asset}")"
+        url="$(jq -r '.browser_download_url // empty' <<<"${asset}")"
+        official="$(official_sha256 "${asset}")"
+        prov_sha="$(jq -r '.sha256 // empty' <<<"${unit_spec}" | tr '[:upper:]' '[:lower:]')"
+        prov_size="$(jq -r '((.size|tostring) // empty)' <<<"${unit_spec}")"
+        prov_ver="$(jq -r '.version // empty' <<<"${unit_spec}")"
+        [[ "${prov_sha}" == "${official}" ]] || die "provenance sha 与 GitHub digest 不符: ${name}"
+        [[ "${prov_size}" == "${size}" ]] || die "provenance size 与 GitHub 不符: ${name}"
+      else
+        name="$(jq -r '.filename' <<<"${unit_spec}")"
+        size="$(jq -r '.size|tostring' <<<"${unit_spec}")"
+        url="$(jq -r '.url' <<<"${unit_spec}")"
+        official="$(jq -r '.sha256' <<<"${unit_spec}")"
+        prov_ver=""
+      fi
+      [[ "${size}" =~ ^[1-9][0-9]*$ ]] || die "官方 size 非法: ${id} ${name}"
+      assert_github_asset_url "${download_repo}" "${tag}" "${name}" "${url}"
+      rel="$(origin_relative_path "${url}")"
+      origin="$(https_origin_of "${url}")"
+      if [[ -z "${official_origin}" ]]; then
+        official_origin="${origin}"
+      else
+        [[ "${official_origin}" == "${origin}" ]] || die "同一软件官方 origin 不一致: ${id}"
+      fi
+
+      up_json="{}"
+      if [[ "${source_type}" == "go_official_archive" ]]; then
+        up_url="$(jq -r '.upstream.url // empty' <<<"${unit_spec}")"
+        up_sha="$(jq -r '.upstream.sha256 // empty' <<<"${unit_spec}" | tr '[:upper:]' '[:lower:]')"
+        up_size="$(jq -r '((.upstream.size|tostring) // empty)' <<<"${unit_spec}")"
+        cross_check_go_upstream_tar "${go_downloads_path}" "${arch}" "${up_url}" "${up_sha}" "${up_size}" "${go_version}"
+        up_json="$(jq -n --arg url "${up_url}" --arg sha256 "${up_sha}" --arg size "${up_size}" \
+          '{url:$url,sha256:$sha256,size:$size}')"
+      fi
+
+      unit_stanza="${scratch}/stanza-unit-${id}-${arch}-${bin_pkg}.txt"
+      reused=0
+      # 换钥后不得仅凭旧签名复用 control；active 必须重新官方资产校验。
+      if [[ "${key_rotation}" -eq 0 && -n "${prev_row}" ]]; then
+        prev_asset="$(jq -c --arg a "${arch}" --arg u "${url}" --arg h "${official}" --arg s "${size}" --arg p "${bin_pkg}" '
+          .assets[]? | select(
+            .architecture==$a and .url==$u and .sha256==$h and (.size|tostring)==$s
+            and ((.package // "") == $p or (.package|type)!="string")
+          )
+        ' <<<"${prev_row}" || true)"
+        if [[ -z "${prev_asset}" ]]; then
+          prev_asset="$(jq -c --arg a "${arch}" --arg u "${url}" --arg h "${official}" --arg s "${size}" '
+            .assets[]? | select(.architecture==$a and .url==$u and .sha256==$h and (.size|tostring)==$s)
+          ' <<<"${prev_row}" || true)"
+        fi
+        if [[ -n "${prev_asset}" ]]; then
+          prev_fn="$(jq -r '.filename' <<<"${prev_asset}")"
+          [[ "${prev_fn}" == "${rel}" ]] || die "previous filename 与官方相对路径不一致: ${id} ${bin_pkg} ${arch}"
+          if try_reuse_control_stanza "${id}" "${arch}" "${official}" "${scratch}/series-${id}.txt" "${unit_stanza}"; then
+            reused=1
+          else
+            die "previous 元数据无法通过签名/Packages 校验，拒绝盲复用: ${id} ${bin_pkg} ${arch}"
+          fi
         fi
       fi
-    fi
 
-    if [[ "${reused}" -eq 1 ]]; then
-      deb_pkg="$(control_field "${stanza_dir}/${arch}.stanza" Package)"
-      deb_ver="$(control_field "${stanza_dir}/${arch}.stanza" Version)"
-      deb_arch="$(control_field "${stanza_dir}/${arch}.stanza" Architecture)"
-      deb_fn="$(control_field "${stanza_dir}/${arch}.stanza" Filename)"
-      deb_sha="$(control_field "${stanza_dir}/${arch}.stanza" SHA256 | tr '[:upper:]' '[:lower:]')"
-      deb_sz="$(control_field "${stanza_dir}/${arch}.stanza" Size)"
-      [[ "${deb_pkg}" == "${pkg}" ]] || die "复用 control Package 不符: ${id}"
-      [[ "${deb_arch}" == "${arch}" ]] || die "复用 control Architecture 不符: ${id}"
-      [[ "${deb_fn}" == "${rel}" ]] || die "复用 control Filename 不符: ${id}"
-      [[ "${deb_sha}" == "${official}" ]] || die "复用 control SHA256 不符: ${id}"
-      [[ "${deb_sz}" == "${size}" ]] || die "复用 control Size 不符: ${id}"
-      [[ -n "${deb_ver}" ]] || die "复用 control Version 为空: ${id}"
-      dpkg --validate-version -- "${deb_ver}" || die "复用 Version 非法: ${id} ${deb_ver}"
-    else
-      dest_rel="${verify_tree}/${rel}"
-      dest_resolved="$(realpath -m -- "${dest_rel}")"
-      under_dir "${verify_tree}" "${dest_resolved}" || die "临时核验路径越界: ${rel}"
-      mkdir -p -- "$(dirname -- "${dest_rel}")"
-      without_xtrace curl_https "${DOWNLOAD_TIMEOUT}" -o "${dest_rel}" -- "${url}" || die "下载失败: ${url}"
-      got_size="$(file_size "${dest_rel}")"
-      got_sha="$(hex_sha256 "${dest_rel}")"
-      [[ "${got_size}" == "${size}" ]] || die "实际大小与官方 size 不符: ${name}"
-      [[ "${got_sha}" == "${official}" ]] || die "实际 SHA256 与官方 digest 不符: ${name}"
-      deb_pkg="$(dpkg-deb -f -- "${dest_rel}" Package)"
-      deb_ver="$(dpkg-deb -f -- "${dest_rel}" Version)"
-      deb_arch="$(dpkg-deb -f -- "${dest_rel}" Architecture)"
-      [[ "${deb_pkg}" == "${pkg}" ]] || die "包内 Package=${deb_pkg} 与清单 ${pkg} 不符"
-      [[ "${deb_arch}" == "${arch}" ]] || die "包内 Architecture=${deb_arch} 与 ${arch} 不符"
-      [[ -n "${deb_ver}" ]] || die "包内 Version 为空: ${name}"
-      dpkg --validate-version -- "${deb_ver}" || die "包内 Version 非法: ${name} ${deb_ver}"
-      if ! (
-        cd -- "${verify_tree}"
-        apt-ftparchive --md5=off --sha1=off --sha512=off --sha256 packages .
-      ) >"${stanza_dir}/${arch}.raw"; then
-        die "apt-ftparchive packages 失败"
-      fi
-      awk -v want="${official}" '
-        BEGIN { RS=""; FS="\n" }
-        {
-          sha=""
-          for (i=1;i<=NF;i++) if ($i ~ /^SHA256: /){split($i,a," "); sha=tolower(a[2])}
-          if (sha==want) {
-            for (i=1;i<=NF;i++) {
-              if ($i ~ /^Filename: \.\//) sub(/^Filename: \.\//,"Filename: ", $i)
-              print $i
+      if [[ "${reused}" -eq 1 ]]; then
+        deb_pkg="$(control_field "${unit_stanza}" Package)"
+        deb_ver="$(control_field "${unit_stanza}" Version)"
+        deb_arch="$(control_field "${unit_stanza}" Architecture)"
+        deb_fn="$(control_field "${unit_stanza}" Filename)"
+        deb_sha="$(control_field "${unit_stanza}" SHA256 | tr '[:upper:]' '[:lower:]')"
+        deb_sz="$(control_field "${unit_stanza}" Size)"
+        [[ "${deb_pkg}" == "${bin_pkg}" ]] || die "复用 control Package 不符: ${id} ${bin_pkg}"
+        [[ "${deb_arch}" == "${arch}" ]] || die "复用 control Architecture 不符: ${id}"
+        [[ "${deb_fn}" == "${rel}" ]] || die "复用 control Filename 不符: ${id}"
+        [[ "${deb_sha}" == "${official}" ]] || die "复用 control SHA256 不符: ${id}"
+        [[ "${deb_sz}" == "${size}" ]] || die "复用 control Size 不符: ${id}"
+        [[ -n "${deb_ver}" ]] || die "复用 control Version 为空: ${id}"
+        dpkg --validate-version -- "${deb_ver}" || die "复用 Version 非法: ${id} ${deb_ver}"
+        cat -- "${unit_stanza}" >>"${stanza_dir}/${arch}.stanza"
+      else
+        dest_rel="${verify_tree}/${rel}"
+        dest_resolved="$(realpath -m -- "${dest_rel}")"
+        under_dir "${verify_tree}" "${dest_resolved}" || die "临时核验路径越界: ${rel}"
+        mkdir -p -- "$(dirname -- "${dest_rel}")"
+        without_xtrace curl_https "${DOWNLOAD_TIMEOUT}" -o "${dest_rel}" -- "${url}" || die "下载失败: ${url}"
+        got_size="$(file_size "${dest_rel}")"
+        got_sha="$(hex_sha256 "${dest_rel}")"
+        [[ "${got_size}" == "${size}" ]] || die "实际大小与官方 size 不符: ${name}"
+        [[ "${got_sha}" == "${official}" ]] || die "实际 SHA256 与官方 digest 不符: ${name}"
+        deb_pkg="$(dpkg-deb -f -- "${dest_rel}" Package)"
+        deb_ver="$(dpkg-deb -f -- "${dest_rel}" Version)"
+        deb_arch="$(dpkg-deb -f -- "${dest_rel}" Architecture)"
+        [[ "${deb_pkg}" == "${bin_pkg}" ]] || die "包内 Package=${deb_pkg} 与清单 ${bin_pkg} 不符"
+        [[ "${deb_arch}" == "${arch}" ]] || die "包内 Architecture=${deb_arch} 与 ${arch} 不符"
+        [[ -n "${deb_ver}" ]] || die "包内 Version 为空: ${name}"
+        dpkg --validate-version -- "${deb_ver}" || die "包内 Version 非法: ${name} ${deb_ver}"
+        if ! (
+          cd -- "${verify_tree}"
+          apt-ftparchive --md5=off --sha1=off --sha512=off --sha256 packages .
+        ) >"${stanza_dir}/${arch}.raw"; then
+          die "apt-ftparchive packages 失败"
+        fi
+        awk -v want="${official}" '
+          BEGIN { RS=""; FS="\n" }
+          {
+            sha=""
+            for (i=1;i<=NF;i++) if ($i ~ /^SHA256: /){split($i,a," "); sha=tolower(a[2])}
+            if (sha==want) {
+              for (i=1;i<=NF;i++) {
+                if ($i ~ /^Filename: \.\//) sub(/^Filename: \.\//,"Filename: ", $i)
+                print $i
+              }
+              printf "\n"
+              found=1
+              exit
             }
-            printf "\n"
-            found=1
-            exit
           }
-        }
-        END { if (!found) exit 1 }
-      ' "${stanza_dir}/${arch}.raw" >"${stanza_dir}/${arch}.stanza" \
-        || die "apt-ftparchive 未生成对应 Packages 记录: ${id} ${arch}"
-      rm -f -- "${dest_rel}"
-    fi
+          END { if (!found) exit 1 }
+        ' "${stanza_dir}/${arch}.raw" >>"${stanza_dir}/${arch}.stanza" \
+          || die "apt-ftparchive 未生成对应 Packages 记录: ${id} ${bin_pkg} ${arch}"
+        rm -f -- "${dest_rel}"
+      fi
 
-    if [[ -z "${deb_version}" ]]; then
-      deb_version="${deb_ver}"
-    else
-      compare_dpkg_versions "${deb_ver}" eq "${deb_version}" || die "同一软件不同架构 Version 不一致: ${id}"
-    fi
-    if [[ "${source_type}" == "go_official_archive" ]]; then
-      expect_ver="$(jq -r '.upstream.version_debian + "-" + (.upstream.revision|tostring)' "${go_prov_path}")"
-      [[ "${deb_ver}" == "${expect_ver}" ]] || die "Go deb Version 与 provenance 不符: ${deb_ver} != ${expect_ver}"
-    fi
+      if [[ -z "${deb_version}" ]]; then
+        deb_version="${deb_ver}"
+      else
+        compare_dpkg_versions "${deb_ver}" eq "${deb_version}" || die "同一软件不同资产 Version 不一致: ${id}"
+      fi
+      if [[ "${source_type}" == "go_official_archive" ]]; then
+        expect_ver="$(go_expected_deb_version "${go_prov_path}")"
+        [[ "${deb_ver}" == "${expect_ver}" ]] || die "Go deb Version 与 provenance 不符: ${deb_ver} != ${expect_ver}"
+        [[ -z "${prov_ver}" || "${prov_ver}" == "${deb_ver}" ]] \
+          || die "provenance.packages[].version 与 deb 不符: ${prov_ver} != ${deb_ver}"
+      fi
 
-    if [[ "${source_type}" == "go_official_archive" ]]; then
-      asset_rows+=("$(jq -n \
-        --arg architecture "${arch}" \
-        --arg filename "${rel}" \
-        --arg sha256 "${official}" \
-        --arg size "${size}" \
-        --arg url "${url}" \
-        --argjson upstream "${up_json}" \
-        '{architecture:$architecture,filename:$filename,sha256:$sha256,size:$size,url:$url,upstream:$upstream}')")
-    else
-      asset_rows+=("$(jq -n \
-        --arg architecture "${arch}" \
-        --arg filename "${rel}" \
-        --arg sha256 "${official}" \
-        --arg size "${size}" \
-        --arg url "${url}" \
-        '{architecture:$architecture,filename:$filename,sha256:$sha256,size:$size,url:$url}')")
-    fi
+      if [[ "${source_type}" == "go_official_archive" ]]; then
+        asset_rows+=("$(jq -n \
+          --arg package "${bin_pkg}" \
+          --arg architecture "${arch}" \
+          --arg filename "${rel}" \
+          --arg sha256 "${official}" \
+          --arg size "${size}" \
+          --arg url "${url}" \
+          --argjson upstream "${up_json}" \
+          '{package:$package,architecture:$architecture,filename:$filename,sha256:$sha256,size:$size,url:$url,upstream:$upstream}')")
+      else
+        asset_rows+=("$(jq -n \
+          --arg package "${bin_pkg}" \
+          --arg architecture "${arch}" \
+          --arg filename "${rel}" \
+          --arg sha256 "${official}" \
+          --arg size "${size}" \
+          --arg url "${url}" \
+          '{package:$package,architecture:$architecture,filename:$filename,sha256:$sha256,size:$size,url:$url}')")
+      fi
+    done
     archs="${archs} ${arch}"
   done < <(jq -r '.architectures|keys[]' <<<"${pkgjson}")
 
@@ -1624,7 +1713,7 @@ while IFS= read -r pkgjson; do
   write_repo_indexes "${dest_repo}" "${scratch}/series-${id}.txt" "${archs}" "${stanza_dir}"
   write_repo_mirror_and_sources "${dest_repo}" "${id}" "${scratch}/series-${id}.txt" "${archs}" "${official_origin}"
 
-  assets_json="$(printf '%s\n' "${asset_rows[@]}" | jq -s 'sort_by(.architecture)')"
+  assets_json="$(printf '%s\n' "${asset_rows[@]}" | jq -s 'sort_by(.package,.architecture)')"
   series_json="$(printf '%s\n' "${pkg_series[@]}" | jq -R . | jq -s .)"
   arch_json="$(tr ' ' '\n' <<<"${archs}" | awk 'NF' | jq -R . | jq -s .)"
   apt_uri="mirror+${site_url}/repos/${id}/mirror.list"

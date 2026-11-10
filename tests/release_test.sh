@@ -193,11 +193,13 @@ set +e
 RC=$?
 set -e
 record "build_flat_dual_arch" "${RC}" 0
-if [[ -f "${OUT_BUILD}/apt-hub-go_7.7.7-1_amd64.deb" \
-  && -f "${OUT_BUILD}/apt-hub-go_7.7.7-1_arm64.deb" \
+if [[ -f "${OUT_BUILD}/golang-go_7.7.7-1_amd64.deb" \
+  && -f "${OUT_BUILD}/golang-go_7.7.7-1_arm64.deb" \
+  && -f "${OUT_BUILD}/golang_7.7.7-1_amd64.deb" \
+  && -f "${OUT_BUILD}/golang_7.7.7-1_arm64.deb" \
   && -f "${OUT_BUILD}/provenance.json" \
   && -f "${OUT_BUILD}/SHA256SUMS" ]]; then
-  pass "build 单平面 assets 齐全"
+  pass "build 单平面 4deb+manifest 齐全"
 else
   fail "build 输出布局不完整"
 fi
@@ -229,21 +231,54 @@ LOG="${APT_HUB_GH_LOG:?}"
 printf 'gh %s\n' "$*" >>"${LOG}"
 cmd="${1:-}"
 case "${cmd}" in
+  api)
+    # repos/OWNER/REPO/releases?per_page=100&page=N
+    path="${2:-}"
+    if [[ "${path}" == repos/*/releases* ]]; then
+      if [[ "${path}" == *page=2* ]]; then
+        if [[ "${APT_HUB_GH_PAGE2:-ok}" == "fail" ]]; then
+          echo "page2 fixture fail" >&2
+          exit 1
+        fi
+        printf '[]\n'
+        exit 0
+      fi
+      if [[ "${APT_HUB_GH_PAGE2:-ok}" == "fail" ]]; then
+        # 满页强制翻页，才能打到 page2 失败零 delete
+        jq -n '[range(100)|{tag_name:("pad-\(.)"),draft:true,make_latest:"false",created_at:"2026-01-01T00:00:00Z"}]'
+        exit 0
+      fi
+      # ≥4 已发布同族 + draft；旧版 7.7.4 仅靠 by-hash 全文 tag 保护（非 keep-recent）
+      cat <<'JSON'
+[{"tag_name":"golang-7.7.8-1","draft":false,"make_latest":"false","created_at":"2026-01-05T00:00:00Z"},
+ {"tag_name":"golang-7.7.7-1","draft":false,"make_latest":"false","created_at":"2026-01-04T00:00:00Z"},
+ {"tag_name":"golang-7.7.6-1","draft":false,"make_latest":"false","created_at":"2026-01-03T00:00:00Z"},
+ {"tag_name":"golang-7.7.5-1","draft":false,"make_latest":"false","created_at":"2026-01-02T00:00:00Z"},
+ {"tag_name":"golang-7.7.4-1","draft":false,"make_latest":"false","created_at":"2026-01-01T00:00:00Z"},
+ {"tag_name":"golang-9.9.9-1","draft":true,"make_latest":"false","created_at":"2026-01-06T00:00:00Z"}]
+JSON
+      exit 0
+    fi
+    echo "gh api unknown path: ${path}" >&2
+    exit 2
+    ;;
   release)
     sub="${2:-}"
     case "${sub}" in
       list)
         cat <<'JSON'
-[{"tagName":"apt-hub-go-7.7.7-1","isDraft":false,"isLatest":false,"createdAt":"2026-01-03T00:00:00Z"},
- {"tagName":"apt-hub-go-7.7.6-1","isDraft":false,"isLatest":false,"createdAt":"2026-01-02T00:00:00Z"},
- {"tagName":"apt-hub-go-7.7.5-1","isDraft":false,"isLatest":false,"createdAt":"2026-01-01T00:00:00Z"},
- {"tagName":"apt-hub-go-9.9.9-1","isDraft":true,"isLatest":false,"createdAt":"2026-01-04T00:00:00Z"}]
+[{"tagName":"golang-7.7.8-1","isDraft":false,"isLatest":false,"createdAt":"2026-01-05T00:00:00Z"},
+ {"tagName":"golang-7.7.7-1","isDraft":false,"isLatest":false,"createdAt":"2026-01-04T00:00:00Z"},
+ {"tagName":"golang-7.7.6-1","isDraft":false,"isLatest":false,"createdAt":"2026-01-03T00:00:00Z"},
+ {"tagName":"golang-7.7.5-1","isDraft":false,"isLatest":false,"createdAt":"2026-01-02T00:00:00Z"},
+ {"tagName":"golang-7.7.4-1","isDraft":false,"isLatest":false,"createdAt":"2026-01-01T00:00:00Z"},
+ {"tagName":"golang-9.9.9-1","isDraft":true,"isLatest":false,"createdAt":"2026-01-06T00:00:00Z"}]
 JSON
         ;;
       view)
         tag="${3:-}"
         case "${tag}" in
-          apt-hub-go-7.7.5-1|apt-hub-go-9.9.9-1) exit 0 ;;
+          golang-7.7.5-1|golang-7.7.6-1|golang-9.9.9-1) exit 0 ;;
           *) echo "not found" >&2; exit 1 ;;
         esac
         ;;
@@ -273,8 +308,8 @@ chmod a+x -- "${STUB_BIN}/gh"
 pub_assets_json() {
   local draft="$1"
   local amd arm prov sums
-  amd="${APT_HUB_ASSET_DIR}/apt-hub-go_7.7.7-1_amd64.deb"
-  arm="${APT_HUB_ASSET_DIR}/apt-hub-go_7.7.7-1_arm64.deb"
+  amd="${APT_HUB_ASSET_DIR}/golang-go_7.7.7-1_amd64.deb"
+  arm="${APT_HUB_ASSET_DIR}/golang-go_7.7.7-1_arm64.deb"
   prov="${APT_HUB_ASSET_DIR}/provenance.json"
   sums="${APT_HUB_ASSET_DIR}/SHA256SUMS"
   jq -n \
@@ -288,8 +323,8 @@ pub_assets_json() {
     --argjson ss "$(stat -c '%s' -- "$sums")" \
     --arg sd "sha256:$(sha256sum -- "$sums" | awk '{print $1}')" \
     '{id:1,draft:$draft,prerelease:false,assets:[
-      {name:"apt-hub-go_7.7.7-1_amd64.deb",size:$as,digest:$ad,id:11},
-      {name:"apt-hub-go_7.7.7-1_arm64.deb",size:$rs,digest:$rd,id:12},
+      {name:"golang-go_7.7.7-1_amd64.deb",size:$as,digest:$ad,id:11},
+      {name:"golang-go_7.7.7-1_arm64.deb",size:$rs,digest:$rd,id:12},
       {name:"provenance.json",size:$ps,digest:$pd,id:13},
       {name:"SHA256SUMS",size:$ss,digest:$sd,id:14}
     ]}'
@@ -322,18 +357,18 @@ case "${url}" in
   https://api.github.com/repos/*/releases/tags/*)
     tag="${url##*/}"
     st="${APT_HUB_REL_STATE:-missing}"
-    if [[ "${tag}" == "apt-hub-go-7.7.7-1" && "${st}" == "published" ]]; then
+    if [[ "${tag}" == "golang-7.7.7-1" && "${st}" == "published" ]]; then
       respond "$(APT_HUB_ASSET_DIR="${APT_HUB_ASSET_DIR}" bash -c 'source /dev/null; '"$(declare -f pub_assets_json)"'; pub_assets_json false')" 200
-    elif [[ "${tag}" == "apt-hub-go-7.7.7-1" && "${st}" == "published_bad" ]]; then
-      respond '{"id":1,"draft":false,"prerelease":false,"assets":[{"name":"apt-hub-go_7.7.7-1_amd64.deb","size":1,"digest":"sha256:dead","id":11}]}' 200
-    elif [[ "${tag}" == "apt-hub-go-7.7.7-1" && "${st}" == "draft" ]]; then
+    elif [[ "${tag}" == "golang-7.7.7-1" && "${st}" == "published_bad" ]]; then
+      respond '{"id":1,"draft":false,"prerelease":false,"assets":[{"name":"golang-go_7.7.7-1_amd64.deb","size":1,"digest":"sha256:dead","id":11}]}' 200
+    elif [[ "${tag}" == "golang-7.7.7-1" && "${st}" == "draft" ]]; then
       respond "$(APT_HUB_ASSET_DIR="${APT_HUB_ASSET_DIR}" bash -c 'true')" 200
       # draft incomplete: only one asset / or full-but-draft
       respond '{"id":42,"draft":true,"prerelease":false,"assets":[{"name":"SHA256SUMS","size":10,"id":1}]}' 200
-    elif [[ "${tag}" == "apt-hub-go-7.7.7-1" && "${st}" == "draft_full" ]]; then
+    elif [[ "${tag}" == "golang-7.7.7-1" && "${st}" == "draft_full" ]]; then
       body="$(
-        amd="${APT_HUB_ASSET_DIR}/apt-hub-go_7.7.7-1_amd64.deb"
-        arm="${APT_HUB_ASSET_DIR}/apt-hub-go_7.7.7-1_arm64.deb"
+        amd="${APT_HUB_ASSET_DIR}/golang-go_7.7.7-1_amd64.deb"
+        arm="${APT_HUB_ASSET_DIR}/golang-go_7.7.7-1_arm64.deb"
         prov="${APT_HUB_ASSET_DIR}/provenance.json"
         sums="${APT_HUB_ASSET_DIR}/SHA256SUMS"
         jq -n \
@@ -342,8 +377,8 @@ case "${url}" in
           --argjson ps "$(stat -c '%s' -- "$prov")" --arg pd "sha256:$(sha256sum -- "$prov" | awk '{print $1}')" \
           --argjson ss "$(stat -c '%s' -- "$sums")" --arg sd "sha256:$(sha256sum -- "$sums" | awk '{print $1}')" \
           '{id:42,draft:true,prerelease:false,assets:[
-            {name:"apt-hub-go_7.7.7-1_amd64.deb",size:$as,digest:$ad,id:11},
-            {name:"apt-hub-go_7.7.7-1_arm64.deb",size:$rs,digest:$rd,id:12},
+            {name:"golang-go_7.7.7-1_amd64.deb",size:$as,digest:$ad,id:11},
+            {name:"golang-go_7.7.7-1_arm64.deb",size:$rs,digest:$rd,id:12},
             {name:"provenance.json",size:$ps,digest:$pd,id:13},
             {name:"SHA256SUMS",size:$ss,digest:$sd,id:14}
           ]}'
@@ -397,20 +432,28 @@ respond() {
 }
 make_full() {
   local draft="$1"
-  local amd arm prov sums
-  amd="${APT_HUB_ASSET_DIR}/apt-hub-go_7.7.7-1_amd64.deb"
-  arm="${APT_HUB_ASSET_DIR}/apt-hub-go_7.7.7-1_arm64.deb"
+  local gga ggb ga gb prov sums
+  gga="${APT_HUB_ASSET_DIR}/golang-go_7.7.7-1_amd64.deb"
+  ggb="${APT_HUB_ASSET_DIR}/golang-go_7.7.7-1_arm64.deb"
+  ga="${APT_HUB_ASSET_DIR}/golang_7.7.7-1_amd64.deb"
+  gb="${APT_HUB_ASSET_DIR}/golang_7.7.7-1_arm64.deb"
   prov="${APT_HUB_ASSET_DIR}/provenance.json"
   sums="${APT_HUB_ASSET_DIR}/SHA256SUMS"
   jq -n \
     --argjson draft "${draft}" \
-    --argjson as "$(stat -c '%s' -- "$amd")" --arg ad "sha256:$(sha256sum -- "$amd" | awk '{print $1}')" \
-    --argjson rs "$(stat -c '%s' -- "$arm")" --arg rd "sha256:$(sha256sum -- "$arm" | awk '{print $1}')" \
+    --arg tag "golang-7.7.7-1" \
+    --arg html "https://github.com/example/apt-hub/releases/tag/golang-7.7.7-1" \
+    --argjson gas "$(stat -c '%s' -- "$gga")" --arg gad "sha256:$(sha256sum -- "$gga" | awk '{print $1}')" \
+    --argjson gbs "$(stat -c '%s' -- "$ggb")" --arg gbd "sha256:$(sha256sum -- "$ggb" | awk '{print $1}')" \
+    --argjson as "$(stat -c '%s' -- "$ga")" --arg ad "sha256:$(sha256sum -- "$ga" | awk '{print $1}')" \
+    --argjson bs "$(stat -c '%s' -- "$gb")" --arg bd "sha256:$(sha256sum -- "$gb" | awk '{print $1}')" \
     --argjson ps "$(stat -c '%s' -- "$prov")" --arg pd "sha256:$(sha256sum -- "$prov" | awk '{print $1}')" \
     --argjson ss "$(stat -c '%s' -- "$sums")" --arg sd "sha256:$(sha256sum -- "$sums" | awk '{print $1}')" \
-    '{id:(if $draft then 42 else 1 end),draft:$draft,prerelease:false,assets:[
-      {name:"apt-hub-go_7.7.7-1_amd64.deb",size:$as,digest:$ad,id:11},
-      {name:"apt-hub-go_7.7.7-1_arm64.deb",size:$rs,digest:$rd,id:12},
+    '{id:(if $draft then 42 else 1 end),tag_name:$tag,html_url:$html,draft:$draft,prerelease:false,assets:[
+      {name:"golang-go_7.7.7-1_amd64.deb",size:$gas,digest:$gad,id:11},
+      {name:"golang-go_7.7.7-1_arm64.deb",size:$gbs,digest:$gbd,id:12},
+      {name:"golang_7.7.7-1_amd64.deb",size:$as,digest:$ad,id:15},
+      {name:"golang_7.7.7-1_arm64.deb",size:$bs,digest:$bd,id:16},
       {name:"provenance.json",size:$ps,digest:$pd,id:13},
       {name:"SHA256SUMS",size:$ss,digest:$sd,id:14}
     ]}'
@@ -419,14 +462,21 @@ case "${url}" in
   https://api.github.com/repos/*/releases/tags/*)
     tag="${url##*/}"
     st="${APT_HUB_REL_STATE:-missing}"
-    if [[ "${tag}" != "apt-hub-go-7.7.7-1" ]]; then
+    if [[ "${tag}" != "golang-7.7.7-1" ]]; then
       respond '{"message":"Not Found"}' 404
     elif [[ "${st}" == "published" ]]; then
       respond "$(make_full false)" 200
+    elif [[ "${st}" == "published_no_identity" ]]; then
+      # 缺 tag_name/html_url：不得视为可复用
+      body="$(make_full false | jq 'del(.tag_name,.html_url)')"
+      respond "${body}" 200
+    elif [[ "${st}" == "published_bad_tag" ]]; then
+      body="$(make_full false | jq '.tag_name="golang-0.0.0-1"')"
+      respond "${body}" 200
     elif [[ "${st}" == "published_bad" ]]; then
-      respond '{"id":1,"draft":false,"prerelease":false,"assets":[{"name":"apt-hub-go_7.7.7-1_amd64.deb","size":1,"digest":"sha256:dead","id":11}]}' 200
+      respond '{"id":1,"tag_name":"golang-7.7.7-1","html_url":"https://github.com/example/apt-hub/releases/tag/golang-7.7.7-1","draft":false,"prerelease":false,"assets":[{"name":"golang-go_7.7.7-1_amd64.deb","size":1,"digest":"sha256:dead","id":11}]}' 200
     elif [[ "${st}" == "draft" ]]; then
-      respond '{"id":42,"draft":true,"prerelease":false,"assets":[{"name":"SHA256SUMS","size":10,"id":1}]}' 200
+      respond '{"id":42,"tag_name":"golang-7.7.7-1","html_url":"https://github.com/example/apt-hub/releases/tag/golang-7.7.7-1","draft":true,"prerelease":false,"assets":[{"name":"SHA256SUMS","size":10,"id":1}]}' 200
     elif [[ "${st}" == "draft_full" ]]; then
       respond "$(make_full true)" 200
     else
@@ -436,10 +486,12 @@ case "${url}" in
   https://api.github.com/repos/*/tarball/*)
     tmpdir=$(mktemp -d)
     mkdir -p "${tmpdir}/repo/dists/stable/main/binary-amd64" "${tmpdir}/repo/by-hash/SHA256"
-    printf 'Package: apt-hub-go\nFilename: pool/main/apt-hub-go_7.7.6-1_amd64.deb\n' \
+    # Packages 仅 underscore 文件名，不含完整 release tag——避免假绿。
+    printf 'Package: apt-hub-go\nFilename: pool/main/apt-hub-go_7.7.8-1_amd64.deb\n' \
       >"${tmpdir}/repo/dists/stable/main/binary-amd64/Packages"
-    printf 'Filename: pool/main/apt-hub-go_7.7.6-1_amd64.deb\n' \
-      >"${tmpdir}/repo/by-hash/SHA256/deadbeef"
+    # 无后缀 by-hash：gzip 魔数 + 完整 tag golang-7.7.4-1
+    printf 'Filename: pool/main/x\nDescription: keep golang-7.7.4-1 referenced\n' \
+      | gzip -c >"${tmpdir}/repo/by-hash/SHA256/deadbeef"
     tar -C "${tmpdir}" -czf "${out}" repo
     rm -rf -- "${tmpdir}"
     if [[ "${write_code}" -eq 1 ]]; then printf '200'; fi
@@ -483,8 +535,11 @@ env PATH="${STUB_BIN}:/usr/bin:/bin" \
 RC=$?
 set -e
 record "prepare_ok" "${RC}" 0
-grep -Fq 'go_release_tag=apt-hub-go-7.7.7-1' "${EVIDENCE}/runs/prepare.out" \
-  && pass "prepare 输出精确 tag" || fail "prepare 未输出 apt-hub-go-7.7.7-1"
+if grep -Fq 'go_release_tag=golang-7.7.7-1' "${EVIDENCE}/runs/prepare.out"; then
+  pass "prepare 输出精确 tag"
+else
+  fail "prepare 未输出 golang-7.7.7-1"
+fi
 
 set +e
 bash "${REL}" prepare --config "${CONFIG}" --work-dir "${PREP_DIR}/x" \
@@ -501,14 +556,17 @@ env PATH="${STUB_BIN}:${PATH}" GH_TOKEN=t \
   APT_HUB_CURL_LOG="${EVIDENCE}/runs/curl-status.log" \
   APT_HUB_REL_STATE=draft \
   APT_HUB_ASSET_DIR="${OUT_BUILD}" \
-  bash "${REL}" status --repository example/apt-hub --tag apt-hub-go-7.7.7-1 \
+  bash "${REL}" status --repository example/apt-hub --tag golang-7.7.7-1 \
   >"${EVIDENCE}/runs/status-draft.out" 2>"${EVIDENCE}/runs/status-draft.err"
 RC=$?
 set -e
 record "status_draft_ok" "${RC}" 0
-grep -Fq 'assets_complete=0' "${EVIDENCE}/runs/status-draft.out" \
-  && grep -Fq 'release_state=draft' "${EVIDENCE}/runs/status-draft.out" \
-  && pass "draft 不视 complete" || fail "draft 被误标 complete"
+if grep -Fq 'assets_complete=0' "${EVIDENCE}/runs/status-draft.out" \
+  && grep -Fq 'release_state=draft' "${EVIDENCE}/runs/status-draft.out"; then
+  pass "draft 不视 complete"
+else
+  fail "draft 被误标 complete"
+fi
 
 # status: published complete + fetch 复用
 FETCH_DIR="${ROOT}/tmp/delivery-v16/release/fetch-reuse"
@@ -521,15 +579,18 @@ env PATH="${STUB_BIN}:${PATH}" GH_TOKEN=t \
   APT_HUB_REL_STATE=published \
   APT_HUB_ASSET_DIR="${OUT_BUILD}" \
   APT_HUB_DL_SRC="${OUT_BUILD}" \
-  bash "${REL}" status --repository example/apt-hub --tag apt-hub-go-7.7.7-1 \
+  bash "${REL}" status --repository example/apt-hub --tag golang-7.7.7-1 \
     --fetch-dir "${FETCH_DIR}" \
   >"${EVIDENCE}/runs/status-pub.out" 2>"${EVIDENCE}/runs/status-pub.err"
 RC=$?
 set -e
 record "status_published_reuse" "${RC}" 0
-grep -Fq 'assets_reused=1' "${EVIDENCE}/runs/status-pub.out" \
-  && [[ -f "${FETCH_DIR}/provenance.json" ]] \
-  && pass "published 完整资产可复用" || fail "published 复用失败"
+if grep -Fq 'assets_reused=1' "${EVIDENCE}/runs/status-pub.out" \
+  && [[ -f "${FETCH_DIR}/provenance.json" ]]; then
+  pass "published 完整资产可复用"
+else
+  fail "published 复用失败"
+fi
 
 # upload 幂等 published（忽略 generated_at：同 packages）
 : >"${EVIDENCE}/runs/gh-upload.log"
@@ -542,15 +603,18 @@ env PATH="${STUB_BIN}:${PATH}" GH_TOKEN=t \
   APT_HUB_DL_SRC="${OUT_BUILD}" \
   bash "${REL}" upload \
     --repository example/apt-hub \
-    --tag apt-hub-go-7.7.7-1 \
+    --tag golang-7.7.7-1 \
     --asset-dir "${OUT_BUILD}" \
     --source-sha "$(git -C "${ROOT}" rev-parse HEAD)" \
   >"${EVIDENCE}/runs/upload-idem.out" 2>"${EVIDENCE}/runs/upload-idem.err"
 RC=$?
 set -e
 record "upload_idempotent_published" "${RC}" 0
-grep -Fq 'upload_status=idempotent_published' "${EVIDENCE}/runs/upload-idem.out" \
-  && pass "upload 幂等 published" || fail "upload 未走幂等"
+if grep -Fq 'upload_status=idempotent_published' "${EVIDENCE}/runs/upload-idem.out"; then
+  pass "upload 幂等 published"
+else
+  fail "upload 未走幂等"
+fi
 
 # 同 tag 不同 bytes 拒绝
 set +e
@@ -562,7 +626,7 @@ env PATH="${STUB_BIN}:${PATH}" GH_TOKEN=t \
   APT_HUB_DL_SRC="${OUT_BUILD}" \
   bash "${REL}" upload \
     --repository example/apt-hub \
-    --tag apt-hub-go-7.7.7-1 \
+    --tag golang-7.7.7-1 \
     --asset-dir "${OUT_BUILD}" \
     --source-sha "$(git -C "${ROOT}" rev-parse HEAD)" \
   >"${EVIDENCE}/runs/upload-bad.out" 2>"${EVIDENCE}/runs/upload-bad.err"
@@ -580,27 +644,176 @@ env PATH="${STUB_BIN}:${PATH}" GH_TOKEN=t \
   APT_HUB_DL_SRC="${OUT_BUILD}" \
   bash "${REL}" upload \
     --repository example/apt-hub \
-    --tag apt-hub-go-7.7.7-1 \
+    --tag golang-7.7.7-1 \
     --asset-dir "${OUT_BUILD}" \
     --source-sha "$(git -C "${ROOT}" rev-parse HEAD)" \
   >"${EVIDENCE}/runs/upload-draft.out" 2>"${EVIDENCE}/runs/upload-draft.err"
 RC=$?
 set -e
 record "upload_draft_publish" "${RC}" 0
+if grep -Fq 'release edit' "${EVIDENCE}/runs/gh-upload-draft.log"; then
+  pass "draft_full 完整集才 edit publish"
+else
+  fail "draft_full 未调用 edit"
+fi
+
+# 半套 asset-dir（仅 amd64 + 原双 arch manifest/sums）在任何外部写前拒绝
+HALF_DIR="${EVIDENCE}/runs/upload-half-assets"
+rm -rf -- "${HALF_DIR}"
+mkdir -p -- "${HALF_DIR}"
+# 半套：原双 arch 双包 manifest/sums + 仅 amd64 golang-go（缺其余 3 deb）
+cp -a -- "${OUT_BUILD}/provenance.json" "${OUT_BUILD}/SHA256SUMS" \
+  "${OUT_BUILD}/golang-go_7.7.7-1_amd64.deb" "${HALF_DIR}/"
+: >"${EVIDENCE}/runs/gh-upload-half.log"
+: >"${EVIDENCE}/runs/curl-upload-half.log"
+set +e
+env PATH="${STUB_BIN}:${PATH}" GH_TOKEN=t \
+  APT_HUB_GH_LOG="${EVIDENCE}/runs/gh-upload-half.log" \
+  APT_HUB_CURL_LOG="${EVIDENCE}/runs/curl-upload-half.log" \
+  APT_HUB_REL_STATE=draft_full \
+  APT_HUB_ASSET_DIR="${OUT_BUILD}" \
+  APT_HUB_DL_SRC="${OUT_BUILD}" \
+  bash "${REL}" upload \
+    --repository example/apt-hub \
+    --tag golang-7.7.7-1 \
+    --asset-dir "${HALF_DIR}" \
+    --source-sha "$(git -C "${ROOT}" rev-parse HEAD)" \
+  >"${EVIDENCE}/runs/upload-half.out" 2>"${EVIDENCE}/runs/upload-half.err"
+RC=$?
+set -e
+record "upload_half_set_rejects" "${RC}" 1
+if grep -E 'release (create|upload|edit)' "${EVIDENCE}/runs/gh-upload-half.log" >/dev/null; then
+  fail "半套 upload 仍有外部写"
+else
+  pass "半套 upload 无 create/upload/edit"
+fi
+
+# 四行清单仅 3 唯一 (package,arch)：重复 amd64 缺 golang/arm64 + 孤儿坏包 → 拒发布写
+DUP_DIR="${EVIDENCE}/runs/upload-dup-pair-assets"
+rm -rf -- "${DUP_DIR}"
+mkdir -p -- "${DUP_DIR}"
+cp -a -- "${OUT_BUILD}/"*.deb "${DUP_DIR}/"
+jq '.packages[3]=.packages[0]' "${OUT_BUILD}/provenance.json" >"${DUP_DIR}/provenance.json"
+printf 'UNMANIFESTED AND NOT A DEB\n' >"${DUP_DIR}/golang_7.7.7-1_arm64.deb"
+(
+  cd -- "${DUP_DIR}"
+  mapfile -t listed < <(jq -r '.packages[].filename' provenance.json | LC_ALL=C sort -u)
+  sha256sum -- provenance.json "${listed[@]}" >SHA256SUMS
+)
+DUP_BEFORE_SHA="$(sha256sum -- "${DUP_DIR}/golang_7.7.7-1_arm64.deb" | awk '{print $1}')"
+: >"${EVIDENCE}/runs/gh-upload-dup.log"
+: >"${EVIDENCE}/runs/curl-upload-dup.log"
+set +e
+env PATH="${STUB_BIN}:${PATH}" GH_TOKEN=t \
+  APT_HUB_GH_LOG="${EVIDENCE}/runs/gh-upload-dup.log" \
+  APT_HUB_CURL_LOG="${EVIDENCE}/runs/curl-upload-dup.log" \
+  APT_HUB_REL_STATE=draft_full \
+  APT_HUB_ASSET_DIR="${OUT_BUILD}" \
+  APT_HUB_DL_SRC="${OUT_BUILD}" \
+  bash "${REL}" upload \
+    --repository example/apt-hub \
+    --tag golang-7.7.7-1 \
+    --asset-dir "${DUP_DIR}" \
+    --source-sha "$(git -C "${ROOT}" rev-parse HEAD)" \
+  >"${EVIDENCE}/runs/upload-dup.out" 2>"${EVIDENCE}/runs/upload-dup.err"
+RC=$?
+set -e
+record "upload_reject_duplicate_missing_pair" "${RC}" 1
+if grep -E 'release (create|upload|edit)' "${EVIDENCE}/runs/gh-upload-dup.log" >/dev/null; then
+  fail "缺组合/孤儿 upload 仍有外部写"
+else
+  pass "缺组合/孤儿 upload 无 create/upload/edit"
+fi
+DUP_AFTER_SHA="$(sha256sum -- "${DUP_DIR}/golang_7.7.7-1_arm64.deb" | awk '{print $1}')"
+if [[ "${DUP_BEFORE_SHA}" == "${DUP_AFTER_SHA}" ]]; then
+  pass "缺组合拒绝后输入未改"
+else
+  fail "缺组合拒绝后输入被改"
+fi
+if jq -e '((.packages|length)==4) and (([.packages[]|[.package,.architecture]]|unique|length)==3)' \
+  "${DUP_DIR}/provenance.json" >/dev/null; then
+  pass "反例仍为 4 行 3 唯一组合"
+else
+  fail "反例 fixture 形态漂移"
+fi
+
+# prepare：stable 枚举 jq 先合法后失败（畸形数组尾）必须非 0
+MALFORMED_STABLE="${EVIDENCE}/fixtures/stable-partial.json"
+printf '[{"version":"go7.7.7","stable":true},0]\n' >"${MALFORMED_STABLE}"
+set +e
+/usr/bin/jq -r '.[] | select(.stable==true) | .version' "${MALFORMED_STABLE}" \
+  >"${EVIDENCE}/runs/stable-jq.out" 2>"${EVIDENCE}/runs/stable-jq.err"
+STABLE_JQ_RC=$?
+set -e
+record "stable_jq_partial_nonzero" "${STABLE_JQ_RC}" 5
+MAL_PREP="${ROOT}/tmp/delivery-v16/release/malformed-stable-prep"
+rm -rf -- "${MAL_PREP}"
+set +e
+bash "${REL}" prepare \
+  --repository example/apt-hub \
+  --config "${CONFIG}" \
+  --work-dir "${MAL_PREP}" \
+  --downloads-json "${MALFORMED_STABLE}" \
+  >"${EVIDENCE}/runs/prepare-stable-partial.out" 2>"${EVIDENCE}/runs/prepare-stable-partial.err"
+RC=$?
+set -e
+record "prepare_rejects_stable_producer_partial" "${RC}" 1
+if grep -Fq 'go_release_tag=' "${EVIDENCE}/runs/prepare-stable-partial.out"; then
+  fail "stable 半截 producer 仍输出 tag"
+else
+  pass "stable 半截 producer 无成功输出"
+fi
+if [[ -f "${MALFORMED_STABLE}" ]]; then
+  pass "畸形索引输入未改"
+else
+  fail "畸形索引输入丢失"
+fi
+
+# status 缺 tag_name/html_url 不得 reuse
+set +e
+env PATH="${STUB_BIN}:${PATH}" GH_TOKEN=t \
+  APT_HUB_GH_LOG="${EVIDENCE}/runs/gh-status-noid.log" \
+  APT_HUB_CURL_LOG="${EVIDENCE}/runs/curl-status-noid.log" \
+  APT_HUB_REL_STATE=published_no_identity \
+  APT_HUB_ASSET_DIR="${OUT_BUILD}" \
+  APT_HUB_DL_SRC="${OUT_BUILD}" \
+  bash "${REL}" status --repository example/apt-hub --tag golang-7.7.7-1 \
+    --fetch-dir "${ROOT}/tmp/delivery-v16/release/fetch-noid" \
+  >"${EVIDENCE}/runs/status-noid.out" 2>"${EVIDENCE}/runs/status-noid.err"
+RC=$?
+set -e
+record "status_reject_missing_identity" "${RC}" 1
+if grep -Fq 'assets_reused=1' "${EVIDENCE}/runs/status-noid.out"; then
+  fail "缺身份仍 assets_reused"
+else
+  pass "缺身份拒绝 reuse"
+fi
+
+set +e
+env PATH="${STUB_BIN}:${PATH}" GH_TOKEN=t \
+  APT_HUB_GH_LOG="${EVIDENCE}/runs/gh-status-badtag.log" \
+  APT_HUB_CURL_LOG="${EVIDENCE}/runs/curl-status-badtag.log" \
+  APT_HUB_REL_STATE=published_bad_tag \
+  APT_HUB_ASSET_DIR="${OUT_BUILD}" \
+  bash "${REL}" status --repository example/apt-hub --tag golang-7.7.7-1 \
+  >"${EVIDENCE}/runs/status-badtag.out" 2>"${EVIDENCE}/runs/status-badtag.err"
+RC=$?
+set -e
+record "status_reject_mismatched_tag_name" "${RC}" 1
 
 set +e
 env PATH="${STUB_BIN}:${PATH}" GH_TOKEN=t \
   APT_HUB_GH_LOG="${EVIDENCE}/runs/gh-sha.log" \
   APT_HUB_CURL_LOG="${EVIDENCE}/runs/curl-sha.log" \
   bash "${REL}" upload \
-    --repository example/apt-hub --tag apt-hub-go-7.7.7-1 \
+    --repository example/apt-hub --tag golang-7.7.7-1 \
     --asset-dir "${OUT_BUILD}" --source-sha latest \
   >"${EVIDENCE}/runs/upload-latest.out" 2>"${EVIDENCE}/runs/upload-latest.err"
 RC=$?
 set -e
 record "upload_reject_latest_sha" "${RC}" 1
 
-# prune
+# prune：≥4 成功版本；keep-recent=2 保护 7.7.8/7.7.7；by-hash gzip 全文保护 7.7.4
 : >"${EVIDENCE}/runs/gh-prune.log"
 set +e
 env PATH="${STUB_BIN}:${PATH}" GH_TOKEN=t \
@@ -610,21 +823,27 @@ env PATH="${STUB_BIN}:${PATH}" GH_TOKEN=t \
   APT_HUB_APT_DATA=present \
   bash "${REL}" prune \
     --repository example/apt-hub \
-    --current-tag apt-hub-go-7.7.7-1 \
+    --current-tag golang-7.7.8-1 \
     --keep-recent 2 \
   >"${EVIDENCE}/runs/prune.out" 2>"${EVIDENCE}/runs/prune.err"
 RC=$?
 set -e
 record "prune_ok" "${RC}" 0
-if grep -E 'prune_deleted_tag=apt-hub-go-(7\.7\.5|9\.9\.9)-1' "${EVIDENCE}/runs/prune.out" >/dev/null; then
+if grep -E 'prune_deleted_tag=golang-(7\.7\.5|7\.7\.6|9\.9\.9)-1' "${EVIDENCE}/runs/prune.out" >/dev/null; then
   pass "prune 删除未保护同族 tag"
 else
   fail "prune 未删除未保护候选"
 fi
-if grep -Fq 'prune_deleted_tag=apt-hub-go-7.7.6-1' "${EVIDENCE}/runs/prune.out"; then
-  fail "prune 误删 apt-data/by-hash 引用版"
+if grep -Fq 'prune_deleted_tag=golang-7.7.4-1' "${EVIDENCE}/runs/prune.out"; then
+  fail "prune 误删 by-hash gzip 全文引用版 7.7.4"
 else
-  pass "prune 保护 apt-data/by-hash 引用"
+  pass "prune 保护 by-hash gzip 全文 tag"
+fi
+if grep -Fq 'prune_deleted_tag=golang-7.7.7-1' "${EVIDENCE}/runs/prune.out" \
+  || grep -Fq 'prune_deleted_tag=golang-7.7.8-1' "${EVIDENCE}/runs/prune.out"; then
+  fail "prune 误删 keep-recent 保护集"
+else
+  pass "prune 保留 keep-recent=2"
 fi
 
 set +e
@@ -633,11 +852,32 @@ env PATH="${STUB_BIN}:${PATH}" GH_TOKEN=t \
   APT_HUB_CURL_LOG="${EVIDENCE}/runs/curl-prune-err.log" \
   APT_HUB_GIT_LOG="${EVIDENCE}/runs/git-prune-err.log" \
   APT_HUB_APT_DATA=error \
-  bash "${REL}" prune --repository example/apt-hub --current-tag apt-hub-go-7.7.7-1 \
+  bash "${REL}" prune --repository example/apt-hub --current-tag golang-7.7.8-1 \
   >"${EVIDENCE}/runs/prune-err.out" 2>"${EVIDENCE}/runs/prune-err.err"
 RC=$?
 set -e
 record "prune_refuse_on_aptdata_error" "${RC}" 1
+
+# 第二页失败 → 零 delete
+: >"${EVIDENCE}/runs/gh-prune-page2.log"
+set +e
+env PATH="${STUB_BIN}:${PATH}" GH_TOKEN=t \
+  APT_HUB_GH_LOG="${EVIDENCE}/runs/gh-prune-page2.log" \
+  APT_HUB_CURL_LOG="${EVIDENCE}/runs/curl-prune-page2.log" \
+  APT_HUB_GIT_LOG="${EVIDENCE}/runs/git-prune-page2.log" \
+  APT_HUB_APT_DATA=present \
+  APT_HUB_GH_PAGE2=fail \
+  bash "${REL}" prune --repository example/apt-hub --current-tag golang-7.7.8-1 \
+  >"${EVIDENCE}/runs/prune-page2.out" 2>"${EVIDENCE}/runs/prune-page2.err"
+RC=$?
+set -e
+record "prune_page2_fail_nonzero" "${RC}" 1
+if grep -Fq 'prune_deleted_tag=' "${EVIDENCE}/runs/prune-page2.out" \
+  || grep -Fq 'release delete' "${EVIDENCE}/runs/gh-prune-page2.log"; then
+  fail "page2 失败仍发生 delete"
+else
+  pass "page2 失败零 delete"
+fi
 
 # ---------- 真实抽取 workflow run 段并执行 helper 消费 ----------
 BUILD_STEP="${EVIDENCE}/runs/wf-build-step.sh"
@@ -654,10 +894,232 @@ fi
 if grep -Fq 'scripts/release_golang.sh status' "${BUILD_STEP}" \
   && grep -Fq 'scripts/release_golang.sh upload' "${BUILD_STEP}" \
   && grep -Fq './build.sh' "${BUILD_STEP}" \
-  && ! grep -Fiq 'zip' "${BUILD_STEP}"; then
-  pass "Build 段消费 status/upload/build.sh 且不 zip"
+  && grep -Eq 'st_rc=|up_rc=' "${BUILD_STEP}" \
+  && ! grep -Eq '(^|[[:space:]])zip([[:space:]]|-)' "${BUILD_STEP}" \
+  && ! grep -Fq '.zip' "${BUILD_STEP}"; then
+  pass "Build 段消费 status/upload/build.sh 且捕获非0"
 else
-  fail "Build 段未正确消费 helper"
+  fail "Build 段未正确消费 helper/退出码"
+fi
+
+# prepare 真 run 段：partial 合法键 + 非0 不得当成功
+PREP_STEP="${EVIDENCE}/runs/wf-prepare-step.sh"
+set +e
+extract_step_run prepare prepare "${PREP_STEP}" "${WF_REL}" \
+  >"${EVIDENCE}/runs/wf-prepare-extract.log" 2>&1
+ex_rc=$?
+set -e
+if [[ "${ex_rc}" -eq 0 && -s "${PREP_STEP}" ]] && grep -Fq 'prep_rc' "${PREP_STEP}"; then
+  pass "抽取 prepare run 段且捕获 prep_rc"
+else
+  fail "未能抽取 prepare 退出码捕获段"
+fi
+PARTIAL_SANDBOX="${EVIDENCE}/runs/prepare-partial-sandbox"
+rm -rf -- "${PARTIAL_SANDBOX}"
+mkdir -p -- "${PARTIAL_SANDBOX}/scripts" "${PARTIAL_SANDBOX}/tmp" "${PARTIAL_SANDBOX}/config"
+cp -a -- "${CONFIG}" "${PARTIAL_SANDBOX}/config/go.json"
+cat >"${PARTIAL_SANDBOX}/scripts/release_golang.sh" <<'PARTIAL'
+#!/usr/bin/env bash
+# fixture：先吐合法键再 exit 24，验证 workflow 不吞非0
+set -euo pipefail
+printf 'go_release_tag=golang-0.0.0-1\n'
+printf 'go_version=go0.0.0\n'
+printf 'downloads_json=/tmp/no-such-downloads.json\n'
+exit 24
+PARTIAL
+chmod a+x -- "${PARTIAL_SANDBOX}/scripts/release_golang.sh"
+: >"${EVIDENCE}/runs/prepare-partial.github_output"
+set +e
+env -C "${PARTIAL_SANDBOX}" \
+  REPOSITORY=example/apt-hub \
+  GITHUB_OUTPUT="${EVIDENCE}/runs/prepare-partial.github_output" \
+  bash "${PREP_STEP}" \
+  >"${EVIDENCE}/runs/prepare-partial.out" 2>"${EVIDENCE}/runs/prepare-partial.err"
+RC=$?
+set -e
+record "prepare_partial_nonzero_not_success" "${RC}" 24
+if [[ -s "${EVIDENCE}/runs/prepare-partial.github_output" ]] \
+  && grep -Fq 'go_release_tag=' "${EVIDENCE}/runs/prepare-partial.github_output"; then
+  fail "partial prepare 仍写出 GITHUB_OUTPUT"
+else
+  pass "partial prepare 未写出成功 outputs"
+fi
+
+# 路径：祖先 symlink / .. / 非空无哨兵 拒绝
+SYMLINK_BASE="${ROOT}/tmp/delivery-v16/release/path-probe"
+rm -rf -- "${SYMLINK_BASE}"
+mkdir -p -- "${SYMLINK_BASE}/real" "${ROOT}/tmp/delivery-v16/release/path-victim"
+ln -s -- "${SYMLINK_BASE}/real" "${SYMLINK_BASE}/link"
+set +e
+bash "${REL}" prepare --repository example/apt-hub --config "${CONFIG}" \
+  --work-dir "${SYMLINK_BASE}/link/nested" --downloads-json "${FIX_JSON}" \
+  >"${EVIDENCE}/runs/path-symlink.out" 2>"${EVIDENCE}/runs/path-symlink.err"
+RC=$?
+set -e
+record "prepare_reject_symlink_component" "${RC}" 1
+printf 'keep\n' >"${ROOT}/tmp/delivery-v16/release/path-victim/user.txt"
+set +e
+bash "${REL}" prepare --repository example/apt-hub --config "${CONFIG}" \
+  --work-dir "${ROOT}/tmp/delivery-v16/release/path-victim" --downloads-json "${FIX_JSON}" \
+  >"${EVIDENCE}/runs/path-nonempty.out" 2>"${EVIDENCE}/runs/path-nonempty.err"
+RC=$?
+set -e
+record "prepare_reject_nonempty_unowned" "${RC}" 1
+if [[ -f "${ROOT}/tmp/delivery-v16/release/path-victim/user.txt" ]]; then
+  pass "未 rm 调用者已有目录内容"
+else
+  fail "误删调用者目录"
+fi
+
+# parent 实证反例：work-dir 内已有 marker+downloads-json，重叠拒绝且不得删输入
+OVERLAP="${ROOT}/tmp/delivery-v16/release/overlap-owned"
+rm -rf -- "${OVERLAP}"
+mkdir -p -- "${OVERLAP}"
+printf 'owned\n' >"${OVERLAP}/.apt-hub-release-owned"
+cp -a -- "${FIX_JSON}" "${OVERLAP}/input.json"
+set +e
+bash "${REL}" prepare \
+  --repository example/apt-hub \
+  --config "${CONFIG}" \
+  --work-dir "${OVERLAP}" \
+  --downloads-json "${OVERLAP}/input.json" \
+  --version go7.7.7 \
+  >"${EVIDENCE}/runs/overlap-owned.out" 2>"${EVIDENCE}/runs/overlap-owned.err"
+RC=$?
+set -e
+record "prepare_overlap_owned_rejects" "${RC}" 1
+if [[ -f "${OVERLAP}/input.json" ]]; then
+  pass "overlap 拒绝后输入仍在"
+else
+  fail "overlap 拒绝时输入被删"
+fi
+
+# status/upload 真 run 段：partial 合法键 + 非0 不得当成功、无后续动作
+BUILD_PARTIAL_STATUS="${EVIDENCE}/runs/status-partial-sandbox"
+rm -rf -- "${BUILD_PARTIAL_STATUS}"
+mkdir -p -- "${BUILD_PARTIAL_STATUS}/scripts" "${BUILD_PARTIAL_STATUS}/tmp" "${BUILD_PARTIAL_STATUS}/config"
+cp -a -- "${CONFIG}" "${BUILD_PARTIAL_STATUS}/config/go.json"
+cat >"${BUILD_PARTIAL_STATUS}/scripts/release_golang.sh" <<'PARTIAL'
+#!/usr/bin/env bash
+set -euo pipefail
+cmd="${1:-}"
+shift || true
+case "${cmd}" in
+  status)
+    printf 'release_state=published\n'
+    printf 'assets_complete=1\n'
+    printf 'assets_reused=1\n'
+    printf 'go_release_tag=golang-0.0.0-1\n'
+    exit 24
+    ;;
+  upload)
+    printf 'upload_status=published\n'
+    printf 'go_release_tag=golang-0.0.0-1\n'
+    exit 24
+    ;;
+  *) echo "unexpected ${cmd}" >&2; exit 2 ;;
+esac
+PARTIAL
+chmod a+x -- "${BUILD_PARTIAL_STATUS}/scripts/release_golang.sh"
+: >"${BUILD_PARTIAL_STATUS}/gen_deb_golang.sh"
+chmod a+x -- "${BUILD_PARTIAL_STATUS}/gen_deb_golang.sh"
+# 最小 build.sh：若 status 失败后仍被调用则留下脚印
+cat >"${BUILD_PARTIAL_STATUS}/build.sh" <<'B'
+#!/usr/bin/env bash
+printf 'build_ran\n' >tmp/build-ran.flag
+exit 0
+B
+chmod a+x -- "${BUILD_PARTIAL_STATUS}/build.sh"
+: >"${EVIDENCE}/runs/status-partial.github_output"
+set +e
+env -C "${BUILD_PARTIAL_STATUS}" \
+  GH_TOKEN=t \
+  REPOSITORY=example/apt-hub \
+  TAG=golang-7.7.7-1 \
+  GO_VERSION=go7.7.7 \
+  SOURCE_SHA="$(git -C "${ROOT}" rev-parse HEAD)" \
+  GITHUB_OUTPUT="${EVIDENCE}/runs/status-partial.github_output" \
+  bash "${BUILD_STEP}" \
+  >"${EVIDENCE}/runs/status-partial.out" 2>"${EVIDENCE}/runs/status-partial.err"
+RC=$?
+set -e
+record "status_partial_nonzero_not_success" "${RC}" 24
+if [[ -f "${BUILD_PARTIAL_STATUS}/tmp/build-ran.flag" ]] \
+  || grep -Fq 'go_release_tag=' "${EVIDENCE}/runs/status-partial.github_output"; then
+  fail "status partial 仍继续构包或写出 output"
+else
+  pass "status partial 无后续动作/无成功 output"
+fi
+
+BUILD_PARTIAL_UPLOAD="${EVIDENCE}/runs/upload-partial-sandbox"
+rm -rf -- "${BUILD_PARTIAL_UPLOAD}"
+mkdir -p -- "${BUILD_PARTIAL_UPLOAD}/scripts" "${BUILD_PARTIAL_UPLOAD}/tmp/go-release-assets" \
+  "${BUILD_PARTIAL_UPLOAD}/config"
+cp -a -- "${CONFIG}" "${BUILD_PARTIAL_UPLOAD}/config/go.json"
+cp -a -- "${OUT_BUILD}/." "${BUILD_PARTIAL_UPLOAD}/tmp/go-release-assets/"
+# Build 段在非 reuse 时会 rm -rf assets 再调 build；预存副本供 stub 回填。
+mkdir -p -- "${BUILD_PARTIAL_UPLOAD}/tmp/asset-seed"
+cp -a -- "${OUT_BUILD}/." "${BUILD_PARTIAL_UPLOAD}/tmp/asset-seed/"
+cat >"${BUILD_PARTIAL_UPLOAD}/scripts/release_golang.sh" <<'PARTIAL'
+#!/usr/bin/env bash
+set -euo pipefail
+cmd="${1:-}"
+shift || true
+case "${cmd}" in
+  status)
+    # 强制走构包后 upload：不 reuse
+    printf 'release_state=missing\n'
+    printf 'assets_complete=0\n'
+    printf 'go_release_tag=golang-7.7.7-1\n'
+    exit 0
+    ;;
+  upload)
+    printf 'upload_status=published\n'
+    printf 'go_release_tag=golang-0.0.0-1\n'
+    exit 24
+    ;;
+  *) echo "unexpected ${cmd}" >&2; exit 2 ;;
+esac
+PARTIAL
+chmod a+x -- "${BUILD_PARTIAL_UPLOAD}/scripts/release_golang.sh"
+: >"${BUILD_PARTIAL_UPLOAD}/gen_deb_golang.sh"
+chmod a+x -- "${BUILD_PARTIAL_UPLOAD}/gen_deb_golang.sh"
+cat >"${BUILD_PARTIAL_UPLOAD}/build.sh" <<'B'
+#!/usr/bin/env bash
+set -euo pipefail
+# workflow 可能先 rm assets；从 seed 回填使 upload 段可到达
+out=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[[ -n "${out}" ]]
+mkdir -p -- "${out}"
+cp -a -- tmp/asset-seed/. "${out}/"
+printf 'build_ran\n' >tmp/build-ran.flag
+exit 0
+B
+chmod a+x -- "${BUILD_PARTIAL_UPLOAD}/build.sh"
+: >"${EVIDENCE}/runs/upload-partial.github_output"
+set +e
+env -C "${BUILD_PARTIAL_UPLOAD}" \
+  GH_TOKEN=t \
+  REPOSITORY=example/apt-hub \
+  TAG=golang-7.7.7-1 \
+  GO_VERSION=go7.7.7 \
+  SOURCE_SHA="$(git -C "${ROOT}" rev-parse HEAD)" \
+  GITHUB_OUTPUT="${EVIDENCE}/runs/upload-partial.github_output" \
+  bash "${BUILD_STEP}" \
+  >"${EVIDENCE}/runs/upload-partial.out" 2>"${EVIDENCE}/runs/upload-partial.err"
+RC=$?
+set -e
+record "upload_partial_nonzero_not_success" "${RC}" 24
+if grep -Fq 'go_release_tag=' "${EVIDENCE}/runs/upload-partial.github_output"; then
+  fail "upload partial 仍写出 GITHUB_OUTPUT"
+else
+  pass "upload partial 未写出成功 outputs"
 fi
 
 # 在沙箱中真实跑抽取的 Build 段（桩环境；published 复用路径）
@@ -672,26 +1134,32 @@ cp -a -- "${FIX_JSON}" "${WF_SANDBOX}/tmp/go-downloads.json"
 chmod a+x -- "${WF_SANDBOX}/build.sh" "${WF_SANDBOX}/gen_deb_golang.sh" \
   "${WF_SANDBOX}/scripts/release_golang.sh"
 : >"${EVIDENCE}/runs/gh-wf-build.log"
+: >"${EVIDENCE}/runs/wf-build.github_output"
+SOURCE_SHA="$(git -C "${ROOT}" rev-parse HEAD)"
 set +e
-(
-  cd -- "${WF_SANDBOX}"
-  export GH_TOKEN=t REPOSITORY=example/apt-hub TAG=apt-hub-go-7.7.7-1
-  export GO_VERSION=go7.7.7 SOURCE_SHA="$(git -C "${ROOT}" rev-parse HEAD)"
-  export GITHUB_OUTPUT="${EVIDENCE}/runs/wf-build.github_output"
-  : >"${GITHUB_OUTPUT}"
-  export PATH="${STUB_BIN}:${PATH}"
-  export APT_HUB_GH_LOG="${EVIDENCE}/runs/gh-wf-build.log"
-  export APT_HUB_CURL_LOG="${EVIDENCE}/runs/curl-wf-build.log"
-  export APT_HUB_REL_STATE=published
-  export APT_HUB_ASSET_DIR="${OUT_BUILD}"
-  export APT_HUB_DL_SRC="${OUT_BUILD}"
-  bash "${BUILD_STEP}"
-) >"${EVIDENCE}/runs/wf-build-run.out" 2>"${EVIDENCE}/runs/wf-build-run.err"
+env -C "${WF_SANDBOX}" \
+  PATH="${STUB_BIN}:${PATH}" \
+  GH_TOKEN=t \
+  REPOSITORY=example/apt-hub \
+  TAG=golang-7.7.7-1 \
+  GO_VERSION=go7.7.7 \
+  SOURCE_SHA="${SOURCE_SHA}" \
+  GITHUB_OUTPUT="${EVIDENCE}/runs/wf-build.github_output" \
+  APT_HUB_GH_LOG="${EVIDENCE}/runs/gh-wf-build.log" \
+  APT_HUB_CURL_LOG="${EVIDENCE}/runs/curl-wf-build.log" \
+  APT_HUB_REL_STATE=published \
+  APT_HUB_ASSET_DIR="${OUT_BUILD}" \
+  APT_HUB_DL_SRC="${OUT_BUILD}" \
+  bash "${BUILD_STEP}" \
+  >"${EVIDENCE}/runs/wf-build-run.out" 2>"${EVIDENCE}/runs/wf-build-run.err"
 RC=$?
 set -e
 record "workflow_build_run_reuses_published" "${RC}" 0
-grep -Fq 'go_release_tag=apt-hub-go-7.7.7-1' "${EVIDENCE}/runs/wf-build.github_output" \
-  && pass "Build run 段写出 go_release_tag" || fail "Build run 段未写 go_release_tag"
+if grep -Fq 'go_release_tag=golang-7.7.7-1' "${EVIDENCE}/runs/wf-build.github_output"; then
+  pass "Build run 段写出 go_release_tag"
+else
+  fail "Build run 段未写 go_release_tag"
+fi
 
 PRE_STEP="${EVIDENCE}/runs/wf-preflight-secret.sh"
 set +e
@@ -709,16 +1177,15 @@ fi
 PRE_RUN_DIR="${EVIDENCE}/runs/preflight-empty-cwd"
 rm -rf -- "${PRE_RUN_DIR}"
 mkdir -p -- "${PRE_RUN_DIR}"
+: >"${EVIDENCE}/runs/preflight-empty.github_output"
 set +e
-(
-  cd -- "${PRE_RUN_DIR}"
-  env -u APT_HUB_GPG_PRIVATE_KEY \
-    APT_HUB_GPG_PRIVATE_KEY='' \
-    GH_TOKEN=t \
-    GITHUB_REPOSITORY=example/apt-hub \
-    GITHUB_OUTPUT="${EVIDENCE}/runs/preflight-empty.github_output" \
-    bash "${PRE_STEP}"
-) >"${EVIDENCE}/runs/preflight-empty.out" 2>"${EVIDENCE}/runs/preflight-empty.err"
+env -C "${PRE_RUN_DIR}" -u APT_HUB_GPG_PRIVATE_KEY \
+  APT_HUB_GPG_PRIVATE_KEY='' \
+  GH_TOKEN=t \
+  GITHUB_REPOSITORY=example/apt-hub \
+  GITHUB_OUTPUT="${EVIDENCE}/runs/preflight-empty.github_output" \
+  bash "${PRE_STEP}" \
+  >"${EVIDENCE}/runs/preflight-empty.out" 2>"${EVIDENCE}/runs/preflight-empty.err"
 RC=$?
 set -e
 record "preflight_rejects_empty_secret" "${RC}" 1
@@ -773,8 +1240,11 @@ if [[ "$(tr -d '[:space:]' <"${WORK}/VERSION")" == "0.1.1" ]] \
 else
   fail "git_tag auto 未完成"
 fi
-[[ "$(tr -d '[:space:]' <"${ROOT}/VERSION")" == "${MAIN_VER_BEFORE}" ]] \
-  && pass "主仓 VERSION 未改且未执行主仓 git_tag" || fail "主仓 VERSION 被改"
+if [[ "$(tr -d '[:space:]' <"${ROOT}/VERSION")" == "${MAIN_VER_BEFORE}" ]]; then
+  pass "主仓 VERSION 未改且未执行主仓 git_tag"
+else
+  fail "主仓 VERSION 被改"
+fi
 
 set +e
 bash -c "cd \"${WORK}\" && \"${GIT_TAG}\" --version 0.1.1" \
@@ -783,6 +1253,8 @@ RC=$?
 set -e
 record "git_tag_existing_refuse" "${RC}" 1
 
+# push 失败前先到可提交状态：auto 会 bump 到 0.1.2；失败后不得回滚已提交 VERSION/changelog
+VER_BEFORE_PUSH="$(tr -d '[:space:]' <"${WORK}/VERSION")"
 git -C "${WORK}" remote set-url origin "${EVIDENCE}/git/no-such-bare.git"
 set +e
 bash -c "cd \"${WORK}\" && \"${GIT_TAG}\" auto" \
@@ -790,6 +1262,39 @@ bash -c "cd \"${WORK}\" && \"${GIT_TAG}\" auto" \
 RC=$?
 set -e
 record "git_tag_push_refuse" "${RC}" 1
+VER_AFTER_PUSH="$(tr -d '[:space:]' <"${WORK}/VERSION")"
+HEAD_VER="$(git -C "${WORK}" show HEAD:VERSION | tr -d '[:space:]')"
+if [[ "${VER_AFTER_PUSH}" != "${VER_BEFORE_PUSH}" \
+  && "${VER_AFTER_PUSH}" == "${HEAD_VER}" \
+  && -f "${WORK}/changelog/v${VER_AFTER_PUSH}.md" \
+  && -z "$(git -C "${WORK}" status --porcelain)" ]]; then
+  pass "push 失败不回滚已提交 VERSION/changelog"
+else
+  fail "push 失败后 VERSION/changelog 被回滚或变 dirty"
+fi
+
+# 确定性 generated_at：同 archive 连构两次 provenance/SHA256SUMS bytes 不变
+DET_A="${EVIDENCE}/runs/det-a"
+DET_B="${EVIDENCE}/runs/det-b"
+rm -rf -- "${DET_A}" "${DET_B}"
+set +e
+bash "${GEN}" --config "${CONFIG}" --output "${DET_A}" \
+  --downloads-json "${FIX_JSON}" --archive-dir "${FIX_ARCH}" --version go7.7.7 \
+  >"${EVIDENCE}/runs/det-a.out" 2>"${EVIDENCE}/runs/det-a.err"
+RC_A=$?
+bash "${GEN}" --config "${CONFIG}" --output "${DET_B}" \
+  --downloads-json "${FIX_JSON}" --archive-dir "${FIX_ARCH}" --version go7.7.7 \
+  >"${EVIDENCE}/runs/det-b.out" 2>"${EVIDENCE}/runs/det-b.err"
+RC_B=$?
+set -e
+record "deterministic_build_a" "${RC_A}" 0
+record "deterministic_build_b" "${RC_B}" 0
+if cmp -s -- "${DET_A}/provenance.json" "${DET_B}/provenance.json" \
+  && cmp -s -- "${DET_A}/SHA256SUMS" "${DET_B}/SHA256SUMS"; then
+  pass "generated_at/SHA256SUMS 确定性可复用"
+else
+  fail "provenance 或 SHA256SUMS 随墙钟漂"
+fi
 
 {
   echo "date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"

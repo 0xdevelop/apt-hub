@@ -16,16 +16,16 @@
     },
     {
       "id": "golang",
-      "package": "apt-hub-go",
+      "package": "golang",
       "source_type": "go_official_archive",
       "repository": "golang/go",
-      "description": "Go programming language toolchain from the official Linux archive",
+      "description": "Go 官方 Linux 归档构建的工具链",
       "source_url": "https://go.dev",
       "license": "BSD-3-Clause",
       "ubuntu_series": "supported",
       "architectures": {
-        "amd64": "^apt-hub-go_[0-9]+\\.[0-9]+\\.[0-9]+-[0-9]+_amd64\\.deb$",
-        "arm64": "^apt-hub-go_[0-9]+\\.[0-9]+\\.[0-9]+-[0-9]+_arm64\\.deb$"
+        "amd64": "^golang_[0-9]+\\.[0-9]+\\.[0-9]+-[0-9]+_amd64\\.deb$",
+        "arm64": "^golang_[0-9]+\\.[0-9]+\\.[0-9]+-[0-9]+_arm64\\.deb$"
       }
     }
   ]

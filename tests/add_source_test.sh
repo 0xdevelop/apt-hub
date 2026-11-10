@@ -934,13 +934,562 @@ fi
 # 恢复原站点供后续用例
 start_https "${SITE}"
 
-log "== 提交第二步失败回滚 =="
-Rroll="${BASE}/roots/rollback"
+log "== 预检：sources 路径是目录（非提交第二步） =="
+Rroll="${BASE}/roots/rollback-preflight-dir"
 prepare_isolated_root "${Rroll}"
 mkdir -p -- "${Rroll}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources"
-rc="$(capture_rc "${BASE}/rollback.log" run_add "${Rroll}")"
-record_rc "commit_second_step_fail" "${rc}" 1
-if [[ ! -e "${Rroll}/etc/apt/keyrings/apt-hub.gpg" ]]; then pass "rollback_no_key_left"; else fail "rollback_no_key_left"; fi
+rc="$(capture_rc "${BASE}/rollback-preflight-dir.log" run_add "${Rroll}")"
+record_rc "dest_sources_path_is_dir_preflight_rejected" "${rc}" 1
+if [[ ! -e "${Rroll}/etc/apt/keyrings/apt-hub.gpg" ]]; then
+  pass "preflight_dir_no_key_written"
+else
+  fail "preflight_dir_no_key_written"
+fi
+if grep -q '目的文件路径类型非法\|符号链接\|路径' "${BASE}/rollback-preflight-dir.log"; then
+  pass "preflight_dir_reject_message"
+else
+  fail "preflight_dir_reject_message"
+fi
+
+log "== 真提交第二步失败回滚（mv 注入，非预检） =="
+mkdir -p -- "${BASE}/bin-fault-sources"
+cat >"${BASE}/bin-fault-sources/mv" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+dest="${!#}"
+case "${dest}" in
+  *.sources)
+    exit 1
+    ;;
+esac
+exec /bin/mv "$@"
+EOF
+chmod 0755 -- "${BASE}/bin-fault-sources/mv"
+Rcommit="${BASE}/roots/commit-sources-fail"
+prepare_isolated_root "${Rcommit}"
+rc="$(capture_rc "${BASE}/commit-sources-fail.log" \
+  env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy -u all_proxy \
+  PATH="${BASE}/bin-fault-sources:${PATH}" \
+  "${ADD}" --site-url "${SITE_URL}" --software "${SOFTWARE_ID}" --root "${Rcommit}" \
+  --architecture amd64 --cacert "${TLS}/tls.crt")"
+record_rc "commit_second_step_sources_mv_fail" "${rc}" 1
+if [[ ! -e "${Rcommit}/etc/apt/keyrings/apt-hub.gpg" ]]; then
+  pass "commit_second_step_key_rolled_back"
+else
+  fail "commit_second_step_key_rolled_back"
+fi
+if [[ ! -e "${Rcommit}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" ]]; then
+  pass "commit_second_step_no_half_sources"
+else
+  fail "commit_second_step_no_half_sources"
+fi
+if grep -q '写入 sources 失败' "${BASE}/commit-sources-fail.log"; then
+  pass "commit_second_step_fail_message"
+else
+  fail "commit_second_step_fail_message"
+fi
+if grep -q '已回滚本次写入' "${BASE}/commit-sources-fail.log"; then
+  fail "commit_second_step_no_false_rollback_claim"
+else
+  pass "commit_second_step_no_false_rollback_claim"
+fi
+
+log "== 换钥：多 URI / 续行 / 第二 stanza / symlink peer =="
+start_https "${SITE}"
+Rmulti="${BASE}/roots/replace-multi-uri"
+prepare_isolated_root "${Rmulti}"
+run_add "${Rmulti}" >"${BASE}/replace-multi-seed.log" 2>&1
+
+cat >"${Rmulti}/etc/apt/sources.list.d/apt-hub-multiuri.sources" <<EOF
+Types: deb
+URIs: mirror+${SITE_URL}/repos/${SOFTWARE_ID2}/mirror.list mirror+https://other.example.test/tools/repos/evil/mirror.list
+Suites: ${SERIES}
+Components: main
+Signed-By: ${Rmulti}/etc/apt/keyrings/apt-hub.gpg
+Architectures: amd64 arm64
+EOF
+start_https "${BASE}/site-newkey"
+rc="$(capture_rc "${BASE}/replace-multiuri.log" run_add "${Rmulti}" --replace-key "${NEW_FP}")"
+record_rc "replace_key_multi_uri_foreign_rejected" "${rc}" 1
+got_fp="$(gpg --batch --show-keys --with-colons -- "${Rmulti}/etc/apt/keyrings/apt-hub.gpg" 2>/dev/null | awk -F: '$1=="fpr"{print $10; exit}')"
+got_fp="$(printf '%s' "${got_fp}" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')"
+if [[ "${got_fp}" == "${FP}" ]]; then
+  pass "replace_key_multi_uri_key_unchanged"
+else
+  fail "replace_key_multi_uri_key_unchanged"
+fi
+
+start_https "${SITE}"
+rm -f -- "${Rmulti}/etc/apt/sources.list.d/apt-hub-multiuri.sources"
+cat >"${Rmulti}/etc/apt/sources.list.d/apt-hub-conturi.sources" <<EOF
+Types: deb
+URIs: mirror+${SITE_URL}/repos/${SOFTWARE_ID2}/mirror.list
+ mirror+https://other.example.test/tools/repos/evil/mirror.list
+Suites: ${SERIES}
+Components: main
+Signed-By: ${Rmulti}/etc/apt/keyrings/apt-hub.gpg
+Architectures: amd64 arm64
+EOF
+start_https "${BASE}/site-newkey"
+rc="$(capture_rc "${BASE}/replace-conturi.log" run_add "${Rmulti}" --replace-key "${NEW_FP}")"
+record_rc "replace_key_continued_uri_foreign_rejected" "${rc}" 1
+
+start_https "${SITE}"
+rm -f -- "${Rmulti}/etc/apt/sources.list.d/apt-hub-conturi.sources"
+cat >"${Rmulti}/etc/apt/sources.list.d/apt-hub-twostanza.sources" <<EOF
+Types: deb
+URIs: mirror+${SITE_URL}/repos/${SOFTWARE_ID2}/mirror.list
+Suites: ${SERIES}
+Components: main
+Signed-By: ${Rmulti}/etc/apt/keyrings/apt-hub.gpg
+Architectures: amd64 arm64
+
+Types: deb
+URIs: mirror+https://other.example.test/tools/repos/evil/mirror.list
+Suites: ${SERIES}
+Components: main
+Signed-By: ${Rmulti}/etc/apt/keyrings/apt-hub.gpg
+Architectures: amd64 arm64
+EOF
+start_https "${BASE}/site-newkey"
+rc="$(capture_rc "${BASE}/replace-twostanza.log" run_add "${Rmulti}" --replace-key "${NEW_FP}")"
+record_rc "replace_key_second_stanza_foreign_rejected" "${rc}" 1
+
+start_https "${SITE}"
+rm -f -- "${Rmulti}/etc/apt/sources.list.d/apt-hub-twostanza.sources"
+cat >"${BASE}/peer-evil.sources" <<EOF
+Types: deb
+URIs: mirror+https://other.example.test/tools/repos/evil/mirror.list
+Suites: ${SERIES}
+Components: main
+Signed-By: ${Rmulti}/etc/apt/keyrings/apt-hub.gpg
+Architectures: amd64 arm64
+EOF
+ln -s "${BASE}/peer-evil.sources" \
+  "${Rmulti}/etc/apt/sources.list.d/apt-hub-peerlink.sources"
+start_https "${BASE}/site-newkey"
+rc="$(capture_rc "${BASE}/replace-peerlink.log" run_add "${Rmulti}" --replace-key "${NEW_FP}")"
+record_rc "replace_key_symlink_peer_sources_rejected" "${rc}" 1
+if grep -q '符号链接' "${BASE}/replace-peerlink.log"; then
+  pass "replace_key_symlink_peer_message"
+else
+  fail "replace_key_symlink_peer_message"
+fi
+
+# Signed-By 多 keyring token：本专用钥在列表中亦须校验全部 URIs
+start_https "${SITE}"
+rm -f -- "${Rmulti}/etc/apt/sources.list.d/apt-hub-peerlink.sources"
+cat >"${Rmulti}/etc/apt/sources.list.d/apt-hub-multikey.sources" <<EOF
+Types: deb
+URIs: mirror+https://other.example.test/tools/repos/evil/mirror.list
+Suites: ${SERIES}
+Components: main
+Signed-By: /etc/apt/keyrings/apt-hub.gpg /etc/apt/keyrings/another.gpg
+Architectures: amd64 arm64
+EOF
+start_https "${BASE}/site-newkey"
+rc="$(capture_rc "${BASE}/replace-multikey.log" run_add "${Rmulti}" --replace-key "${NEW_FP}")"
+record_rc "replace_key_signedby_multi_token_foreign_rejected" "${rc}" 1
+
+start_https "${SITE}"
+cat >"${Rmulti}/etc/apt/sources.list.d/apt-hub-multikey.sources" <<EOF
+Types: deb
+URIs: mirror+https://other.example.test/tools/repos/evil/mirror.list
+Suites: ${SERIES}
+Components: main
+Signed-By: /etc/apt/keyrings/another.gpg /etc/apt/keyrings/apt-hub.gpg
+Architectures: amd64 arm64
+EOF
+start_https "${BASE}/site-newkey"
+rc="$(capture_rc "${BASE}/replace-multikey-tail.log" run_add "${Rmulti}" --replace-key "${NEW_FP}")"
+record_rc "replace_key_signedby_multi_token_tail_foreign_rejected" "${rc}" 1
+
+# Signed-By 续行中的本专用钥
+start_https "${SITE}"
+cat >"${Rmulti}/etc/apt/sources.list.d/apt-hub-multikey.sources" <<EOF
+Types: deb
+URIs: mirror+https://other.example.test/tools/repos/evil/mirror.list
+Suites: ${SERIES}
+Components: main
+Signed-By: /etc/apt/keyrings/another.gpg
+ /etc/apt/keyrings/apt-hub.gpg
+Architectures: amd64 arm64
+EOF
+start_https "${BASE}/site-newkey"
+rc="$(capture_rc "${BASE}/replace-multikey-cont.log" run_add "${Rmulti}" --replace-key "${NEW_FP}")"
+record_rc "replace_key_signedby_continued_multi_token_rejected" "${rc}" 1
+
+# Deb822 字段名大小写不敏感
+start_https "${SITE}"
+cat >"${Rmulti}/etc/apt/sources.list.d/apt-hub-multikey.sources" <<EOF
+types: deb
+uris: mirror+https://other.example.test/tools/repos/evil/mirror.list
+suites: ${SERIES}
+components: main
+signed-by: /etc/apt/keyrings/apt-hub.gpg
+architectures: amd64 arm64
+EOF
+start_https "${BASE}/site-newkey"
+rc="$(capture_rc "${BASE}/replace-lowercase.log" run_add "${Rmulti}" --replace-key "${NEW_FP}")"
+record_rc "replace_key_lowercase_fields_foreign_rejected" "${rc}" 1
+
+# 续行间合法 # 注释不得切断 Signed-By / URIs 字段
+start_https "${SITE}"
+cat >"${Rmulti}/etc/apt/sources.list.d/apt-hub-multikey.sources" <<EOF
+Types: deb
+URIs: mirror+https://other.example.test/tools/repos/evil/mirror.list
+Suites: ${SERIES}
+Components: main
+Signed-By: /etc/apt/keyrings/another.gpg
+# comment between continuation
+ /etc/apt/keyrings/apt-hub.gpg
+Architectures: amd64 arm64
+EOF
+start_https "${BASE}/site-newkey"
+rc="$(capture_rc "${BASE}/replace-signedby-comment.log" run_add "${Rmulti}" --replace-key "${NEW_FP}")"
+record_rc "replace_key_signedby_comment_continuation_rejected" "${rc}" 1
+
+start_https "${SITE}"
+cat >"${Rmulti}/etc/apt/sources.list.d/apt-hub-multikey.sources" <<EOF
+Types: deb
+URIs: mirror+${SITE_URL}/repos/${SOFTWARE_ID2}/mirror.list
+# comment between uri continuation
+ mirror+https://other.example.test/tools/repos/evil/mirror.list
+Suites: ${SERIES}
+Components: main
+Signed-By: /etc/apt/keyrings/apt-hub.gpg
+Architectures: amd64 arm64
+EOF
+start_https "${BASE}/site-newkey"
+rc="$(capture_rc "${BASE}/replace-uris-comment.log" run_add "${Rmulti}" --replace-key "${NEW_FP}")"
+record_rc "replace_key_uris_comment_continuation_rejected" "${rc}" 1
+
+# 无关 Signed-By 的异站 URI 不得挡换钥（精确路径，不误命中 .not-ours）
+start_https "${SITE}"
+rm -f -- "${Rmulti}/etc/apt/sources.list.d/apt-hub-multikey.sources"
+cat >"${Rmulti}/etc/apt/sources.list.d/apt-hub-unrelated.sources" <<EOF
+Types: deb
+URIs: mirror+https://other.example.test/tools/repos/evil/mirror.list
+Suites: ${SERIES}
+Components: main
+Signed-By: /etc/apt/keyrings/apt-hub.gpg.not-ours
+Architectures: amd64 arm64
+EOF
+start_https "${BASE}/site-newkey"
+rc="$(capture_rc "${BASE}/replace-unrelated.log" run_add "${Rmulti}" --replace-key "${NEW_FP}")"
+record_rc "replace_key_unrelated_signedby_ignored" "${rc}" 0
+# 恢复旧钥现场供后续故障注入（上面已换成新钥）
+start_https "${SITE}"
+prepare_isolated_root "${Rmulti}"
+run_add "${Rmulti}" >"${BASE}/replace-multi-reseed.log" 2>&1
+
+log "== 换钥：sources 失败且恢复旧钥再失败，保留备份 =="
+mkdir -p -- "${BASE}/bin-fault-restore"
+: >"${BASE}/mv-gpg-writes.count"
+cat >"${BASE}/bin-fault-restore/mv" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+dest="\${!#}"
+count_file="${BASE}/mv-gpg-writes.count"
+case "\${dest}" in
+  */apt-hub.gpg)
+    n="\$(cat -- "\${count_file}" 2>/dev/null || printf '0')"
+    n=\$((n + 1))
+    printf '%s\n' "\${n}" >"\${count_file}"
+    if [[ "\${n}" -ge 2 ]]; then
+      exit 1
+    fi
+    ;;
+  *.sources)
+    exit 1
+    ;;
+esac
+exec /bin/mv "\$@"
+EOF
+chmod 0755 -- "${BASE}/bin-fault-restore/mv"
+Rrestfail="${BASE}/roots/replace-restore-fail"
+prepare_isolated_root "${Rrestfail}"
+run_add "${Rrestfail}" "${SOFTWARE_ID2}" >"${BASE}/replace-restore-seed.log" 2>&1
+old_key_sha="$(sha256sum -- "${Rrestfail}/etc/apt/keyrings/apt-hub.gpg" | awk '{print $1}')"
+start_https "${BASE}/site-newkey"
+rc="$(capture_rc "${BASE}/replace-restore-fail.log" \
+  env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy -u all_proxy \
+  PATH="${BASE}/bin-fault-restore:${PATH}" \
+  "${ADD}" --site-url "${SITE_URL}" --software "${SOFTWARE_ID}" --root "${Rrestfail}" \
+  --architecture amd64 --cacert "${TLS}/tls.crt" --replace-key "${NEW_FP}")"
+record_rc "replace_key_restore_fail_nonzero" "${rc}" 1
+new_key_sha="$(sha256sum -- "${Rrestfail}/etc/apt/keyrings/apt-hub.gpg" | awk '{print $1}')"
+if [[ "${new_key_sha}" != "${old_key_sha}" ]]; then
+  pass "replace_key_restore_fail_left_new_key"
+else
+  fail "replace_key_restore_fail_left_new_key"
+fi
+if grep -q '恢复旧公钥失败，备份保留于' "${BASE}/replace-restore-fail.log"; then
+  pass "replace_key_restore_fail_backup_message"
+else
+  fail "replace_key_restore_fail_backup_message"
+fi
+backup_path="$(awk -F'备份保留于 ' '/恢复旧公钥失败，备份保留于 /{print $2; exit}' "${BASE}/replace-restore-fail.log")"
+if [[ -n "${backup_path}" && -f "${backup_path}" && ! -L "${backup_path}" ]]; then
+  pass "replace_key_restore_fail_backup_retained"
+  backup_mode="$(stat -c '%a' "$(dirname -- "${backup_path}")")"
+  if [[ "${backup_mode}" == "700" ]]; then
+    pass "replace_key_restore_fail_scratch_mode_0700"
+  else
+    fail "replace_key_restore_fail_scratch_mode_0700"
+  fi
+  if cmp -s -- <(sha256sum -- "${backup_path}" | awk '{print $1}') <(printf '%s\n' "${old_key_sha}"); then
+    pass "replace_key_restore_fail_backup_is_old_key"
+  else
+    fail "replace_key_restore_fail_backup_is_old_key"
+  fi
+else
+  fail "replace_key_restore_fail_backup_retained"
+  fail "replace_key_restore_fail_scratch_mode_0700"
+  fail "replace_key_restore_fail_backup_is_old_key"
+fi
+if grep -q '已回滚本次写入' "${BASE}/replace-restore-fail.log"; then
+  fail "replace_key_restore_fail_no_false_rollback_claim"
+else
+  pass "replace_key_restore_fail_no_false_rollback_claim"
+fi
+
+log "== 换钥：SIGTERM 在新钥已提交、sources 未提交时回滚 =="
+mkdir -p -- "${BASE}/bin-fault-term"
+cat >"${BASE}/bin-fault-term/mv" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+dest="${!#}"
+case "${dest}" in
+  *.sources)
+    kill -TERM "${PPID}" 2>/dev/null || true
+    sleep 2
+    exit 1
+    ;;
+esac
+exec /bin/mv "$@"
+EOF
+chmod 0755 -- "${BASE}/bin-fault-term/mv"
+Rterm="${BASE}/roots/replace-sigterm"
+prepare_isolated_root "${Rterm}"
+start_https "${SITE}"
+run_add "${Rterm}" "${SOFTWARE_ID2}" >"${BASE}/replace-term-seed.log" 2>&1
+term_key_before="$(sha256sum -- "${Rterm}/etc/apt/keyrings/apt-hub.gpg" | awk '{print $1}')"
+start_https "${BASE}/site-newkey"
+rc="$(capture_rc "${BASE}/replace-sigterm.log" \
+  env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy -u all_proxy \
+  PATH="${BASE}/bin-fault-term:${PATH}" \
+  "${ADD}" --site-url "${SITE_URL}" --software "${SOFTWARE_ID}" --root "${Rterm}" \
+  --architecture amd64 --cacert "${TLS}/tls.crt" --replace-key "${NEW_FP}")"
+# INT/TERM 路径非零；具体码依 trap
+if [[ "${rc}" -ne 0 ]]; then
+  pass "replace_key_sigterm_nonzero"
+else
+  fail "replace_key_sigterm_nonzero"
+fi
+term_key_after="$(sha256sum -- "${Rterm}/etc/apt/keyrings/apt-hub.gpg" | awk '{print $1}')"
+if [[ "${term_key_after}" == "${term_key_before}" ]]; then
+  pass "replace_key_sigterm_key_restored"
+else
+  fail "replace_key_sigterm_key_restored"
+fi
+if [[ ! -e "${Rterm}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" ]]; then
+  pass "replace_key_sigterm_no_half_sources"
+else
+  fail "replace_key_sigterm_no_half_sources"
+fi
+
+log "== TERM 落在 rename 成功之后、标志窗口（真实 mv 后发信号） =="
+mkdir -p -- "${BASE}/bin-fault-term-after-key" "${BASE}/bin-fault-term-after-sources" \
+  "${BASE}/bin-fault-term-after-newkey"
+: >"${BASE}/term-after-key.once"
+cat >"${BASE}/bin-fault-term-after-key/mv" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+dest="\${!#}"
+once="${BASE}/term-after-key.once"
+/bin/mv "\$@"
+case "\${dest}" in
+  */apt-hub.gpg)
+    if [[ -f "\${once}" ]]; then
+      rm -f -- "\${once}"
+      kill -TERM "\${PPID}" 2>/dev/null || true
+      sleep 2
+    fi
+    ;;
+esac
+EOF
+chmod 0755 -- "${BASE}/bin-fault-term-after-key/mv"
+Rtermkey="${BASE}/roots/replace-term-after-key"
+prepare_isolated_root "${Rtermkey}"
+start_https "${SITE}"
+run_add "${Rtermkey}" "${SOFTWARE_ID2}" >"${BASE}/replace-term-after-key-seed.log" 2>&1
+term_after_key_before="$(sha256sum -- "${Rtermkey}/etc/apt/keyrings/apt-hub.gpg" | awk '{print $1}')"
+peer_src="${Rtermkey}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID2}.sources"
+peer_src_before="$(sha256sum -- "${peer_src}" | awk '{print $1}')"
+start_https "${BASE}/site-newkey"
+rc="$(capture_rc "${BASE}/replace-term-after-key.log" \
+  env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy -u all_proxy \
+  PATH="${BASE}/bin-fault-term-after-key:${PATH}" \
+  "${ADD}" --site-url "${SITE_URL}" --software "${SOFTWARE_ID}" --root "${Rtermkey}" \
+  --architecture amd64 --cacert "${TLS}/tls.crt" --replace-key "${NEW_FP}")"
+if [[ "${rc}" -ne 0 ]]; then
+  pass "replace_key_term_after_key_rename_nonzero"
+else
+  fail "replace_key_term_after_key_rename_nonzero"
+fi
+term_after_key_after="$(sha256sum -- "${Rtermkey}/etc/apt/keyrings/apt-hub.gpg" | awk '{print $1}')"
+if [[ "${term_after_key_after}" == "${term_after_key_before}" ]]; then
+  pass "replace_key_term_after_key_rename_restored"
+else
+  fail "replace_key_term_after_key_rename_restored"
+fi
+if [[ ! -e "${Rtermkey}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" ]]; then
+  pass "replace_key_term_after_key_rename_no_half_sources"
+else
+  fail "replace_key_term_after_key_rename_no_half_sources"
+fi
+peer_src_after="$(sha256sum -- "${peer_src}" | awk '{print $1}')"
+if [[ "${peer_src_after}" == "${peer_src_before}" ]]; then
+  pass "replace_key_term_after_key_rename_peer_sources_untouched"
+else
+  fail "replace_key_term_after_key_rename_peer_sources_untouched"
+fi
+
+: >"${BASE}/term-after-sources.once"
+cat >"${BASE}/bin-fault-term-after-sources/mv" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+dest="\${!#}"
+once="${BASE}/term-after-sources.once"
+/bin/mv "\$@"
+case "\${dest}" in
+  *.sources)
+    if [[ -f "\${once}" ]]; then
+      rm -f -- "\${once}"
+      kill -TERM "\${PPID}" 2>/dev/null || true
+      sleep 2
+    fi
+    ;;
+esac
+EOF
+chmod 0755 -- "${BASE}/bin-fault-term-after-sources/mv"
+Rtermsrc="${BASE}/roots/replace-term-after-sources"
+prepare_isolated_root "${Rtermsrc}"
+start_https "${SITE}"
+run_add "${Rtermsrc}" "${SOFTWARE_ID2}" >"${BASE}/replace-term-after-sources-seed.log" 2>&1
+term_after_src_key_before="$(sha256sum -- "${Rtermsrc}/etc/apt/keyrings/apt-hub.gpg" | awk '{print $1}')"
+start_https "${BASE}/site-newkey"
+rc="$(capture_rc "${BASE}/replace-term-after-sources.log" \
+  env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy -u all_proxy \
+  PATH="${BASE}/bin-fault-term-after-sources:${PATH}" \
+  "${ADD}" --site-url "${SITE_URL}" --software "${SOFTWARE_ID}" --root "${Rtermsrc}" \
+  --architecture amd64 --cacert "${TLS}/tls.crt" --replace-key "${NEW_FP}")"
+if [[ "${rc}" -ne 0 ]]; then
+  pass "replace_key_term_after_sources_rename_nonzero"
+else
+  fail "replace_key_term_after_sources_rename_nonzero"
+fi
+term_after_src_key_after="$(sha256sum -- "${Rtermsrc}/etc/apt/keyrings/apt-hub.gpg" | awk '{print $1}')"
+if [[ "${term_after_src_key_after}" == "${term_after_src_key_before}" ]]; then
+  pass "replace_key_term_after_sources_rename_key_restored"
+else
+  fail "replace_key_term_after_sources_rename_key_restored"
+fi
+if [[ ! -e "${Rtermsrc}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" ]]; then
+  pass "replace_key_term_after_sources_rename_sources_removed"
+else
+  fail "replace_key_term_after_sources_rename_sources_removed"
+fi
+
+: >"${BASE}/term-after-newkey.once"
+cat >"${BASE}/bin-fault-term-after-newkey/mv" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+dest="\${!#}"
+once="${BASE}/term-after-newkey.once"
+/bin/mv "\$@"
+case "\${dest}" in
+  */apt-hub.gpg)
+    if [[ -f "\${once}" ]]; then
+      rm -f -- "\${once}"
+      kill -TERM "\${PPID}" 2>/dev/null || true
+      sleep 2
+    fi
+    ;;
+esac
+EOF
+chmod 0755 -- "${BASE}/bin-fault-term-after-newkey/mv"
+Rtermnew="${BASE}/roots/term-after-newkey"
+prepare_isolated_root "${Rtermnew}"
+start_https "${SITE}"
+rc="$(capture_rc "${BASE}/term-after-newkey.log" \
+  env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy -u all_proxy \
+  PATH="${BASE}/bin-fault-term-after-newkey:${PATH}" \
+  "${ADD}" --site-url "${SITE_URL}" --software "${SOFTWARE_ID}" --root "${Rtermnew}" \
+  --architecture amd64 --cacert "${TLS}/tls.crt")"
+if [[ "${rc}" -ne 0 ]]; then
+  pass "new_key_term_after_rename_nonzero"
+else
+  fail "new_key_term_after_rename_nonzero"
+fi
+if [[ ! -e "${Rtermnew}/etc/apt/keyrings/apt-hub.gpg" ]]; then
+  pass "new_key_term_after_rename_key_removed"
+else
+  fail "new_key_term_after_rename_key_removed"
+fi
+if [[ ! -e "${Rtermnew}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" ]]; then
+  pass "new_key_term_after_rename_no_sources"
+else
+  fail "new_key_term_after_rename_no_sources"
+fi
+
+log "== scratch 祖先符号链接：拒绝且不写 link 目标 =="
+SCRATCH_OUT="${BASE}/scratch-link-outside"
+rm -rf -- "${SCRATCH_OUT}"
+mkdir -p -- "${SCRATCH_OUT}"
+printf 'scratch-sentinel\n' >"${SCRATCH_OUT}/.sentinel"
+chmod 0700 -- "${SCRATCH_OUT}"
+sent_before="$(sha256sum -- "${SCRATCH_OUT}/.sentinel" | awk '{print $1}')"
+# 清掉既有普通目录，再植入祖先 link（目标仅本测试 outside）
+Rscr="${BASE}/roots/scratch-ancestor"
+prepare_isolated_root "${Rscr}"
+start_https "${SITE}"
+rm -rf -- "${ROOT}/tmp/add-source-run"
+ln -s "${SCRATCH_OUT}" "${ROOT}/tmp/add-source-run"
+[[ -L "${ROOT}/tmp/add-source-run" ]] || fail "scratch_ancestor_fixture_not_symlink"
+rc="$(capture_rc "${BASE}/scratch-ancestor.log" run_add "${Rscr}")"
+record_rc "scratch_ancestor_symlink_rejected" "${rc}" 1
+sent_after="$(sha256sum -- "${SCRATCH_OUT}/.sentinel" | awk '{print $1}')"
+if [[ "${sent_before}" == "${sent_after}" ]]; then
+  pass "scratch_ancestor_sentinel_unchanged"
+else
+  fail "scratch_ancestor_sentinel_unchanged"
+fi
+if find -- "${SCRATCH_OUT}" -mindepth 1 -maxdepth 1 ! -name '.sentinel' | grep -q .; then
+  fail "scratch_ancestor_no_side_effect_write"
+else
+  pass "scratch_ancestor_no_side_effect_write"
+fi
+if grep -q 'scratch 父目录是符号链接' "${BASE}/scratch-ancestor.log"; then
+  pass "scratch_ancestor_reject_message"
+else
+  fail "scratch_ancestor_reject_message"
+fi
+# dangling
+rm -rf -- "${ROOT}/tmp/add-source-run"
+ln -s "${SCRATCH_OUT}/missing-dangling" "${ROOT}/tmp/add-source-run"
+[[ -L "${ROOT}/tmp/add-source-run" ]] || fail "scratch_dangling_fixture_not_symlink"
+rc="$(capture_rc "${BASE}/scratch-dangling.log" run_add "${Rscr}")"
+record_rc "scratch_dangling_symlink_rejected" "${rc}" 1
+if grep -q 'scratch 父目录是符号链接' "${BASE}/scratch-dangling.log"; then
+  pass "scratch_dangling_reject_message"
+else
+  fail "scratch_dangling_reject_message"
+fi
+rm -rf -- "${ROOT}/tmp/add-source-run"
+
+start_https "${SITE}"
 
 log "== 同根不同 software 双进程竞争（共享锁） =="
 Rconc="${BASE}/roots/concurrent"

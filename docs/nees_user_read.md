@@ -27,4 +27,6 @@ curl -fsSL --proto '=https' --proto-redir '=https' -o add_source.sh 'https://pac
 
 需要手动配置时，下载该站点的 `apt-hub.gpg`，保存到 `/etc/apt/keyrings/apt-hub.gpg`，权限 `0644`；再从软件列表选择对应 Ubuntu 代号的 `.sources`，保存到 `/etc/apt/sources.list.d/apt-hub-<软件标识>.sources`。其 `Signed-By` 必须指向上述公钥。只使用站点已声明支持的架构和 Ubuntu 版本。
 
-索引来自该 Pages，`.deb` 从软件官方地址下载，由 APT 按签名索引校验。本项目的源码仓、数据分支、Pages 和 Releases 都不转存安装包。不要关闭验签，不使用 `trusted=yes`。客户端必须同时能访问 Pages、软件官方 Release 与其下载 CDN；Pages 不代替代理，也不兜底提供被上游删除的包。
+索引来自该 Pages，由 APT 按签名索引校验包。RustDesk 等官方已有的 `.deb` 从软件官方地址下载；Go 官方提供归档，由本项目转换成真实 Debian 包后从本仓 Releases assets 下载。源码仓、数据分支和 Pages 不存安装包。不要关闭验签，不使用 `trusted=yes`。客户端须能访问 Pages、对应 GitHub Release 及其下载 CDN；Pages 不代替代理，也不兜底提供被上游删除的原包。
+
+签名密钥生成、离线备份、私钥丢失或泄露后的换钥，以及 `NO_PUBKEY` 等客户端修复指令，见 [README 的密钥说明](../README.md#维护者首次启用与签名密钥)。维护者只配置一个私钥 Secret；使用者只安装公开公钥，不接触维护者私钥。

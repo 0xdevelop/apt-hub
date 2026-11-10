@@ -7,7 +7,7 @@ export LANG=C
 export LANGUAGE=C
 
 usage() {
-  echo "用法: scripts/verify_ubuntu.sh --site <候选站点> --releases <releases.json> --work-dir <证据目录> [--verify-downloads]" >&2
+  echo "用法: scripts/verify_ubuntu.sh --site <候选站点> --releases <releases.json> --work-dir <证据目录> [--verify-downloads] [--acquire-https-ca <pem>] [--github-https-proxy <http://host:port>]" >&2
   exit 2
 }
 
@@ -29,6 +29,8 @@ site_arg=""
 releases_arg=""
 work_arg=""
 verify_downloads=0
+acquire_https_ca=""
+github_https_proxy=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --site)
@@ -50,6 +52,16 @@ while [[ $# -gt 0 ]]; do
       verify_downloads=1
       shift
       ;;
+    --acquire-https-ca)
+      [[ $# -ge 2 ]] || usage
+      acquire_https_ca="$2"
+      shift 2
+      ;;
+    --github-https-proxy)
+      [[ $# -ge 2 ]] || usage
+      github_https_proxy="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       ;;
@@ -70,8 +82,6 @@ command -v find >/dev/null 2>&1 || die "需要 find"
 if [[ "$verify_downloads" -eq 1 ]]; then
   command -v dpkg-deb >/dev/null 2>&1 || die "需要 dpkg-deb"
   command -v sha256sum >/dev/null 2>&1 || die "需要 sha256sum"
-  command -v curl >/dev/null 2>&1 || die "需要 curl"
-  command -v timeout >/dev/null 2>&1 || die "需要 timeout"
 fi
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -119,9 +129,12 @@ assert_no_overlap() {
 }
 
 dir_is_empty() {
-  local d="$1"
+  local d="$1" listing="" rc=0
   [[ -d "$d" ]] || return 0
-  [[ -z "$(find -- "$d" -mindepth 1 -maxdepth 1 -print -quit)" ]]
+  # 显式捕获 find 成功与输出；失败不得当空目录。
+  listing="$(find -- "$d" -mindepth 1 -maxdepth 1 -print -quit)" || rc=$?
+  [[ "$rc" -eq 0 ]] || return "$rc"
+  [[ -z "$listing" ]]
 }
 
 assert_under_tmp() {
@@ -190,6 +203,13 @@ resolve_work_dir() {
 site=$(resolve_existing_dir --site "$site_arg")
 releases=$(resolve_existing_file --releases "$releases_arg")
 work=$(resolve_work_dir "$work_arg")
+if [[ -n "$acquire_https_ca" ]]; then
+  acquire_https_ca=$(resolve_existing_file --acquire-https-ca "$acquire_https_ca")
+fi
+if [[ -n "$github_https_proxy" ]]; then
+  [[ "$github_https_proxy" =~ ^https?://[^[:space:]]+$ ]] \
+    || die "github-https-proxy 非法: $github_https_proxy"
+fi
 assert_no_overlap "$site" "$work" "site 与 work-dir 重叠"
 assert_no_overlap "$work" "$releases" "work-dir 与 releases 重叠"
 assert_no_overlap "$site" "$releases" "site 与 releases 重叠"
@@ -217,11 +237,11 @@ flock -n 9 || die "验证已在进行: $lockfile"
 if [[ -e "$work" ]]; then
   [[ -d "$work" ]] || die "work-dir 存在但不是目录"
   [[ ! -L "$work" ]] || die "拒绝符号链接: --work-dir"
-  dir_is_empty "$work" || die "拒绝已有非空 work-dir: $work"
+  dir_is_empty "$work" || die "拒绝已有非空或不可访问 work-dir: $work"
 else
   mkdir -- "$work"
 fi
-dir_is_empty "$work" || die "拒绝已有非空 work-dir: $work"
+dir_is_empty "$work" || die "拒绝已有非空或不可访问 work-dir: $work"
 printf 'pid=%s\nstarted=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$work/.apt-hub-verify.owned"
 
 state="$site/state.json"
@@ -401,6 +421,7 @@ write_work_mirror_list() {
   deb_tmp=$(mktemp -- "$tmp_root/ubuntu-verify-deb-lines.XXXXXX")
   extract_deb_mirror_lines "$candidate_mirror" "$deb_tmp"
   {
+    # type:index → 本地 repos（验签）；type:deb 原样保留候选原点（不改成 file:）。
     printf 'file:%s/\tpriority:1 type:index\n' "$repo_abs"
     cat "$deb_tmp"
   } >"$dest"
@@ -410,6 +431,16 @@ write_work_mirror_list() {
 
 write_apt_conf() {
   local dest="$1" root="$2" arch="$3" wrapper="$4" user="$5"
+  local ca_lines="" proxy_lines=""
+  # 按 host 注入测试 CA，避免全局 CaInfo 覆盖系统信任导致 Ubuntu 官方源失败。
+  if [[ -n "$acquire_https_ca" ]]; then
+    ca_lines="Acquire::https::github.com::CaInfo \"${acquire_https_ca}\";
+Acquire::https::127.0.0.2::CaInfo \"${acquire_https_ca}\";"
+  fi
+  if [[ -n "$github_https_proxy" ]]; then
+    proxy_lines="Acquire::https::Proxy::github.com \"${github_https_proxy}\";
+Acquire::https::Proxy::127.0.0.2 \"DIRECT\";"
+  fi
   cat >"$dest" <<EOF
 Dir "${root}";
 Dir::State "${root}/var/lib/apt";
@@ -443,6 +474,8 @@ Acquire::http::Timeout "30";
 Acquire::https::Timeout "30";
 Acquire::https::Verify-Peer "true";
 Acquire::https::Verify-Host "true";
+${ca_lines}
+${proxy_lines}
 Acquire::Languages "none";
 APT::Update::Error-Mode "any";
 APT::Sandbox::User "${user}";
@@ -457,6 +490,7 @@ combo_tmp=$(mktemp -- "$tmp_root/ubuntu-verify-combos.XXXXXX")
 trap 'rm -f -- "$combo_tmp"' EXIT
 
 # shellcheck disable=SC2016
+# 按 asset.package×arch 展开；缺 package 时回落 row.package（普通官方 deb 兼容）。
 if ! jq -c --argjson supported "$supported_json" '
   .packages as $pkgs
   | ([$pkgs[].ubuntu_series[]] | unique) as $declared_series
@@ -468,9 +502,9 @@ if ! jq -c --argjson supported "$supported_json" '
         $pkgs[]
         | . as $p
         | ($p.id // empty) as $id
-        | ($p.package // empty) as $name
+        | ($p.package // empty) as $row_pkg
         | ($p.version // empty) as $ver
-        | if ($id == "" or $name == "" or $ver == "") then
+        | if ($id == "" or $row_pkg == "" or $ver == "") then
             error("state 缺 id/package/version")
           else . end
         | if ($p.ubuntu_series | type) != "array" or ($p.architectures | type) != "array" then
@@ -478,10 +512,21 @@ if ! jq -c --argjson supported "$supported_json" '
           else . end
         | .ubuntu_series[] as $s
         | .architectures[] as $a
-        | if ([($p.assets // [])[] | .architecture] | index($a)) == null then
-            error("package " + $name + " 声明了 " + $a + " 但没有对应 asset")
+        | (($p.assets // []) | map(select(.architecture==$a))) as $aa
+        | if ($aa | length) == 0 then
+            error("package " + $row_pkg + " 声明了 " + $a + " 但没有对应 asset")
           else
-            {series:$s, architecture:$a, package:$name, version:$ver, id:$id}
+            $aa[]
+            | (.package // $row_pkg) as $bin
+            | (.sha256 // empty) as $sha
+            | ((.size|tostring) // empty) as $sz
+            | (.filename // empty) as $fn
+            | if ($bin == "" or $sha == "" or $sz == "" or $fn == "") then
+                error("asset 缺 package/sha256/size/filename: " + $id + "/" + $a)
+              else
+                {series:$s, architecture:$a, package:$bin, version:$ver, id:$id,
+                 sha256:$sha, size:$sz, filename:$fn}
+              end
           end
       ]
     end
@@ -506,7 +551,10 @@ fi
 # 校验每个 id 的 repos 布局与候选 mirror.list，并记录候选 mirror 哈希（事后对照未改）。
 mirror_hashes="$work/candidate-mirror.sha256"
 : >"$mirror_hashes"
-mapfile -t pkg_ids < <(jq -r '[.[].id] | unique[]' "$combo_tmp")
+pkg_ids_file=$(mktemp -- "$tmp_root/ubuntu-verify-pkg-ids.XXXXXX")
+jq -r '[.[].id] | unique[]' "$combo_tmp" >"$pkg_ids_file" || die "枚举 package id 失败"
+mapfile -t pkg_ids <"$pkg_ids_file" || die "读取 package id 失败"
+rm -f -- "$pkg_ids_file"
 for pkg_id in "${pkg_ids[@]}"; do
   # 与 sync validate_catalog 同一安全路径字符集；额外拒 ..（字符集允许点）。
   [[ "$pkg_id" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ && "$pkg_id" != *..* ]] \
@@ -545,7 +593,11 @@ rm -rf -- "$dearmor_home"
 chmod 0644 "$site_key_copy"
 [[ -s "$site_key_copy" ]] || die "站点 keyring 去装甲后为空"
 
-mapfile -t groups < <(jq -r '[.[] | .series + " " + .architecture] | unique[]' "$combo_tmp")
+groups_file=$(mktemp -- "$tmp_root/ubuntu-verify-groups.XXXXXX")
+jq -r '[.[] | .series + " " + .architecture] | unique[]' "$combo_tmp" >"$groups_file" \
+  || die "枚举 suite×arch 失败"
+mapfile -t groups <"$groups_file" || die "读取 suite×arch 失败"
+rm -f -- "$groups_file"
 for group in "${groups[@]}"; do
   series=${group%% *}
   arch=${group##* }
@@ -558,9 +610,31 @@ for group in "${groups[@]}"; do
   write_ubuntu_sources "$root/etc/apt/sources.list" "$series" "$arch"
   write_apt_conf "$root/etc/apt/apt.conf" "$root" "$arch" "$wrapper" "$sandbox_user"
 
-  # 本 suite×arch 涉及的每个软件：work 内 mirror+file，type:index->本地 repos/<id>，type:deb 沿用候选。
-  mapfile -t slot_ids < <(jq -r --arg s "$series" --arg a "$arch" \
-    '[.[] | select(.series==$s and .architecture==$a) | .id] | unique[]' "$combo_tmp")
+  result_file="$slot/result.json"
+  update_log="$slot/update.log"
+  simulate_log="$slot/simulate.log"
+  download_log="$slot/download.log"
+  upgrade_log="$slot/upgrade.log"
+  : >"$update_log"
+  : >"$simulate_log"
+  : >"$download_log"
+  : >"$upgrade_log"
+  failure_class=""
+  error_msg=""
+  ok=true
+  update_rc=0
+  simulate_rc=0
+  download_rc=0
+  upgrade_rc=0
+
+  # type:index→本地 repos；type:deb 保留候选原点（不物化为 file:）。
+  slot_ids_file=$(mktemp -- "$tmp_root/ubuntu-verify-slot-ids.XXXXXX")
+  jq -r --arg s "$series" --arg a "$arch" \
+    '[.[] | select(.series==$s and .architecture==$a) | .id] | unique[]' "$combo_tmp" \
+    >"$slot_ids_file" || die "枚举 suite 软件 id 失败: $series/$arch"
+  mapfile -t slot_ids <"$slot_ids_file" || die "读取 suite 软件 id 失败: $series/$arch"
+  rm -f -- "$slot_ids_file"
+
   for pkg_id in "${slot_ids[@]}"; do
     repo_abs=$(realpath -e -- "$repos_root/$pkg_id")
     candidate_mirror="$repos_root/$pkg_id/mirror.list"
@@ -575,183 +649,40 @@ for group in "${groups[@]}"; do
   done
 
   pkgs_file="$slot/packages.txt"
-  jq -r --arg s "$series" --arg a "$arch" \
-    '.[] | select(.series==$s and .architecture==$a) | .package + "=" + .version' \
-    "$combo_tmp" >"$pkgs_file"
-  mapfile -t pkg_specs < "$pkgs_file"
+  jq -r --arg s "$series" --arg a "$arch" '
+    [.[] | select(.series==$s and .architecture==$a) | .package + "=" + .version]
+    | unique[]
+  ' "$combo_tmp" >"$pkgs_file" || die "枚举 package=version 失败: $series/$arch"
+  mapfile -t pkg_specs < "$pkgs_file" || die "读取 package=version 失败: $series/$arch"
   [[ ${#pkg_specs[@]} -gt 0 ]] || die "内部错误: 空组合 $series $arch"
 
   export APT_HUB_VERIFY_ARCH="$arch"
   export APT_HUB_VERIFY_DPKG_ROOT="$root"
   export APT_CONFIG="$root/etc/apt/apt.conf"
 
-  result_file="$slot/result.json"
-  update_log="$slot/update.log"
-  simulate_log="$slot/simulate.log"
-  : >"$update_log"
-  : >"$simulate_log"
-  failure_class=""
-  error_msg=""
-  ok=true
-  update_rc=0
-  simulate_rc=0
-
-  set +e
-  timeout --signal=TERM --kill-after=10 "$UPDATE_TIMEOUT" \
-    env LC_ALL=C LANG=C LANGUAGE=C apt-get \
-    -c "$root/etc/apt/apt.conf" \
-    -o Debug::NoLocking=true \
-    update >"$update_log" 2>&1
-  update_rc=$?
-  set -e
-
-  if [[ "$update_rc" -eq 0 ]] && grep -Eqi 'Failed to fetch|Some index files failed' "$update_log"; then
-    update_rc=1
-  fi
-  if [[ "$update_rc" -ne 0 ]]; then
-    ok=false
-    if [[ "$update_rc" -eq 124 || "$update_rc" -eq 137 ]]; then
-      failure_class=network
-      error_msg="apt-get update 超时 exit=$update_rc"
-    else
-      failure_class=$(classify_update "$update_log")
-      error_msg="apt-get update 失败 exit=$update_rc class=$failure_class"
-    fi
-  else
+  if [[ "$ok" == true ]]; then
     set +e
-    timeout --signal=TERM --kill-after=10 "$SIMULATE_TIMEOUT" \
+    timeout --signal=TERM --kill-after=10 "$UPDATE_TIMEOUT" \
       env LC_ALL=C LANG=C LANGUAGE=C apt-get \
       -c "$root/etc/apt/apt.conf" \
       -o Debug::NoLocking=true \
-      -o APT::Get::Simulate=true \
-      --simulate \
-      -y \
-      --no-install-recommends \
-      install "${pkg_specs[@]}" >"$simulate_log" 2>&1
-    simulate_rc=$?
+      update >"$update_log" 2>&1
+    update_rc=$?
     set -e
-    if [[ "$simulate_rc" -ne 0 ]]; then
-      ok=false
-      if [[ "$simulate_rc" -eq 124 || "$simulate_rc" -eq 137 ]]; then
-        failure_class=network
-        error_msg="apt-get install -s 超时 exit=$simulate_rc"
-      else
-        failure_class=$(classify_install "$simulate_log")
-        error_msg="apt-get install -s 失败 exit=$simulate_rc class=$failure_class"
-      fi
+
+    if [[ "$update_rc" -eq 0 ]] && grep -Eqi 'Failed to fetch|Some index files failed' "$update_log"; then
+      update_rc=1
     fi
-  fi
-
-  download_rc=0
-  upgrade_rc=0
-  download_log="$slot/download.log"
-  upgrade_log="$slot/upgrade.log"
-  : >"$download_log"
-  : >"$upgrade_log"
-  if [[ "$ok" == true && "$verify_downloads" -eq 1 ]]; then
-    archives_dir="$root/var/cache/apt/archives"
-    mkdir -p -- "$archives_dir/partial"
-    # 与 sync 同源：curl 拉 state.asset.url 入隔离 archives，再核 hash/size/字段（非日志字符串冒充）。
-    while IFS=$'\t' read -r pkg_name pkg_ver pkg_id; do
-      [[ -n "$pkg_name" ]] || continue
-      expected_sha="$(jq -r --arg id "$pkg_id" --arg a "$arch" '
-        [.packages[]? | select(.id==$id) | .assets[]? | select(.architecture==$a) | .sha256][0] // empty
-      ' "$state")"
-      expected_size="$(jq -r --arg id "$pkg_id" --arg a "$arch" '
-        [.packages[]? | select(.id==$id) | .assets[]? | select(.architecture==$a) | (.size|tostring)][0] // empty
-      ' "$state")"
-      expected_fn="$(jq -r --arg id "$pkg_id" --arg a "$arch" '
-        [.packages[]? | select(.id==$id) | .assets[]? | select(.architecture==$a) | .filename][0] // empty
-      ' "$state")"
-      expected_url="$(jq -r --arg id "$pkg_id" --arg a "$arch" '
-        [.packages[]? | select(.id==$id) | .assets[]? | select(.architecture==$a) | .url][0] // empty
-      ' "$state")"
-      [[ "$expected_sha" =~ ^[a-f0-9]{64}$ ]] || die "state 缺少资产 sha256: $pkg_id $arch"
-      [[ "$expected_size" =~ ^[1-9][0-9]*$ ]] || die "state 缺少资产 size: $pkg_id $arch"
-      [[ "$expected_url" == https://* ]] || die "state 资产 url 非法: $pkg_id $arch"
-      dest_name="$(basename -- "$expected_fn")"
-      [[ "$dest_name" == *.deb && "$dest_name" != *..* && "$dest_name" != */* ]] \
-        || die "非法 deb 文件名: $dest_name"
-      dest_deb="$archives_dir/$dest_name"
-      set +e
-      timeout --signal=TERM --kill-after=10 "$DOWNLOAD_TIMEOUT" \
-        curl --fail --silent --show-error --location \
-        --proto '=https' --proto-redir '=https' --tlsv1.2 \
-        --connect-timeout 20 --max-time "$DOWNLOAD_TIMEOUT" \
-        --retry 2 --retry-delay 1 --max-redirs 5 \
-        -o "$dest_deb" -- "$expected_url" >>"$download_log" 2>&1
-      download_rc=$?
-      set -e
-      if [[ "$download_rc" -ne 0 || ! -f "$dest_deb" || -L "$dest_deb" ]]; then
-        ok=false
+    if [[ "$update_rc" -ne 0 ]]; then
+      ok=false
+      if [[ "$update_rc" -eq 124 || "$update_rc" -eq 137 ]]; then
         failure_class=network
-        error_msg="下载失败: $pkg_id url=$expected_url exit=$download_rc"
-        break
+        error_msg="apt-get update 超时 exit=$update_rc"
+      else
+        failure_class=$(classify_update "$update_log")
+        error_msg="apt-get update 失败 exit=$update_rc class=$failure_class"
       fi
-      got_size="$(stat -c '%s' -- "$dest_deb")"
-      got_sha="$(sha256sum -- "$dest_deb" | awk '{print $1}')"
-      if [[ "$got_size" != "$expected_size" || "$got_sha" != "$expected_sha" ]]; then
-        ok=false
-        failure_class=dependency
-        error_msg="下载摘要/大小不符: $pkg_id"
-        break
-      fi
-      deb_pkg="$(dpkg-deb -f -- "$dest_deb" Package)"
-      deb_ver="$(dpkg-deb -f -- "$dest_deb" Version)"
-      deb_arch="$(dpkg-deb -f -- "$dest_deb" Architecture)"
-      if [[ "$deb_pkg" != "$pkg_name" || "$deb_ver" != "$pkg_ver" || "$deb_arch" != "$arch" ]]; then
-        ok=false
-        failure_class=dependency
-        error_msg="下载 deb 字段不符: $pkg_id (Package/Version/Architecture)"
-        break
-      fi
-      packages_file="$repos_root/$pkg_id/dists/$series/main/binary-$arch/Packages"
-      [[ -f "$packages_file" && ! -L "$packages_file" ]] || {
-        ok=false
-        failure_class=dependency
-        error_msg="缺少 Packages: $pkg_id $series/$arch"
-        break
-      }
-      pkg_fn="$(awk -v want="$expected_sha" '
-        BEGIN { RS=""; FS="\n" }
-        {
-          sha=""
-          for (i=1;i<=NF;i++) if ($i ~ /^SHA256: /){split($i,a," "); sha=tolower(a[2])}
-          if (sha==want) {
-            for (i=1;i<=NF;i++) if ($i ~ /^Filename: /){sub(/^Filename: /,"",$i); print $i; exit}
-          }
-        }
-      ' "$packages_file")"
-      if [[ "$pkg_fn" != "$expected_fn" ]]; then
-        ok=false
-        failure_class=dependency
-        error_msg="Packages Filename 与 state 不符: $pkg_id"
-        break
-      fi
-      printf 'downloaded %s sha256=%s size=%s\n' "$dest_deb" "$got_sha" "$got_size" >>"$download_log"
-    done < <(jq -r --arg s "$series" --arg a "$arch" \
-      '.[] | select(.series==$s and .architecture==$a) | [.package,.version,.id] | @tsv' "$combo_tmp")
-
-    if [[ "$ok" == true ]]; then
-      # 显式离线旧版本夹具：写入 status Version=0~apt-hub-verify-fixture，再 apt-get -s upgrade（不安装）
-      status_file="$root/var/lib/dpkg/status"
-      : >"$status_file"
-      while IFS=$'\t' read -r pkg_name _pkg_ver _pkg_id; do
-        [[ -n "$pkg_name" ]] || continue
-        cat >>"$status_file" <<EOF
-Package: ${pkg_name}
-Status: install ok installed
-Priority: optional
-Section: misc
-Installed-Size: 1
-Maintainer: apt-hub-verify-fixture <invalid>
-Architecture: ${arch}
-Version: 0~apt-hub-verify-fixture
-Description: offline older-version fixture for apt-get -s upgrade
-
-EOF
-      done < <(jq -r --arg s "$series" --arg a "$arch" \
-        '.[] | select(.series==$s and .architecture==$a) | [.package,.version,.id] | @tsv' "$combo_tmp")
+    else
       set +e
       timeout --signal=TERM --kill-after=10 "$SIMULATE_TIMEOUT" \
         env LC_ALL=C LANG=C LANGUAGE=C apt-get \
@@ -760,17 +691,190 @@ EOF
         -o APT::Get::Simulate=true \
         --simulate \
         -y \
+        --no-install-recommends \
+        install "${pkg_specs[@]}" >"$simulate_log" 2>&1
+      simulate_rc=$?
+      set -e
+      if [[ "$simulate_rc" -ne 0 ]]; then
+        ok=false
+        if [[ "$simulate_rc" -eq 124 || "$simulate_rc" -eq 137 ]]; then
+          failure_class=network
+          error_msg="apt-get install -s 超时 exit=$simulate_rc"
+        else
+          failure_class=$(classify_install "$simulate_log")
+          error_msg="apt-get install -s 失败 exit=$simulate_rc class=$failure_class"
+        fi
+      fi
+    fi
+  fi
+
+  if [[ "$ok" == true && "$verify_downloads" -eq 1 ]]; then
+    archives_dir="$root/var/cache/apt/archives"
+    mkdir -p -- "$archives_dir/partial"
+    # 真实 APT：type:deb 候选原点 apt-get download（不物化 file:）。
+    set +e
+    (
+      cd -- "$archives_dir" || exit 1
+      timeout --signal=TERM --kill-after=10 "$DOWNLOAD_TIMEOUT" \
+        env LC_ALL=C LANG=C LANGUAGE=C apt-get \
+        -c "$root/etc/apt/apt.conf" \
+        -o Debug::NoLocking=true \
+        download "${pkg_specs[@]}"
+    ) >"$download_log" 2>&1
+    download_rc=$?
+    set -e
+    if [[ "$download_rc" -ne 0 ]]; then
+      ok=false
+      failure_class=network
+      error_msg="apt-get download 失败 exit=$download_rc"
+    else
+      assets_tsv="$slot/assets.tsv"
+      jq -r --arg s "$series" --arg a "$arch" '
+        .[] | select(.series==$s and .architecture==$a)
+        | [.package,.version,.id,.sha256,.size,.filename] | @tsv
+      ' "$combo_tmp" >"$assets_tsv" || die "枚举下载资产失败: $series/$arch"
+      while IFS=$'\t' read -r pkg_name pkg_ver pkg_id expected_sha expected_size expected_fn; do
+        [[ -n "$pkg_name" ]] || continue
+        [[ "$expected_sha" =~ ^[a-f0-9]{64}$ ]] || die "state 缺少资产 sha256: $pkg_id $pkg_name $arch"
+        found_deb=""
+        find_list="$slot/archives-debs.list"
+        find -- "$archives_dir" -maxdepth 1 -type f -name '*.deb' -print >"$find_list" \
+          || die "枚举 archives deb 失败"
+        while IFS= read -r cand; do
+          [[ -f "$cand" && ! -L "$cand" ]] || continue
+          got_sha="$(sha256sum -- "$cand" | awk '{print $1}')"
+          if [[ "$got_sha" == "$expected_sha" ]]; then
+            found_deb="$cand"
+            break
+          fi
+        done <"$find_list"
+        if [[ -z "$found_deb" ]]; then
+          ok=false
+          failure_class=dependency
+          error_msg="APT archives 无匹配 sha256 的 deb: $pkg_id/$pkg_name"
+          break
+        fi
+        got_size="$(stat -c '%s' -- "$found_deb")"
+        if [[ "$got_size" != "$expected_size" ]]; then
+          ok=false
+          failure_class=dependency
+          error_msg="APT 下载 size 不符: $pkg_id/$pkg_name"
+          break
+        fi
+        deb_pkg="$(dpkg-deb -f -- "$found_deb" Package)"
+        deb_ver="$(dpkg-deb -f -- "$found_deb" Version)"
+        deb_arch="$(dpkg-deb -f -- "$found_deb" Architecture)"
+        if [[ "$deb_pkg" != "$pkg_name" || "$deb_ver" != "$pkg_ver" || "$deb_arch" != "$arch" ]]; then
+          ok=false
+          failure_class=dependency
+          error_msg="APT 下载 control 不符: $pkg_id/$pkg_name"
+          break
+        fi
+        packages_file="$repos_root/$pkg_id/dists/$series/main/binary-$arch/Packages"
+        [[ -f "$packages_file" && ! -L "$packages_file" ]] || {
+          ok=false
+          failure_class=dependency
+          error_msg="缺少 Packages: $pkg_id $series/$arch"
+          break
+        }
+        pkg_fn="$(awk -v want="$expected_sha" '
+          BEGIN { RS=""; FS="\n" }
+          {
+            sha=""
+            for (i=1;i<=NF;i++) if ($i ~ /^SHA256: /){split($i,a," "); sha=tolower(a[2])}
+            if (sha==want) {
+              for (i=1;i<=NF;i++) if ($i ~ /^Filename: /){sub(/^Filename: /,"",$i); print $i; exit}
+            }
+          }
+        ' "$packages_file")"
+        if [[ "$pkg_fn" != "$expected_fn" ]]; then
+          ok=false
+          failure_class=dependency
+          error_msg="Packages Filename 与 state 不符: $pkg_id/$pkg_name"
+          break
+        fi
+        printf 'apt-archive %s package=%s sha256=%s size=%s\n' \
+          "$found_deb" "$pkg_name" "$expected_sha" "$got_size" >>"$download_log"
+      done <"$assets_tsv"
+    fi
+
+    if [[ "$ok" == true ]]; then
+      # 真 upgrade 计划：旧状态 → 目标完整 Version；每包 Inst 且无 Remv。
+      status_file="$root/var/lib/dpkg/status"
+      : >"$status_file"
+      upgrade_pkgs_tsv="$slot/upgrade-pkgs.tsv"
+      jq -r --arg s "$series" --arg a "$arch" '
+        [.[] | select(.series==$s and .architecture==$a) | [.package,.version] | @tsv]
+        | unique[]
+      ' "$combo_tmp" >"$upgrade_pkgs_tsv" || die "枚举 upgrade 包失败"
+      while IFS=$'\t' read -r pkg_name pkg_ver; do
+        [[ -n "$pkg_name" ]] || continue
+        case "$pkg_name" in
+          golang|golang-go) old_ver='2:1.22~2build1' ;;
+          *) old_ver='0.0.1-1' ;;
+        esac
+        cat >>"$status_file" <<EOF
+Package: ${pkg_name}
+Status: install ok installed
+Priority: optional
+Section: misc
+Installed-Size: 1
+Maintainer: apt-hub-verify-fixture <invalid>
+Architecture: ${arch}
+Version: ${old_ver}
+Description: offline older-version fixture for apt-get --simulate upgrade
+
+EOF
+      done <"$upgrade_pkgs_tsv"
+      set +e
+      timeout --signal=TERM --kill-after=10 "$SIMULATE_TIMEOUT" \
+        env LC_ALL=C LANG=C LANGUAGE=C apt-get \
+        -c "$root/etc/apt/apt.conf" \
+        -o Debug::NoLocking=true \
+        -o APT::Get::Simulate=true \
+        --simulate \
+        --with-new-pkgs \
+        -y \
+        --no-install-recommends \
         upgrade >"$upgrade_log" 2>&1
       upgrade_rc=$?
       set -e
       if [[ "$upgrade_rc" -ne 0 ]]; then
         ok=false
         failure_class=dependency
-        error_msg="apt-get -s upgrade 失败 exit=$upgrade_rc"
-      elif ! grep -Eq '^Inst ' "$upgrade_log"; then
-        ok=false
-        failure_class=dependency
-        error_msg="apt-get -s upgrade 未产生 Inst 行（旧版本夹具未触发升级）"
+        error_msg="apt-get --simulate upgrade 失败 exit=$upgrade_rc"
+      else
+        if grep -Eq '^Remv ' "$upgrade_log"; then
+          ok=false
+          failure_class=dependency
+          error_msg="upgrade 计划含 Remv"
+        else
+          while IFS=$'\t' read -r pkg_name pkg_ver; do
+            [[ -n "$pkg_name" ]] || continue
+            case "$pkg_name" in
+              golang|golang-go) old_ver='2:1.22~2build1' ;;
+              *) old_ver='0.0.1-1' ;;
+            esac
+            if ! grep -Eq "^Inst ${pkg_name}( |\\[)" "$upgrade_log"; then
+              ok=false
+              failure_class=dependency
+              error_msg="upgrade 未 Inst 目标包: $pkg_name"
+              break
+            fi
+            if ! grep -E "^Inst ${pkg_name}" "$upgrade_log" | grep -Fq "[${old_ver}]"; then
+              ok=false
+              failure_class=dependency
+              error_msg="upgrade 未体现旧版 ${old_ver}→新版: $pkg_name"
+              break
+            fi
+            if ! grep -E "^Inst ${pkg_name}" "$upgrade_log" | grep -Fq "(${pkg_ver}"; then
+              ok=false
+              failure_class=dependency
+              error_msg="upgrade 未指向目标 Version ${pkg_ver}: $pkg_name"
+              break
+            fi
+          done <"$upgrade_pkgs_tsv"
+        fi
       fi
     fi
   fi

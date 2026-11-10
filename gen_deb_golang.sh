@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 从 Go 官方 Linux 归档构造独立 apt-hub-go .deb（不抢 Ubuntu golang 入口）。
+# 从 Go 官方 Linux 归档构造 golang 元包 + golang-go 工具链 deb。
 set -euo pipefail
 umask 022
 export LC_ALL=C
@@ -15,8 +15,6 @@ DEC_POS='^[1-9][0-9]*$'
 GO_TAG='^go[0-9]+\.[0-9]+\.[0-9]+$'
 DEB_REV='^[1-9][0-9]*$'
 ALLOWED_ARCH='^(amd64|arm64)$'
-PKG_NAME='^[a-z0-9][a-z0-9.+-]+$'
-
 config=""
 output=""
 downloads_json=""
@@ -322,17 +320,62 @@ clamp_tree_mtime() {
   done <"${list}"
 }
 
+compute_installed_size() {
+  # 对齐 dpkg-gencontrol：regular/symlink 按自身字节向上取 1KiB，其它对象各 1KiB。
+  # 排除 DEBIAN（非安装 payload）。归档禁硬链，不跟踪 hardlink。
+  local root="$1"
+  local list find_rc=0 total=0 path sz add scan_ok=1
+  [[ -d "${root}" && ! -L "${root}" ]] || die "Installed-Size 根须为真实目录: ${root}"
+  [[ -n "${scratch}" && -d "${scratch}" && ! -L "${scratch}" ]] || die "Installed-Size 需要 scratch"
+  list="${scratch}/installed-size.list"
+  find -P -- "${root}" \
+    \( -path "${root}/DEBIAN" -o -path "${root}/DEBIAN/*" \) -prune -o -print0 \
+    >"${list}" || find_rc=$?
+  if [[ "${find_rc}" -ne 0 ]]; then
+    rm -f -- "${list}"
+    die "枚举 Installed-Size 成员失败 rc=${find_rc}"
+  fi
+  if [[ ! -s "${list}" ]]; then
+    rm -f -- "${list}"
+    die "Installed-Size 枚举为空: ${root}"
+  fi
+  while IFS= read -r -d '' path || [[ -n "${path}" ]]; do
+    [[ -n "${path}" ]] || continue
+    if [[ -L "${path}" ]]; then
+      sz="$(stat -c '%s' -- "${path}")" || { scan_ok=0; break; }
+      add=$(( (sz + 1023) / 1024 ))
+    elif [[ -f "${path}" ]]; then
+      sz="$(stat -c '%s' -- "${path}")" || { scan_ok=0; break; }
+      add=$(( (sz + 1023) / 1024 ))
+    else
+      add=1
+    fi
+    total=$((total + add))
+  done <"${list}"
+  rm -f -- "${list}"
+  [[ "${scan_ok}" -eq 1 ]] || die "统计 Installed-Size 成员失败: ${root}"
+  printf '%s\n' "${total}"
+}
+
 select_stable_version() {
+  # 先完整落盘并核 jq 退出码，再消费；禁止 process substitution 吞部分成功后的非 0。
   local index="$1"
-  local best_tag="" best_ver="" tag ver
-  while IFS= read -r tag; do
+  local best_tag="" best_ver="" tag ver tags_file jq_rc=0
+  tags_file="${scratch}/stable-tags.txt"
+  [[ -n "${scratch}" && -d "${scratch}" ]] || die "select_stable 需要 scratch"
+  jq -r '.[] | select(.stable==true) | .version' "${index}" >"${tags_file}" || jq_rc=$?
+  if [[ "${jq_rc}" -ne 0 ]]; then
+    die "枚举官方 stable 版本失败 rc=${jq_rc}"
+  fi
+  while IFS= read -r tag || [[ -n "${tag}" ]]; do
+    [[ -n "${tag}" ]] || continue
     [[ "${tag}" =~ ${GO_TAG} ]] || die "拒绝非稳定 go 版本标签: ${tag}"
     ver="${tag#go}"
     if [[ -z "${best_ver}" ]] || dpkg --compare-versions "${ver}" gt "${best_ver}"; then
       best_ver="${ver}"
       best_tag="${tag}"
     fi
-  done < <(jq -r '.[] | select(.stable==true) | .version' "${index}")
+  done <"${tags_file}"
   [[ -n "${best_tag}" ]] || die "官方索引无 stable 版本"
   printf '%s\n' "${best_tag}"
 }
@@ -387,15 +430,31 @@ artifact_for_arch() {
   printf '%s\t%s\t%s\n' "${filename}" "${sha}" "${size}"
 }
 
-build_one_deb() {
+# 输出一行：arch package filename sha size version_with_epoch url up_sha up_size mtime_epoch
+emit_deb_row() {
+  local arch="$1" package="$2" deb_path="$3" version="$4" url="$5" up_sha="$6" up_size="$7" mtime_epoch="$8"
+  local deb_name deb_sha deb_sz
+  deb_name="$(basename -- "${deb_path}")"
+  deb_sha="$(hex_sha256 "${deb_path}")" || die "计算 deb sha256 失败: ${deb_name}"
+  deb_sz="$(file_size "${deb_path}")" || die "读取 deb 大小失败: ${deb_name}"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "${arch}" "${package}" "${deb_name}" "${deb_sha}" "${deb_sz}" \
+    "${version}" "${url}" "${up_sha}" "${up_size}" "${mtime_epoch}"
+}
+
+build_arch_debs() {
+  # 每 arch：golang-go 工具链 + golang 元包；文件名无 epoch，control Version 含 epoch。
   local arch="$1" tag="$2" revision="$3" archive="$4" url="$5" sha="$6" size="$7"
-  local upstream_ver pkg_ver extract debroot go_tree triple
-  local epoch deb_name deb_path installed_size deb_sha deb_sz ver_line special
-  local pkg_desc pkg_maintainer pkg_homepage pkg_section pkg_priority pkg_name
+  local upstream_ver ver_fn ver_ctrl extract go_tree triple
+  local mtime_epoch ver_line special
+  local pkg_desc pkg_maintainer pkg_homepage pkg_section pkg_priority pkg_epoch
+  local root_go root_meta installed_size deb_path
 
   upstream_ver="${tag#go}"
-  pkg_ver="${upstream_ver}-${revision}"
-  pkg_name="$(jq -r '.package' "${config}")" || die "读取 package 失败"
+  ver_fn="${upstream_ver}-${revision}"
+  pkg_epoch="$(jq -r '.epoch' "${config}")" || die "读取 epoch 失败"
+  [[ "${pkg_epoch}" =~ ${DEC_POS} ]] || die "epoch 非法"
+  ver_ctrl="${pkg_epoch}:${ver_fn}"
   pkg_desc="$(jq -r '.description' "${config}")" || die "读取 description 失败"
   pkg_maintainer="$(jq -r '.maintainer' "${config}")" || die "读取 maintainer 失败"
   pkg_homepage="$(jq -r '.homepage' "${config}")" || die "读取 homepage 失败"
@@ -404,9 +463,10 @@ build_one_deb() {
   triple="$(tool_triple "${arch}")" || die "无法映射 tool triple: ${arch}"
 
   extract="${work}/extract-${arch}"
-  debroot="${work}/debroot-${arch}"
-  rm -rf -- "${extract}" "${debroot}" || die "无法清理构包临时目录: ${arch}"
-  mkdir -m 755 -- "${extract}" "${debroot}" || die "无法创建构包临时目录: ${arch}"
+  root_go="${work}/debroot-golang-go-${arch}"
+  root_meta="${work}/debroot-golang-${arch}"
+  rm -rf -- "${extract}" "${root_go}" "${root_meta}" || die "无法清理构包临时目录: ${arch}"
+  mkdir -m 755 -- "${extract}" "${root_go}" "${root_meta}" || die "无法创建构包临时目录: ${arch}"
 
   inspect_official_archive "${archive}"
   tar -xzf "${archive}" -C "${extract}" \
@@ -419,64 +479,91 @@ build_one_deb() {
     || die "无法枚举解包树: ${arch}"
   [[ -z "${special}" ]] || die "解包树含链接或特殊文件"
   [[ -f "${go_tree}/VERSION" ]] || die "缺少 VERSION"
-  # 官方 VERSION 首行为 goX.Y.Z，其后可有 time 行
   ver_line="$(head -n1 -- "${go_tree}/VERSION" | tr -d '\r')" || die "无法读取 VERSION"
   [[ "${ver_line}" == "${tag}" ]] || die "VERSION 与所选版本不一致"
   [[ -f "${go_tree}/bin/go" && -f "${go_tree}/bin/gofmt" ]] || die "缺少 bin/go 或 bin/gofmt"
   [[ -d "${go_tree}/pkg/tool/${triple}" ]] || die "缺少 pkg/tool/${triple}"
   assert_elf_arch "${go_tree}/bin/go" "${arch}"
   assert_elf_arch "${go_tree}/bin/gofmt" "${arch}"
-
-  mkdir -p -- "${debroot}/usr/lib/apt-hub" "${debroot}/usr/bin" \
-    "${debroot}/usr/share/doc/${pkg_name}" "${debroot}/DEBIAN" \
-    || die "无法创建 deb 目录树: ${arch}"
-  cp -a -- "${go_tree}" "${debroot}/usr/lib/apt-hub/go" || die "复制 go 树失败: ${arch}"
-  ln -s -- "../lib/apt-hub/go/bin/go" "${debroot}/usr/bin/apt-hub-go" || die "创建 apt-hub-go 链接失败"
-  ln -s -- "../lib/apt-hub/go/bin/gofmt" "${debroot}/usr/bin/apt-hub-gofmt" || die "创建 apt-hub-gofmt 链接失败"
   [[ -f "${go_tree}/LICENSE" && ! -L "${go_tree}/LICENSE" ]] \
     || die "归档缺少真实 LICENSE，拒绝伪造 copyright"
-  cp -a -- "${go_tree}/LICENSE" "${debroot}/usr/share/doc/${pkg_name}/copyright" \
-    || die "复制 LICENSE 失败"
-  printf '%s\n' "apt-hub packaging of ${tag}" >"${debroot}/usr/share/doc/${pkg_name}/README.Debian" \
-    || die "写入 README.Debian 失败"
 
-  installed_size="$(du -sk -- "${debroot}" | awk '{print $1}')" || die "计算 Installed-Size 失败"
-  cat >"${debroot}/DEBIAN/control" <<EOF || die "写入 control 失败"
-Package: ${pkg_name}
-Version: ${pkg_ver}
+  # SOURCE_DATE_EPOCH 只来自已认证归档内容。
+  mtime_epoch=""
+  if awk 'NR==2 && $1=="time" {print $2; exit}' "${go_tree}/VERSION" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'; then
+    mtime_epoch="$(date -u -d "$(awk 'NR==2 && $1=="time" {print $2; exit}' "${go_tree}/VERSION")" +%s)" \
+      || die "无法解析 VERSION time"
+  else
+    mtime_epoch="$(stat -c '%Y' -- "${go_tree}/VERSION")" \
+      || die "无法读取归档内 VERSION 成员时间"
+  fi
+  [[ "${mtime_epoch}" =~ ^[0-9]+$ ]] || die "无法确定 SOURCE_DATE_EPOCH"
+
+  # ---- golang-go：完整官方树 + 标准入口 ----
+  mkdir -p -- "${root_go}/usr/lib" "${root_go}/usr/bin" \
+    "${root_go}/usr/share/doc/golang-go" "${root_go}/DEBIAN" \
+    || die "无法创建 golang-go 目录树: ${arch}"
+  cp -a -- "${go_tree}" "${root_go}/usr/lib/golang" || die "复制 go 树失败: ${arch}"
+  ln -s -- "golang" "${root_go}/usr/lib/go" || die "创建 /usr/lib/go 链接失败"
+  ln -s -- "../lib/golang/bin/go" "${root_go}/usr/bin/go" || die "创建 /usr/bin/go 失败"
+  ln -s -- "../lib/golang/bin/gofmt" "${root_go}/usr/bin/gofmt" || die "创建 /usr/bin/gofmt 失败"
+  cp -a -- "${go_tree}/LICENSE" "${root_go}/usr/share/doc/golang-go/copyright" \
+    || die "复制 golang-go LICENSE 失败"
+  printf '%s\n' "apt-hub packaging of ${tag} as golang-go" \
+    >"${root_go}/usr/share/doc/golang-go/README.Debian" \
+    || die "写入 golang-go README.Debian 失败"
+  installed_size="$(compute_installed_size "${root_go}")" || die "计算 golang-go Installed-Size 失败"
+  [[ "${installed_size}" =~ ^[0-9]+$ ]] || die "golang-go Installed-Size 非法: ${installed_size}"
+  cat >"${root_go}/DEBIAN/control" <<EOF || die "写入 golang-go control 失败"
+Package: golang-go
+Version: ${ver_ctrl}
 Architecture: ${arch}
 Maintainer: ${pkg_maintainer}
 Section: ${pkg_section}
 Priority: ${pkg_priority}
 Homepage: ${pkg_homepage}
 Installed-Size: ${installed_size}
+Conflicts: gccgo-go
+Description: Go programming language compiler, linker, compiled stdlib
+ Official Go toolchain archive packaged for apt-hub (${tag}).
+EOF
+  clamp_tree_mtime "${root_go}" "${mtime_epoch}"
+  deb_path="${work}/golang-go_${ver_fn}_${arch}.deb"
+  env SOURCE_DATE_EPOCH="${mtime_epoch}" \
+    dpkg-deb --build --root-owner-group -Zgzip -z9 -- "${root_go}" "${deb_path}" \
+    >/dev/null || die "dpkg-deb 构建 golang-go 失败: ${arch}"
+  [[ -f "${deb_path}" && ! -L "${deb_path}" ]] || die "golang-go 产物缺失: ${deb_path}"
+  emit_deb_row "${arch}" "golang-go" "${deb_path}" "${ver_ctrl}" "${url}" "${sha}" "${size}" "${mtime_epoch}"
+
+  # ---- golang：元包 Depends 精确同版本 golang-go ----
+  mkdir -p -- "${root_meta}/usr/share/doc/golang" "${root_meta}/DEBIAN" \
+    || die "无法创建 golang 元包目录: ${arch}"
+  cp -a -- "${go_tree}/LICENSE" "${root_meta}/usr/share/doc/golang/copyright" \
+    || die "复制 golang LICENSE 失败"
+  printf '%s\n' "apt-hub golang metapackage for ${tag}" \
+    >"${root_meta}/usr/share/doc/golang/README.Debian" \
+    || die "写入 golang README.Debian 失败"
+  installed_size="$(compute_installed_size "${root_meta}")" || die "计算 golang Installed-Size 失败"
+  [[ "${installed_size}" =~ ^[0-9]+$ ]] || die "golang Installed-Size 非法: ${installed_size}"
+  cat >"${root_meta}/DEBIAN/control" <<EOF || die "写入 golang control 失败"
+Package: golang
+Version: ${ver_ctrl}
+Architecture: ${arch}
+Maintainer: ${pkg_maintainer}
+Section: ${pkg_section}
+Priority: ${pkg_priority}
+Homepage: ${pkg_homepage}
+Installed-Size: ${installed_size}
+Depends: golang-go (= ${ver_ctrl})
 Description: ${pkg_desc}
 EOF
-
-  # SOURCE_DATE_EPOCH 只来自已认证归档内容：VERSION time，或解包后受校验成员 mtime。
-  epoch=""
-  if awk 'NR==2 && $1=="time" {print $2; exit}' "${go_tree}/VERSION" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'; then
-    epoch="$(date -u -d "$(awk 'NR==2 && $1=="time" {print $2; exit}' "${go_tree}/VERSION")" +%s)" \
-      || die "无法解析 VERSION time"
-  else
-    epoch="$(stat -c '%Y' -- "${go_tree}/VERSION")" \
-      || die "无法读取归档内 VERSION 成员时间"
-  fi
-  [[ "${epoch}" =~ ^[0-9]+$ ]] || die "无法确定 SOURCE_DATE_EPOCH"
-  clamp_tree_mtime "${debroot}" "${epoch}"
-
-  deb_name="${pkg_name}_${pkg_ver}_${arch}.deb"
-  deb_path="${work}/${deb_name}"
-  env SOURCE_DATE_EPOCH="${epoch}" \
-    dpkg-deb --build --root-owner-group -Zgzip -z9 -- "${debroot}" "${deb_path}" \
-    >/dev/null || die "dpkg-deb 构建失败: ${arch}"
-  [[ -f "${deb_path}" && ! -L "${deb_path}" ]] || die "deb 产物缺失: ${deb_path}"
-  deb_sha="$(hex_sha256 "${deb_path}")" || die "计算 deb sha256 失败: ${arch}"
-  deb_sz="$(file_size "${deb_path}")" || die "读取 deb 大小失败: ${arch}"
-
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "${arch}" "${deb_name}" "${deb_sha}" "${deb_sz}" \
-    "${pkg_ver}" "${url}" "${sha}" "${size}"
+  clamp_tree_mtime "${root_meta}" "${mtime_epoch}"
+  deb_path="${work}/golang_${ver_fn}_${arch}.deb"
+  env SOURCE_DATE_EPOCH="${mtime_epoch}" \
+    dpkg-deb --build --root-owner-group -Zgzip -z9 -- "${root_meta}" "${deb_path}" \
+    >/dev/null || die "dpkg-deb 构建 golang 失败: ${arch}"
+  [[ -f "${deb_path}" && ! -L "${deb_path}" ]] || die "golang 产物缺失: ${deb_path}"
+  emit_deb_row "${arch}" "golang" "${deb_path}" "${ver_ctrl}" "${url}" "${sha}" "${size}" "${mtime_epoch}"
 }
 
 # ---- args ----
@@ -517,7 +604,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "${config}" && -n "${output}" ]] || usage
-require_cmd bash jq curl tar dpkg-deb dpkg readelf sha256sum realpath find flock stat touch install awk sed grep tr sort du env
+require_cmd bash jq curl tar dpkg-deb dpkg readelf sha256sum realpath find flock stat touch install awk sed grep tr sort env
 
 config="$(assert_allowed_file "config" "${config}")"
 output="$(assert_allowed_tmp_dir "output" "${output}" "no")"
@@ -541,7 +628,8 @@ jq -e '
   .schema_version=="1"
   and .source_type=="go_official_archive"
   and (.release_index_url|type=="string" and .=="https://go.dev/dl/?mode=json")
-  and (.package|type=="string")
+  and (.package=="golang")
+  and (.epoch|type=="string" and .=="2")
   and (.description|type=="string" and length>0)
   and (.maintainer|type=="string" and length>0)
   and (.homepage|type=="string" and startswith("https://"))
@@ -554,9 +642,11 @@ jq -e '
 ' "${config}" >/dev/null || die "config/go.json 字段不合法"
 
 pkg_name="$(jq -r '.package' "${config}")"
+pkg_epoch="$(jq -r '.epoch' "${config}")"
 revision="$(jq -r '.revision' "${config}")"
 index_url="$(jq -r '.release_index_url' "${config}")"
-[[ "${pkg_name}" =~ ${PKG_NAME} ]] || die "package 名非法"
+[[ "${pkg_name}" == "golang" ]] || die "package 必须为 golang"
+[[ "${pkg_epoch}" == "2" ]] || die "epoch 必须为 2"
 [[ "${revision}" =~ ${DEB_REV} ]] || die "revision 非法"
 
 lockfile="${output}.lock"
@@ -636,7 +726,9 @@ mapfile -t archs <"${archs_file}" \
 
 prov_rows="${scratch}/prov-rows.jsonl"
 : >"${prov_rows}" || die "无法初始化 provenance 行文件"
-generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || die "无法生成 UTC 时间"
+# 确定性：各 arch 归档 mtime_epoch 取 max，不跟墙钟漂。
+generated_at=""
+generated_epoch=""
 
 for arch in "${archs[@]}"; do
   [[ "${arch}" =~ ${ALLOWED_ARCH} ]] || die "非法架构: ${arch}"
@@ -655,55 +747,75 @@ for arch in "${archs[@]}"; do
     download_official_archive "${url}" "${archive_path}" "${size}"
   fi
   verify_archive_bytes "${archive_path}" "${sha}" "${size}"
-  # 不执行未认证内容：仅在哈希通过后做只读成员检查与受限解包。
-  # 行结果写文件，避免命令替换 + || 抑制函数内 errexit。
   row_file="${scratch}/row-${arch}.txt"
-  build_one_deb "${arch}" "${tag}" "${revision}" "${archive_path}" "${url}" "${sha}" "${size}" \
+  build_arch_debs "${arch}" "${tag}" "${revision}" "${archive_path}" "${url}" "${sha}" "${size}" \
     >"${row_file}" || die "构包失败: ${arch}"
-  row="$(cat -- "${row_file}")" || die "读取构包结果失败: ${arch}"
-  IFS=$'\t' read -r out_arch deb_name deb_sha deb_size pkg_ver up_url up_sha up_size <<<"${row}" \
-    || die "解析构包结果失败: ${arch}"
-  [[ -n "${deb_name}" && -f "${work}/${deb_name}" && ! -L "${work}/${deb_name}" ]] \
-    || die "构包产物缺失: ${arch}"
-  # 提交前验 package/version/arch 与 go 树。
-  [[ "$(dpkg-deb -f -- "${work}/${deb_name}" Package)" == "${pkg_name}" ]] \
-    || die "deb Package 与 manifest 不一致: ${arch}"
-  [[ "$(dpkg-deb -f -- "${work}/${deb_name}" Version)" == "${pkg_ver}" ]] \
-    || die "deb Version 与 manifest 不一致: ${arch}"
-  [[ "$(dpkg-deb -f -- "${work}/${deb_name}" Architecture)" == "${arch}" ]] \
-    || die "deb Architecture 与 manifest 不一致: ${arch}"
-  # 先完整列出再 grep，避免 grep -q 提前关闭管道令 dpkg-deb SIGPIPE。
-  deb_list="${scratch}/deb-list-${arch}.txt"
-  dpkg-deb -c -- "${work}/${deb_name}" >"${deb_list}" || die "无法列出 deb 内容: ${arch}"
-  grep -q 'usr/lib/apt-hub/go/bin/go' "${deb_list}" || die "deb 缺少 go 树: ${arch}"
-  install -m 644 -- "${work}/${deb_name}" "${staging}/${deb_name}" \
-    || die "写入 staging deb 失败: ${arch}"
-  jq -nc \
-    --arg arch "${out_arch}" \
-    --arg filename "${deb_name}" \
-    --arg sha256 "${deb_sha}" \
-    --arg size "${deb_size}" \
-    --arg version "${pkg_ver}" \
-    --arg package "${pkg_name}" \
-    --arg upstream_url "${up_url}" \
-    --arg upstream_sha256 "${up_sha}" \
-    --arg upstream_size "${up_size}" \
-    '{
-      package:$package,
-      version:$version,
-      architecture:$arch,
-      filename:$filename,
-      sha256:$sha256,
-      size:$size,
-      upstream:{url:$upstream_url, sha256:$upstream_sha256, size:$upstream_size}
-    }' >>"${prov_rows}" || die "写入 provenance 行失败: ${arch}"
+  [[ -s "${row_file}" ]] || die "构包结果空: ${arch}"
+  while IFS=$'\t' read -r out_arch out_pkg deb_name deb_sha deb_size pkg_ver up_url up_sha up_size row_epoch; do
+    [[ -n "${deb_name}" && -f "${work}/${deb_name}" && ! -L "${work}/${deb_name}" ]] \
+      || die "构包产物缺失: ${arch}/${out_pkg}"
+    [[ "${row_epoch}" =~ ^[0-9]+$ ]] || die "构包结果缺少 mtime epoch: ${arch}/${out_pkg}"
+    if [[ -z "${generated_epoch}" ]] || [[ "${row_epoch}" -gt "${generated_epoch}" ]]; then
+      generated_epoch="${row_epoch}"
+    fi
+    [[ "$(dpkg-deb -f -- "${work}/${deb_name}" Package)" == "${out_pkg}" ]] \
+      || die "deb Package 与 manifest 不一致: ${deb_name}"
+    [[ "$(dpkg-deb -f -- "${work}/${deb_name}" Version)" == "${pkg_ver}" ]] \
+      || die "deb Version 与 manifest 不一致: ${deb_name}"
+    [[ "$(dpkg-deb -f -- "${work}/${deb_name}" Architecture)" == "${out_arch}" ]] \
+      || die "deb Architecture 与 manifest 不一致: ${deb_name}"
+    [[ "${deb_name}" == "${out_pkg}_${upstream_ver}-${revision}_${out_arch}.deb" ]] \
+      || die "文件名必须去 epoch: ${deb_name}"
+    deb_list="${scratch}/deb-list-${out_pkg}-${arch}.txt"
+    dpkg-deb -c -- "${work}/${deb_name}" >"${deb_list}" || die "无法列出 deb 内容: ${deb_name}"
+    if [[ "${out_pkg}" == "golang-go" ]]; then
+      grep -q 'usr/lib/golang/bin/go' "${deb_list}" || die "golang-go 缺树: ${arch}"
+      grep -E -q '(^|/)usr/bin/go( -> |$)' "${deb_list}" || die "golang-go 缺 /usr/bin/go: ${arch}"
+      grep -E -q '(^|/)usr/bin/gofmt( -> |$)' "${deb_list}" || die "golang-go 缺 /usr/bin/gofmt: ${arch}"
+      grep -E -q '(^|/)usr/lib/go( -> |$)' "${deb_list}" || die "golang-go 缺 /usr/lib/go: ${arch}"
+      dep_go="$(dpkg-deb -f -- "${work}/${deb_name}" Depends 2>/dev/null || true)"
+      [[ -z "${dep_go}" ]] || die "golang-go 不应 Depends 其它包"
+      dpkg-deb -f -- "${work}/${deb_name}" Conflicts | grep -Fq 'gccgo-go' \
+        || die "golang-go 缺 Conflicts: gccgo-go"
+    elif [[ "${out_pkg}" == "golang" ]]; then
+      [[ "$(dpkg-deb -f -- "${work}/${deb_name}" Depends)" == "golang-go (= ${pkg_ver})" ]] \
+        || die "golang 元包 Depends 必须精确锁定同版本 golang-go"
+    else
+      die "未知包名: ${out_pkg}"
+    fi
+    install -m 644 -- "${work}/${deb_name}" "${staging}/${deb_name}" \
+      || die "写入 staging deb 失败: ${deb_name}"
+    jq -nc \
+      --arg arch "${out_arch}" \
+      --arg filename "${deb_name}" \
+      --arg sha256 "${deb_sha}" \
+      --arg size "${deb_size}" \
+      --arg version "${pkg_ver}" \
+      --arg package "${out_pkg}" \
+      --arg upstream_url "${up_url}" \
+      --arg upstream_sha256 "${up_sha}" \
+      --arg upstream_size "${up_size}" \
+      '{
+        package:$package,
+        version:$version,
+        architecture:$arch,
+        filename:$filename,
+        sha256:$sha256,
+        size:$size,
+        upstream:{url:$upstream_url, sha256:$upstream_sha256, size:$upstream_size}
+      }' >>"${prov_rows}" || die "写入 provenance 行失败: ${deb_name}"
+  done <"${row_file}"
 done
 
+[[ -n "${generated_epoch}" ]] || die "generated_at 未从 SOURCE_DATE_EPOCH 派生"
+generated_at="$(date -u -d "@${generated_epoch}" +%Y-%m-%dT%H:%M:%SZ)" \
+  || die "无法从 max(SOURCE_DATE_EPOCH) 派生 generated_at"
 jq -nc \
   --arg schema_version "1" \
   --arg generated_at_utc "${generated_at}" \
   --arg upstream_version "${tag}" \
   --arg upstream_version_debian "${upstream_ver}" \
+  --arg upstream_epoch "${pkg_epoch}" \
   --arg revision "${revision}" \
   --argjson packages "$(jq -s '.' "${prov_rows}")" \
   '{
@@ -712,6 +824,7 @@ jq -nc \
     upstream:{
       version:$upstream_version,
       version_debian:$upstream_version_debian,
+      epoch:$upstream_epoch,
       revision:$revision
     },
     packages:$packages
@@ -721,30 +834,27 @@ jq -nc \
   || die "staging 缺少 provenance.json"
 archs_json="$(printf '%s\n' "${archs[@]}" | jq -R . | jq -s -c .)" \
   || die "无法序列化 arch 清单"
-jq -e --argjson archs "${archs_json}" '
+expect_n=$(( ${#archs[@]} * 2 ))
+jq -e --argjson archs "${archs_json}" --argjson n "${expect_n}" '
   .schema_version=="1"
-  and (.packages|type=="array" and length==($archs|length))
-  and (([.packages[].architecture]|sort) == ($archs|sort))
-' "${staging}/provenance.json" >/dev/null || die "staging provenance 与 arch 清单不一致"
-for arch in "${archs[@]}"; do
-  deb_name="$(jq -r --arg a "${arch}" \
-    '.packages[]|select(.architecture==$a)|.filename' "${staging}/provenance.json")" \
-    || die "provenance 缺 arch 文件名: ${arch}"
+  and (.upstream.epoch=="2")
+  and (.packages|type=="array" and length==$n)
+  and (([.packages[].architecture]|unique|sort) == ($archs|sort))
+  and (([.packages[].package]|unique|sort) == ["golang","golang-go"])
+' "${staging}/provenance.json" >/dev/null || die "staging provenance 与双包/arch 清单不一致"
+while IFS= read -r deb_name; do
   [[ -f "${staging}/${deb_name}" && ! -L "${staging}/${deb_name}" ]] \
     || die "staging 缺 deb: ${deb_name}"
-done
+done < <(jq -r '.packages[].filename' "${staging}/provenance.json")
 
 sums_tmp="${scratch}/SHA256SUMS.tmp"
 : >"${sums_tmp}" || die "无法初始化 SHA256SUMS"
 (
   cd -- "${staging}" || exit 1
   sha256sum -- provenance.json || exit 1
-  for arch in "${archs[@]}"; do
-    deb_name="$(jq -r --arg a "${arch}" \
-      '.packages[]|select(.architecture==$a)|.filename' provenance.json)" \
-      || exit 1
+  while IFS= read -r deb_name; do
     sha256sum -- "${deb_name}" || exit 1
-  done
+  done < <(jq -r '.packages[].filename' provenance.json | LC_ALL=C sort)
 ) | LC_ALL=C sort -k2 >"${sums_tmp}" || die "计算 SHA256SUMS 失败"
 install -m 644 -- "${sums_tmp}" "${staging}/SHA256SUMS" || die "写入 SHA256SUMS 失败"
 [[ -s "${staging}/SHA256SUMS" ]] || die "staging 缺少 SHA256SUMS"
@@ -785,4 +895,5 @@ rm -rf -- "${work}" "${scratch}"
 work_owned=0
 scratch_owned=0
 success=1
-printf 'gen_deb_golang.sh: ok packages=%s version=%s-%s\n' "${#archs[@]}" "${upstream_ver}" "${revision}"
+printf 'gen_deb_golang.sh: ok packages=%s version=%s:%s-%s\n' \
+  "$(jq -r '.packages|length' "${output}/provenance.json")" "${pkg_epoch}" "${upstream_ver}" "${revision}"

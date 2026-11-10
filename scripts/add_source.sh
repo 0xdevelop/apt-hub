@@ -35,6 +35,8 @@ created_key=0
 created_sources=0
 replaced_key=0
 key_backup_mode=""
+retain_scratch_for_backup=0
+# SIGKILL 不可拦截，不保证该信号下原子回滚；INT/TERM/EXIT 可处理。
 
 die() {
   printf 'add_source.sh: %s\n' "$*" >&2
@@ -60,11 +62,39 @@ is_repo_source_script() {
 # shellcheck disable=SC2317 # EXIT trap 调用
 cleanup() {
   local rc=$?
+  # 仍持锁时处理未提交写入；成功路径不回滚。
+  if [[ "${success}" -ne 1 ]]; then
+    if [[ "${created_sources}" -eq 1 && -n "${sources_path}" && -f "${sources_path}" && ! -L "${sources_path}" ]]; then
+      rm -f -- "${sources_path}"
+      created_sources=0
+    fi
+    if [[ "${replaced_key}" -eq 1 ]]; then
+      if restore_replaced_key; then
+        printf 'add_source.sh: 已恢复旧公钥: %s\n' "${key_path}" >&2
+      else
+        printf 'add_source.sh: 恢复旧公钥失败，备份保留于 %s\n' \
+          "${scratch}/apt-hub.gpg.backup" >&2
+        retain_scratch_for_backup=1
+        if [[ "${rc}" -eq 0 ]]; then
+          rc=1
+        fi
+      fi
+    elif [[ "${created_key}" -eq 1 && -n "${key_path}" && -f "${key_path}" && ! -L "${key_path}" ]]; then
+      rm -f -- "${key_path}"
+      created_key=0
+    fi
+  fi
   if [[ -n "${lock_fd}" ]]; then
     eval "exec ${lock_fd}>&-" 2>/dev/null || true
+    lock_fd=""
   fi
-  if [[ "${scratch_owned}" -eq 1 && -n "${scratch}" && -d "${scratch}" && ! -L "${scratch}" ]]; then
+  if [[ "${retain_scratch_for_backup}" -eq 0 \
+     && "${scratch_owned}" -eq 1 && -n "${scratch}" && -d "${scratch}" && ! -L "${scratch}" ]]; then
     rm -rf -- "${scratch}"
+    scratch_owned=0
+  elif [[ "${retain_scratch_for_backup}" -eq 1 && -n "${scratch}" && -d "${scratch}" && ! -L "${scratch}" ]]; then
+    chmod 0700 -- "${scratch}" 2>/dev/null || true
+    scratch_owned=0
   fi
   if [[ "${success}" -eq 1 ]]; then
     # 仓库 scripts/ 源码不自删；仅 cwd 下下载副本 basename 自删。
@@ -79,6 +109,8 @@ cleanup() {
   exit "${rc}"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 require_cmd() {
   local c
@@ -171,25 +203,135 @@ assert_unique_primary_fingerprint() {
   [[ "${got}" == "${expected}" ]] || die "下载公钥主指纹不符: 实际=${got} 期望=${expected}"
 }
 
-# 共享专用 keyring 的 apt-hub-*.sources 必须同站点。
+# 单 URI 必须精确为 mirror+<site>/repos/<software_id>/mirror.list。
+assert_apt_hub_mirror_uri_same_site() {
+  local uri="$1" site="$2"
+  local prefix="mirror+${site}/repos/"
+  local suffix="/mirror.list"
+  local mid
+  case "${uri}" in
+    "${prefix}"*"${suffix}")
+      mid="${uri#"${prefix}"}"
+      mid="${mid%"${suffix}"}"
+      [[ "${mid}" =~ ${SOFTWARE_ID_RE} ]] || return 1
+      [[ "${uri}" == "${prefix}${mid}${suffix}" ]] || return 1
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# Signed-By 是否引用本脚本专用 keyring（精确路径，防后缀误判）。
+is_apt_hub_signed_by_path() {
+  local p="$1"
+  p="${p#"${p%%[![:space:]]*}"}"
+  p="${p%"${p##*[![:space:]]}"}"
+  if [[ "${p}" == "/etc/apt/keyrings/apt-hub.gpg" ]]; then
+    return 0
+  fi
+  [[ -n "${key_path}" && "${p}" == "${key_path}" ]]
+}
+
+# 共享专用 keyring 的 apt-hub-*.sources：逐 stanza 解析全部 Signed-By/URIs（含续行）。
 assert_shared_key_sources_same_site() {
   local sources_dir="$1" site="$2"
-  local f signed_by uris
+  local f parsed kind val uri
+  local stanza_ours=0
+  local -a stanza_uris=()
   shopt -s nullglob
   for f in "${sources_dir}"/apt-hub-*.sources; do
-    [[ -f "${f}" && ! -L "${f}" ]] || continue
-    signed_by="$(awk -F': ' '$1=="Signed-By"{print $2; exit}' "${f}")"
-    case "${signed_by}" in
-      /etc/apt/keyrings/apt-hub.gpg|*/etc/apt/keyrings/apt-hub.gpg) ;;
-      *) continue ;;
-    esac
-    uris="$(awk -F': ' '$1=="URIs"{print $2; exit}' "${f}")"
-    case "${uris}" in
-      "mirror+${site}/repos/"*/mirror.list) ;;
-      *)
-        die "共享钥的其他源不属于同一站点: ${f}"
-        ;;
-    esac
+    if [[ -L "${f}" ]]; then
+      die "共享源路径是符号链接，拒绝静默跳过: ${f}"
+    fi
+    [[ -f "${f}" ]] || continue
+    parsed="$(awk '
+      function trim(s) {
+        gsub(/^[ \t]+|[ \t]+$/, "", s)
+        return s
+      }
+      function emit_tokens(kind, s, n, a, i) {
+        n = split(s, a, /[ \t]+/)
+        for (i = 1; i <= n; i++) {
+          if (a[i] != "") print kind "\t" a[i]
+        }
+      }
+      function end_field() {
+        # Deb822 字段名大小写不敏感；Signed-By 可含多绝对路径/指纹 token。
+        if (cur == "signed-by") emit_tokens("SB", trim(val))
+        else if (cur == "uris") emit_tokens("URI", trim(val))
+        cur = ""
+        val = ""
+      }
+      function end_stanza() {
+        end_field()
+        print "END"
+      }
+      {
+        sub(/\r$/, "")
+      }
+      /^#/ {
+        # 合法整行注释：跳过且保持当前字段续行状态
+        next
+      }
+      /^[ \t]/ {
+        if (cur != "") {
+          line = $0
+          sub(/^[ \t]+/, "", line)
+          if (val != "") val = val " " line
+          else val = line
+        }
+        next
+      }
+      /^$/ {
+        end_stanza()
+        next
+      }
+      {
+        end_field()
+        idx = index($0, ":")
+        if (idx > 0) {
+          cur = tolower(substr($0, 1, idx - 1))
+          val = substr($0, idx + 1)
+          sub(/^[ \t]+/, "", val)
+        } else {
+          cur = ""
+          val = ""
+        }
+        next
+      }
+      END { end_stanza() }
+    ' "${f}")" || die "解析 sources 失败: ${f}"
+
+    stanza_ours=0
+    stanza_uris=()
+    while IFS=$'\t' read -r kind val || [[ -n "${kind}" ]]; do
+      [[ -n "${kind}" ]] || continue
+      case "${kind}" in
+        SB)
+          if is_apt_hub_signed_by_path "${val}"; then
+            stanza_ours=1
+          fi
+          ;;
+        URI)
+          stanza_uris+=("${val}")
+          ;;
+        END)
+          if [[ "${stanza_ours}" -eq 1 ]]; then
+            if [[ "${#stanza_uris[@]}" -eq 0 ]]; then
+              die "共享钥源缺少 URIs: ${f}"
+            fi
+            for uri in "${stanza_uris[@]}"; do
+              assert_apt_hub_mirror_uri_same_site "${uri}" "${site}" \
+                || die "共享钥的其他源不属于同一站点: ${f}"
+            done
+          fi
+          stanza_ours=0
+          stanza_uris=()
+          ;;
+      esac
+    done <<<"${parsed}"
   done
   shopt -u nullglob
 }
@@ -465,19 +607,7 @@ atomic_install_file() {
   return 0
 }
 
-rollback_created() {
-  local key_path="$1" sources_path="$2"
-  if [[ "${created_sources}" -eq 1 && -f "${sources_path}" && ! -L "${sources_path}" ]]; then
-    rm -f -- "${sources_path}"
-    created_sources=0
-  fi
-  if [[ "${created_key}" -eq 1 && -f "${key_path}" && ! -L "${key_path}" ]]; then
-    rm -f -- "${key_path}"
-    created_key=0
-  fi
-}
-
-# shellcheck disable=SC2317 # 提交失败路径调用
+# shellcheck disable=SC2317 # EXIT/INT/TERM cleanup 与失败路径调用
 restore_replaced_key() {
   if [[ "${replaced_key}" -eq 1 && -n "${scratch}" && -f "${scratch}/apt-hub.gpg.backup" && ! -L "${scratch}/apt-hub.gpg.backup" ]]; then
     if atomic_install_file "${scratch}/apt-hub.gpg.backup" "${key_path}" "${key_backup_mode}"; then
@@ -651,12 +781,42 @@ flock 9 || die "无法取得加源锁"
 # 拿锁后复查，避免协作竞争下路径被替换
 preflight_all_dest_paths "${key_dir}" "${sources_dir}" "${key_path}" "${sources_path}" "${lock_file}"
 
-if [[ -n "${PROJECT_TMP}" ]]; then
-  mkdir -p -- "${PROJECT_TMP}/add-source-fix"
-  scratch="$(mktemp -d -- "${PROJECT_TMP}/add-source-fix/scratch.XXXXXX")"
-else
-  scratch="$(mktemp -d -- "${key_dir}/.apt-hub-scratch.XXXXXX")"
-fi
+# scratch 祖先不得含 symlink；规范化后必须仍在 PROJECT_TMP 或 key_dir 内。
+prepare_owned_scratch() {
+  local parent parent_real root_real scratch_real
+  if [[ -n "${PROJECT_TMP}" ]]; then
+    root_real="$(realpath -e -- "${PROJECT_TMP}")"
+    [[ -d "${root_real}" && ! -L "${PROJECT_TMP}" ]] || die "项目 tmp 非法"
+    assert_no_symlink_components "${root_real}"
+    parent="${PROJECT_TMP}/add-source-run"
+    if [[ -L "${parent}" ]]; then
+      die "scratch 父目录是符号链接: ${parent}"
+    fi
+    if [[ -e "${parent}" ]]; then
+      [[ -d "${parent}" && ! -L "${parent}" ]] || die "scratch 父路径类型非法: ${parent}"
+      assert_no_symlink_components "${parent}"
+    else
+      mkdir -- "${parent}" || die "创建 scratch 父目录失败: ${parent}"
+      chmod 0755 -- "${parent}"
+    fi
+    parent_real="$(realpath -e -- "${parent}")"
+    under_dir "${root_real}" "${parent_real}" || die "scratch 父目录越出项目 tmp"
+    assert_no_symlink_components "${parent_real}"
+    scratch="$(mktemp -d -- "${parent_real}/scratch.XXXXXX")"
+    scratch_real="$(realpath -e -- "${scratch}")"
+    under_dir "${root_real}" "${scratch_real}" || die "scratch 越出项目 tmp"
+    under_dir "${parent_real}" "${scratch_real}" || die "scratch 越出父目录"
+  else
+    root_real="$(realpath -e -- "${key_dir}")"
+    [[ -d "${root_real}" && ! -L "${key_dir}" ]] || die "keyrings 目录非法"
+    assert_no_symlink_components "${root_real}"
+    scratch="$(mktemp -d -- "${root_real}/.apt-hub-scratch.XXXXXX")"
+    scratch_real="$(realpath -e -- "${scratch}")"
+    under_dir "${root_real}" "${scratch_real}" || die "scratch 越出 keyrings"
+  fi
+  scratch="${scratch_real}"
+}
+prepare_owned_scratch
 scratch_owned=1
 chmod 0700 -- "${scratch}"
 
@@ -731,11 +891,12 @@ if [[ -f "${sources_path}" && ! -L "${sources_path}" ]]; then
 fi
 
 if [[ ! -f "${key_path}" ]]; then
+  # 标志先于 rename：TERM 落在 mv 成功后仍可回滚本脚本新建钥
+  created_key=1
   if ! atomic_install_file "${scratch}/final.gpg" "${key_path}" 0644; then
-    rollback_created "${key_path}" "${sources_path}"
+    created_key=0
     die "写入公钥失败"
   fi
-  created_key=1
 elif cmp -s -- "${key_path}" "${scratch}/final.gpg"; then
   :
 elif [[ "${replacing_key}" -eq 1 ]]; then
@@ -743,23 +904,23 @@ elif [[ "${replacing_key}" -eq 1 ]]; then
   [[ "${key_backup_mode}" =~ ^[0-7]{3,4}$ ]] || die "无法读取已有公钥权限"
   cp -f -- "${key_path}" "${scratch}/apt-hub.gpg.backup" || die "备份已有公钥失败"
   chmod -- "${key_backup_mode}" "${scratch}/apt-hub.gpg.backup" || die "备份公钥权限失败"
+  # 标志先于 rename：持锁 cleanup 才能恢复旧钥；不无条件先删备份
+  replaced_key=1
   if ! atomic_install_file "${scratch}/final.gpg" "${key_path}" "${key_backup_mode}"; then
     die "替换公钥失败"
   fi
-  replaced_key=1
 else
   die "已有公钥指纹相同但内容不同，拒绝覆盖"
 fi
 
 if [[ "${sources_missing}" -eq 1 ]] || ! cmp -s -- "${sources_path}" "${scratch}/final.sources"; then
-  if ! atomic_install_file "${scratch}/final.sources" "${sources_path}" 0644; then
-    if [[ "${replaced_key}" -eq 1 ]]; then
-      restore_replaced_key || true
-    fi
-    rollback_created "${key_path}" "${sources_path}"
-    die "写入 sources 失败（已回滚本次写入）"
-  fi
+  # 仅创建缺失 sources；标志先于 rename，避免留下半提交文件
   created_sources=1
+  if ! atomic_install_file "${scratch}/final.sources" "${sources_path}" 0644; then
+    created_sources=0
+    # 未提交事务由 cleanup 持锁恢复；此处不谎报已回滚。
+    die "写入 sources 失败"
+  fi
 fi
 
 printf '已添加: %s\n' "${sources_path}"

@@ -21,6 +21,8 @@ package_repository=""
 go_release_tag=""
 go_downloads_json=""
 rotate_from=""
+acquire_https_ca=""
+github_https_proxy=""
 work=""
 lock_fd=""
 
@@ -31,7 +33,7 @@ die() {
 
 usage() {
   cat >&2 <<'EOF'
-用法: scripts/update_sources.sh --catalog <file> --previous <dir> --work-dir <全新/空目录> --gnupghome <dir> --fingerprint <完整指纹> --site-url <https> [--releases <已生成的官方发行版JSON>] [--package-repository <owner/repo>] [--go-release-tag <apt-hub-go-X.Y.Z-R>] [--go-downloads-json <file>] [--rotate-from <旧完整指纹>]
+用法: scripts/update_sources.sh --catalog <file> --previous <dir> --work-dir <全新/空目录> --gnupghome <dir> --fingerprint <完整指纹> --site-url <https> [--releases <已生成的官方发行版JSON>] [--package-repository <owner/repo>] [--go-release-tag <golang-X.Y.Z-R>] [--go-downloads-json <file>] [--rotate-from <旧完整指纹>] [--acquire-https-ca <pem>] [--github-https-proxy <http://host:port>]
 EOF
   exit 2
 }
@@ -223,6 +225,12 @@ while [[ $# -gt 0 ]]; do
     --rotate-from)
       [[ $# -ge 2 ]] || usage
       rotate_from="$2"; shift 2 ;;
+    --acquire-https-ca)
+      [[ $# -ge 2 ]] || usage
+      acquire_https_ca="$2"; shift 2 ;;
+    --github-https-proxy)
+      [[ $# -ge 2 ]] || usage
+      github_https_proxy="$2"; shift 2 ;;
     -h|--help)
       usage ;;
     *)
@@ -280,9 +288,16 @@ if jq -e '.packages|any((.source_type // "") == "go_official_archive")' "${catal
     ' "${dl_tmp}")"
     rm -f -- "${dl_tmp}"
     [[ "${ver_deb}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "无法从官方索引派生 Go 版本"
-    go_release_tag="apt-hub-go-${ver_deb}-${rev}"
+    go_release_tag="golang-${ver_deb}-${rev}"
     printf 'update_sources.sh: 派生 go-release-tag=%s（仍须上游已上传该 tag）\n' "${go_release_tag}"
   fi
+fi
+if [[ -n "${acquire_https_ca}" ]]; then
+  acquire_https_ca="$(assert_allowed_file acquire-https-ca "${acquire_https_ca}")"
+fi
+if [[ -n "${github_https_proxy}" ]]; then
+  [[ "${github_https_proxy}" =~ ^https?://[^[:space:]]+$ ]] \
+    || die "github-https-proxy 非法: ${github_https_proxy}"
 fi
 
 assert_no_overlap "${work}" "${previous}" "work-dir 与 previous 重叠"
@@ -375,11 +390,15 @@ chmod 0644 -- "${site_dir}/add_source.sh"
 cmp -s -- "${add_src}" "${site_dir}/add_source.sh" || die "add_source.sh 与本次 checkout 不一致"
 [[ "$(stat -c '%a' "${site_dir}/add_source.sh")" == 644 ]] || die "add_source.sh 必须为 0644"
 
-"${SCRIPT_DIR}/verify_ubuntu.sh" \
-  --site "${site_dir}" \
-  --releases "${releases_work}" \
-  --work-dir "${verify_dir}" \
+verify_args=(
+  --site "${site_dir}"
+  --releases "${releases_work}"
+  --work-dir "${verify_dir}"
   --verify-downloads
+)
+[[ -n "${acquire_https_ca}" ]] && verify_args+=(--acquire-https-ca "${acquire_https_ca}")
+[[ -n "${github_https_proxy}" ]] && verify_args+=(--github-https-proxy "${github_https_proxy}")
+"${SCRIPT_DIR}/verify_ubuntu.sh" "${verify_args[@]}"
 
 [[ -f "${verify_dir}/summary.json" && ! -L "${verify_dir}/summary.json" ]] || die "缺少 verify summary.json"
 jq -e '.ok==true' "${verify_dir}/summary.json" >/dev/null || die "verify summary ok!=true"

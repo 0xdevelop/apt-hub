@@ -2,9 +2,9 @@
 
 收集有官方发布下载、但没有官方 Ubuntu APT 源的软件，为其补齐符合 Ubuntu 规则的安装与升级来源。首批目标为 **Go（golang）与 RustDesk**，后续按软件条目和必要的适配脚本接入。
 
-源码仓、数据分支和 Pages 只保存脚本、包信息及签名 APT 元数据。RustDesk 等官方已有 `.deb` 的软件原样核验、官方直下；Go 官方提供 Linux `tar.gz`，由本项目打成真正的 Debian 包并通过本仓 Releases assets 分发，不冒称官方 `.deb`。客户端始终使用标准 APT，不在安装脚本里联网拉取主程序。
+源码仓、数据分支和 Pages 只保存脚本、包信息及签名 APT 元数据。RustDesk 等官方已有 `.deb` 的软件原样核验、官方直下；Go 官方提供 Linux `tar.gz`，由本项目打成真正的 Debian 包并通过本仓 Releases assets 分发，不冒称官方 `.deb`。客户端始终使用标准 APT，不在安装脚本里联网拉取主程序。Go 的安装入口为 `golang`，依赖同版本的 `golang-go` 工具链包；安装后使用普通 `go`、`gofmt` 命令。
 
-> 当前正在从原镜像实现调整为元数据适配层，尚未完成新版验收；请先不要运行旧版发布工作流。软件列表保持真实发布状态。
+> 尚未完成首次生产部署，当前软件列表为空。按下文配置唯一签名私钥与 Pages，待 `ubuntu-publish` 成功后，再使用已生效列表中的加源命令。
 
 维护以 Shell + GitHub Actions 为主，优先复用标准 APT 的索引与下载分流能力；静态页和 README 展示已生效版本。
 
@@ -55,8 +55,10 @@
 在自己的可信电脑、项目根目录执行下列一行命令（需要已有 GnuPG）。只生成本源专用的无口令签名钥，不改系统默认 GnuPG 密钥库：
 
 ```bash
-umask 077 && mkdir -p tmp && key_dir="tmp/apt-hub-signing-$(date -u +%Y%m%dT%H%M%SZ)" && mkdir -m 700 "$key_dir" && gpg --homedir "$key_dir" --batch --pinentry-mode loopback --passphrase '' --quick-generate-key 'apt-hub APT signing' ed25519 sign 0 && fpr=$(gpg --homedir "$key_dir" --batch --with-colons --list-secret-keys | awk -F: '$1=="fpr"{print $10;exit}') && test "${#fpr}" -eq 40 && gpg --homedir "$key_dir" --batch --armor --export-secret-keys "$fpr" >"$key_dir/private-key.asc" && gpg --homedir "$key_dir" --batch --export "$fpr" >"$key_dir/apt-hub.gpg" && printf '%s\n' "$fpr" >"$key_dir/fingerprint.txt" && printf '私钥文件：%s/private-key.asc\n公开指纹：%s\n' "$key_dir" "$fpr"
+umask 077 && mkdir -p tmp && key_dir=$(mktemp -d "$(pwd -P)/tmp/k.XXXXXX") && chmod 700 "$key_dir" && test "$(printf '%s' "$key_dir/S.gpg-agent.browser" | wc -c | tr -d '[:space:]')" -lt 104 && gpg --homedir "$key_dir" --batch --pinentry-mode loopback --passphrase '' --quick-generate-key 'apt-hub APT signing' ed25519 sign 0 && fpr=$(gpg --homedir "$key_dir" --batch --with-colons --list-secret-keys | awk -F: '$1=="fpr"{print $10;exit}') && test "${#fpr}" -eq 40 && gpg --homedir "$key_dir" --batch --armor --export-secret-keys "$fpr" >"$key_dir/private-key.asc" && gpg --homedir "$key_dir" --batch --export "$fpr" >"$key_dir/apt-hub.gpg" && printf '%s\n' "$fpr" >"$key_dir/fingerprint.txt" && gpgconf --homedir "$key_dir" --kill gpg-agent && printf '私钥文件：%s/private-key.asc\n公开指纹：%s\n' "$key_dir" "$fpr"
 ```
+
+这里用短随机目录 `tmp/k.XXXXXX`，避免深层仓库路径使 macOS 的 GnuPG 套接字路径过长。若旧命令出现 `can't connect to the gpg-agent: File name too long`，后续 `No agent running` 是其连带错误；直接改用本命令，不必重装 GnuPG 或修改默认密钥库。命令在生成前检查套接字路径小于 104 字节，若该检查停止，须换到绝对路径更短的项目副本后重试；单独 `cd` 到原目录不能缩短绝对路径。
 
 将 `private-key.asc` **完整内容**（包括 `BEGIN/END PGP PRIVATE KEY BLOCK`）填入仓库 **Settings → Secrets and variables → Actions → New repository secret**，名称为 `APT_HUB_GPG_PRIVATE_KEY`。私钥是明文导出，文件权限为 `0600`：不要贴到聊天、提交 Git 或放进 Pages。离线备份整个专用密钥目录；`tmp/` 不是长期备份位置。公钥与完整指纹可以公开。
 
@@ -88,7 +90,7 @@ E: The repository '<源地址> <Ubuntu代号> InRelease' is not signed.
 site_url='https://packages.example.test/tools' && software='rustdesk' && new_fpr='<维护者公告的新完整指纹>' && curl -fsSL --proto '=https' --proto-redir '=https' -o add_source.sh "$site_url/add_source.sh" && chmod a+x ./add_source.sh && sudo ./add_source.sh --site-url "$site_url" --software "$software" --replace-key "$new_fpr" && sudo apt update
 ```
 
-上述地址和指纹是占位示例，先替换再执行。入口核对新指纹、签名与索引，只修复本源专用 `/etc/apt/keyrings/apt-hub.gpg` 和匹配的 `.sources`，不改其他软件源；失败保留旧配置，成功删除下载副本。共享同一专用公钥的本源软件不用逐一导入公钥。**不要使用 `trusted=yes`、`--allow-unauthenticated`、`apt-key`，也不要删除整个 `/etc/apt/sources.list.d/`。**
+上述地址和指纹是占位示例，先替换再执行。入口核对新指纹、签名与索引，只修复本源专用 `/etc/apt/keyrings/apt-hub.gpg` 和匹配的 `.sources`，不改其他软件源；提交失败时恢复旧公钥，若恢复也失败则报错并保留备份、显示恢复路径，不继续运行 APT。成功后删除下载副本。共享同一专用公钥的本源软件不用逐一导入公钥。**不要使用 `trusted=yes`、`--allow-unauthenticated`、`apt-key`，也不要删除整个 `/etc/apt/sources.list.d/`。**
 
 ## 文档
 
@@ -101,7 +103,7 @@ site_url='https://packages.example.test/tools' && software='rustdesk' && new_fpr
 
 维护侧：软件条目 → 固定本次官方版本与摘要 → 原包核验或独立构包 → 发版、构建并上传 assets、按引用清理冗余 → 校验真实包下载与签名 APT 元数据 → Ubuntu 依赖及升级验证 → 部署 → 回写已生效状态和列表。没有版本变化时复用已确认且不可变的产物；任一步失败，不将候选写成已生效。
 
-使用侧：添加源后执行 `sudo apt update && sudo apt upgrade`；首次安装执行 `sudo apt install <软件包名>`。软件更新遵循 Debian 包版本比较、依赖关系和签名校验，不要求用户另跑专用升级器。没有版本变化时不伪造软件更新时间，签名索引仍定期续期。
+使用侧：添加源后执行 `sudo apt update && sudo apt upgrade`；首次安装 Go 执行 `sudo apt install golang`，RustDesk 执行 `sudo apt install rustdesk`。Go 由 `golang` 入口包依赖同版本 `golang-go`，包版本沿用 Ubuntu 的 `2:` epoch（例如 `2:1.27.3-1`），不能仅比较去掉 epoch 的数字。软件更新遵循 Debian 包版本、依赖关系和签名校验，不要求用户另跑专用升级器。没有版本变化时不伪造软件更新时间，签名索引仍定期续期。
 
 APT 的索引请求与包请求分流：签名索引来自 Pages；RustDesk 原样包来自官方，Go 生成包来自本仓 Releases assets。Git 源码与 `apt-data` 不存大包。清理只处理本项目生成包版本，仍被有效索引引用的 assets 必须保留；官方历史包被上游删除时不承诺兜底，也不静默换用第三方镜像。
 
@@ -114,7 +116,7 @@ APT 的索引请求与包请求分流：签名索引来自 Pages；RustDesk 原�
 ## 版本职责
 
 - **上游软件版本**：从官方发布取得，不手工追写一份 Go 版本文件。
-- **Debian 包修订**：`config/go.json` 的 `revision`，与上游版本组成 `上游版本-修订`；同一包版本不覆盖替换。
+- **Debian 包版本**：`config/go.json` 的 `epoch` 固定为 Ubuntu 兼容的 `2`，`revision` 为打包修订；控制字段组成 `2:上游版本-修订`。同一包版本不覆盖替换，资产文件名和 Release 标签不带 epoch。
 - **维护脚本版本**：沿用根目录 `VERSION` 与 `git_tag.sh`，不再增加并行 `VERSION.txt`；用户执行发版命令才进行对应提交和标签操作，软件日常更新不冒用仓库脚本版本。
 
 ## 非破坏性原则
