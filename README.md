@@ -50,47 +50,43 @@
 
 ## 维护者首次启用与签名密钥
 
-使用自己的公开仓库，启用 Actions，并将 **Settings → Pages → Source** 设为 **GitHub Actions**。只需手动配置一个仓库 Actions **Secret**：`APT_HUB_GPG_PRIVATE_KEY`；不是公开的 Variables。工作流自带的 `GITHUB_TOKEN` 无需另建，站点地址、发布者、公钥和指纹由流程取得。
-
-在自己的可信电脑、项目根目录执行下列一行命令（需要已有 GnuPG）。只生成本源专用的无口令签名钥，不改系统默认 GnuPG 密钥库：
+1. **生成密钥**：在已安装 GnuPG 的可信电脑、项目根目录执行，生成专用无口令签名钥，不改默认密钥库。
 
 ```bash
 umask 077 && mkdir -p tmp && key_dir=$(mktemp -d "$(pwd -P)/tmp/k.XXXXXX") && chmod 700 "$key_dir" && test "$(printf '%s' "$key_dir/S.gpg-agent.browser" | wc -c | tr -d '[:space:]')" -lt 104 && gpg --homedir "$key_dir" --batch --pinentry-mode loopback --passphrase '' --quick-generate-key 'apt-hub APT signing' ed25519 sign 0 && fpr=$(gpg --homedir "$key_dir" --batch --with-colons --list-secret-keys | awk -F: '$1=="fpr"{print $10;exit}') && test "${#fpr}" -eq 40 && gpg --homedir "$key_dir" --batch --armor --export-secret-keys "$fpr" >"$key_dir/private-key.asc" && gpg --homedir "$key_dir" --batch --export "$fpr" >"$key_dir/apt-hub.gpg" && printf '%s\n' "$fpr" >"$key_dir/fingerprint.txt" && gpgconf --homedir "$key_dir" --kill gpg-agent && printf '私钥文件：%s/private-key.asc\n公开指纹：%s\n' "$key_dir" "$fpr"
 ```
 
-这里用短随机目录 `tmp/k.XXXXXX`，避免深层仓库路径使 macOS 的 GnuPG 套接字路径过长。若旧命令出现 `can't connect to the gpg-agent: File name too long`，后续 `No agent running` 是其连带错误；直接改用本命令，不必重装 GnuPG 或修改默认密钥库。命令在生成前检查套接字路径小于 104 字节，若该检查停止，须换到绝对路径更短的项目副本后重试；单独 `cd` 到原目录不能缩短绝对路径。
+若路径长度检查未通过或 GnuPG 报 `File name too long`，换到绝对路径更短的项目副本重试。
 
-将 `private-key.asc` **完整内容**（包括 `BEGIN/END PGP PRIVATE KEY BLOCK`）填入仓库 **Settings → Secrets and variables → Actions → New repository secret**，名称为 `APT_HUB_GPG_PRIVATE_KEY`。私钥是明文导出，文件权限为 `0600`：不要贴到聊天、提交 Git 或放进 Pages。离线备份整个专用密钥目录；`tmp/` 不是长期备份位置。公钥与完整指纹可以公开。
+2. **保存私钥**：仓库 **Settings → Secrets and variables → Actions → New repository secret**，名称填 `APT_HUB_GPG_PRIVATE_KEY`，值填 `private-key.asc` **完整内容（含首尾标记）**，不是 Variables。离线备份整个密钥目录，不将私钥发到聊天或提交 Git；`tmp/` 不是备份位置。
+3. **启用 Pages**：**Settings → Pages → Source → GitHub Actions**。只需上述一个 Secret；公钥和指纹随源公开，`GITHUB_TOKEN` 由 Actions 自带。
+4. **发布**：触发 `ubuntu-publish`，首次 `rotate_from` 留空。部署成功后再用已生效列表中的加源命令；CI 通过不代表源已上线。
 
-配置后手动运行 Actions 的 `ubuntu-publish`；成功部署并出现已生效列表后再添加源。没有生产密钥时 CI 测试仍可通过，但不代表公网源已上线。
+### 私钥丢失或泄露
 
-### 私钥丢失或泄露后的维护者处理
+- 仅丢失本地文件且有备份：恢复原钥，无需使用者换钥。
+- 原钥无法恢复或疑似泄露：生成新钥，更新同一个 Secret；疑似泄露时先暂停发布并公告，有撤销证书则一并发布。
 
-- **只丢失本地文件**：若离线备份仍在，恢复原密钥即可，使用者不需要换钥；若原签名钥已无法恢复，再生成新钥。
-- **私钥可能泄露**：立即撤销旧 Secret、暂停发布并公告换钥；有撤销证书时同时发布旧钥撤销信息。不能只换一个 Secret 就声称旧钥已不再被所有客户端信任，使用者还要替换本源公钥。
+换钥发布时，`rotate_from` 填**旧完整指纹**。流程用已发布旧公钥校验原索引，无需旧私钥，也不删除 `apt-data`。成功后通过独立可信渠道公告**新完整指纹**，使用者按下节修复。
 
-用上面的命令生成另一套新钥，保存旧完整指纹，并更新同一个 `APT_HUB_GPG_PRIVATE_KEY` Secret。在 `ubuntu-publish` 的手动运行页面，将 `rotate_from` 填为旧的完整指纹。流程使用已发布旧公钥校验既有元数据，再以新钥签名，不需要旧私钥，也不删除 `apt-data`。发布成功后，从独立可信渠道公告**新完整指纹**；不要让使用者只信下载站点自己显示的短 Key ID。
+### 使用者换钥修复
 
-### 使用者可能看到的报错与修复
-
-下面是错误形态示例，尖括号内容是占位符，不是实际密钥：
+常见报错片段（尖括号为占位符）：
 
 ```text
-The following signatures couldn't be verified because the public key is not available: NO_PUBKEY <新钥的Key-ID>
-The following signatures were invalid: EXPKEYSIG <旧钥的Key-ID> <签名身份>
-E: The repository '<源地址> <Ubuntu代号> InRelease' is not signed.
-拒绝静默换钥/跨站点同名钥冲突: 已有=<旧完整指纹> 下载=<新完整指纹>
+NO_PUBKEY <新钥的Key-ID>
+EXPKEYSIG <旧钥的Key-ID> <签名身份>
 ```
 
-`NO_PUBKEY` 常见于维护者已换钥而本机仍装旧公钥；`EXPKEYSIG` 表示签名钥已过期，不能直接当成一次正常轮换。`BADSIG`、摘要不符或指纹与维护者公告不一致时先停止，不用关闭验签来“修复”。
+`NO_PUBKEY` 表示缺公钥，`EXPKEYSIG` 表示钥已过期；须确认维护者已换钥再修复。`BADSIG`、摘要不符或指纹不符应停止，不关闭验签。
 
-确认维护者通过独立可信渠道公布的新完整指纹后，填写下面三个值。`site_url` 是已上线的真实 Pages 根地址，`software` 是已添加的软件标识（如 `rustdesk` 或 `golang`），`new_fpr` 必须是公告中的 **40 位完整十六进制指纹**：
+将下列占位值替换为真实站点根地址、已添加的软件标识（如 `rustdesk` 或 `golang`），以及维护者通过独立可信渠道公告的 **40 位新完整指纹**：
 
 ```bash
 site_url='https://packages.example.test/tools' && software='rustdesk' && new_fpr='<维护者公告的新完整指纹>' && curl -fsSL --proto '=https' --proto-redir '=https' -o add_source.sh "$site_url/add_source.sh" && chmod a+x ./add_source.sh && sudo ./add_source.sh --site-url "$site_url" --software "$software" --replace-key "$new_fpr" && sudo apt update
 ```
 
-上述地址和指纹是占位示例，先替换再执行。入口核对新指纹、签名与索引，只修复本源专用 `/etc/apt/keyrings/apt-hub.gpg` 和匹配的 `.sources`，不改其他软件源；提交失败时恢复旧公钥，若恢复也失败则报错并保留备份、显示恢复路径，不继续运行 APT。成功后删除下载副本。共享同一专用公钥的本源软件不用逐一导入公钥。**不要使用 `trusted=yes`、`--allow-unauthenticated`、`apt-key`，也不要删除整个 `/etc/apt/sources.list.d/`。**
+只替换本源专用公钥和匹配的 `.sources`，不改其他源；失败回滚，回滚失败则保留备份并显示恢复路径。成功后删除下载副本。共享该公钥的本源软件无需重复导入。
 
 ## 文档
 
@@ -117,7 +113,7 @@ APT 的索引请求与包请求分流：签名索引来自 Pages；RustDesk 原�
 
 - **上游软件版本**：从官方发布取得，不手工追写一份 Go 版本文件。
 - **Debian 包版本**：`config/go.json` 的 `epoch` 固定为 Ubuntu 兼容的 `2`，`revision` 为打包修订；控制字段组成 `2:上游版本-修订`。同一包版本不覆盖替换，资产文件名和 Release 标签不带 epoch。
-- **维护脚本版本**：沿用根目录 `VERSION` 与 `git_tag.sh`，不再增加并行 `VERSION.txt`；用户执行发版命令才进行对应提交和标签操作，软件日常更新不冒用仓库脚本版本。
+- **维护脚本版本**：根 `VERSION` 写 `X.Y.Z`，Git 标签为 `vX.Y.Z`。`git_tag.sh auto` 每次末段加 1，超过 `999` 向前进位（如 `0.0.999 → 0.1.0`）；当前 `0.1.0` 不回退。此版本与软件包版本独立，日常接源更新不升脚本版本。
 
 ## 非破坏性原则
 
