@@ -60,18 +60,34 @@ jobs:
             rm -f tmp/pages-api.json
             exit 1
           fi
-          site_url=$(jq -r '.html_url // empty' tmp/pages-api.json)
+          html_type=$(jq -r '.html_url | type' tmp/pages-api.json)
+          if [[ "${html_type}" != "string" ]]; then
+            echo "Pages html_url 不是字符串" >&2
+            rm -f tmp/pages-api.json
+            exit 1
+          fi
+          site_url=$(jq -r '.html_url' tmp/pages-api.json)
           rm -f tmp/pages-api.json
-          [[ -n "$site_url" ]] || { echo "Pages API 未返回 html_url" >&2; exit 1; }
-          site_url=${site_url%/}
-          case "$site_url" in
-            https://*) ;;
-            *)
-              echo "Pages html_url 不是 https: $site_url" >&2
+          [[ -n "${site_url}" ]] || { echo "Pages API 未返回 html_url" >&2; exit 1; }
+          case "${site_url}" in
+            *$'\n'*|*$'\r'*)
+              echo "Pages html_url 含换行，拒绝" >&2
               exit 1
               ;;
           esac
-          echo "site_url=${site_url}" >>"$GITHUB_OUTPUT"
+          site_url=${site_url%/}
+          case "${site_url}" in
+            http://*) site_url="https://${site_url#http://}" ;;
+            https://*) ;;
+            *)
+              echo "Pages html_url 协议非法: ${site_url}" >&2
+              exit 1
+              ;;
+          esac
+          # 与 add_source/sync 的 site-url 语法相同；通过后才写单行 output。
+          site_url_re='^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]+)?(/[A-Za-z0-9._~/-]*)?$'
+          [[ "${site_url}" =~ ${site_url_re} ]] || { echo "Pages site_url 非法: ${site_url}" >&2; exit 1; }
+          printf 'site_url=%s\n' "${site_url}" >>"$GITHUB_OUTPUT"
           echo "已读取 Pages URL（只读 API，未改设置）"
 
       - name: 解析发布者命令级身份

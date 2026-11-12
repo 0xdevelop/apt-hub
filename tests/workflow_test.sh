@@ -720,6 +720,124 @@ else
   fail "跳过 Go 步骤 bash -n：无抽取脚本"
 fi
 
+# ---------- Pages html_url：抽取真实 preflight；API 夹具，不是公网部署 ----------
+PAGES_SCRIPT="${EVIDENCE}/runs/pages-preflight.sh"
+set +e
+extract_step_run preflight '检查签名 secret 与 Pages URL' "${PAGES_SCRIPT}" \
+  >"${EVIDENCE}/runs/pages-extract.log" 2>&1
+pages_extract_rc=$?
+set -e
+if [[ "${pages_extract_rc}" -eq 0 && -s "${PAGES_SCRIPT}" ]]; then
+  pass "抽取 Pages preflight run"
+else
+  fail "抽取 Pages preflight run rc=${pages_extract_rc}"
+fi
+
+cat >"${EVIDENCE}/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+# 仅应答 Pages API 夹具；拒绝其它 URL。
+set -euo pipefail
+out=""
+write_code=0
+url=""
+args=("$@")
+i=0
+while [[ "${i}" -lt ${#args[@]} ]]; do
+  a="${args[$i]}"
+  case "${a}" in
+    -o)
+      i=$((i + 1))
+      out="${args[$i]}"
+      ;;
+    -w)
+      i=$((i + 1))
+      ;;
+    http://*|https://*)
+      url="${a}"
+      ;;
+  esac
+  i=$((i + 1))
+done
+case "${url}" in
+  https://api.github.com/repos/*/pages) ;;
+  *)
+    echo "curl shim 拒绝非 Pages API: ${url}" >&2
+    exit 2
+    ;;
+esac
+if [[ -n "${out}" ]]; then
+  printf '%s' "${APT_HUB_PAGES_BODY-}" >"${out}"
+fi
+printf '%s' "${APT_HUB_PAGES_CODE:-200}"
+EOF
+chmod a+x -- "${EVIDENCE}/bin/curl"
+
+run_pages_preflight() {
+  local name="$1" want="$2" code="$3" body="$4" secret="$5" expect_url="${6:-}"
+  local dir="${EVIDENCE}/runs/pages-${name}"
+  mkdir -p -- "${dir}/sandbox"
+  : >"${dir}/github_output"
+  set +e
+  (
+    cd -- "${dir}/sandbox"
+    env \
+      PATH="${EVIDENCE}/bin:${PATH}" \
+      GITHUB_OUTPUT="${dir}/github_output" \
+      GITHUB_REPOSITORY="0xdevelop/apt-hub" \
+      GH_TOKEN="fixture-token" \
+      APT_HUB_GPG_PRIVATE_KEY="${secret}" \
+      APT_HUB_PAGES_CODE="${code}" \
+      APT_HUB_PAGES_BODY="${body}" \
+      bash "${PAGES_SCRIPT}" >"${dir}/run.log" 2>&1
+    echo "$?" >"${dir}/rc"
+  )
+  set -e
+  expect_rc "pages_${name}" "${dir}/rc" "${want}"
+  if [[ "${want}" -eq 0 ]]; then
+    if grep -Fxq -- "site_url=${expect_url}" "${dir}/github_output"; then
+      pass "pages_${name} site_url=${expect_url}"
+    else
+      fail "pages_${name} site_url 不符 got=$(tr '\n' '|' <"${dir}/github_output")"
+    fi
+  elif grep -q '^site_url=' "${dir}/github_output"; then
+    fail "pages_${name} 拒绝后仍写出 site_url"
+  else
+    pass "pages_${name} 未写出 site_url"
+  fi
+}
+
+if [[ "${pages_extract_rc}" -eq 0 && -s "${PAGES_SCRIPT}" ]]; then
+  http_body="$(jq -n --arg u 'http://0xdevelop.m-b-crazy.com' '{html_url:$u}')"
+  http_slash_body="$(jq -n --arg u 'http://0xdevelop.m-b-crazy.com/' '{html_url:$u}')"
+  https_path_body="$(jq -n --arg u 'https://0xdevelop.github.io/apt-hub/' '{html_url:$u}')"
+  http_port_body="$(jq -n --arg u 'http://example.test:8443/team/site/' '{html_url:$u}')"
+  empty_body="$(jq -n --arg u '' '{html_url:$u}')"
+  null_body='{"html_url":null}'
+  obj_body='{"html_url":{"u":"http://evil.example"}}'
+  ftp_body="$(jq -n --arg u 'ftp://example.test/x' '{html_url:$u}')"
+  nl_body="$(jq -n --arg u $'https://example.test\nsite_url=https://evil.example' '{html_url:$u}')"
+  err_body='{"message":"no"}'
+  run_pages_preflight http_custom 0 200 "${http_body}" 'fixture-secret' \
+    'https://0xdevelop.m-b-crazy.com'
+  run_pages_preflight http_trailing_slash 0 200 "${http_slash_body}" 'fixture-secret' \
+    'https://0xdevelop.m-b-crazy.com'
+  run_pages_preflight https_with_path 0 200 "${https_path_body}" 'fixture-secret' \
+    'https://0xdevelop.github.io/apt-hub'
+  run_pages_preflight http_port_path 0 200 "${http_port_body}" 'fixture-secret' \
+    'https://example.test:8443/team/site'
+  run_pages_preflight api_403 1 403 "${err_body}" 'fixture-secret'
+  run_pages_preflight api_404 1 404 "${err_body}" 'fixture-secret'
+  run_pages_preflight api_500 1 500 "${err_body}" 'fixture-secret'
+  run_pages_preflight empty_url 1 200 "${empty_body}" 'fixture-secret'
+  run_pages_preflight null_url 1 200 "${null_body}" 'fixture-secret'
+  run_pages_preflight nonstring_url 1 200 "${obj_body}" 'fixture-secret'
+  run_pages_preflight ftp_url 1 200 "${ftp_body}" 'fixture-secret'
+  run_pages_preflight newline_url 1 200 "${nl_body}" 'fixture-secret'
+  run_pages_preflight empty_secret 1 200 "${http_body}" ''
+else
+  fail "跳过 Pages 行为：无抽取脚本"
+fi
+
 # ---------- 可移植性与隔离验收 ----------
 # needle 拼接，避免源码自带探测字面量。
 _dep_yaml='Bun.''YAML.parse'
