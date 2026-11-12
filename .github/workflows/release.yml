@@ -89,7 +89,7 @@ jobs:
           cp -a -- "${downloads_json}" tmp/go-downloads.json
 
       - name: 上传冻结索引
-        uses: actions/upload-artifact@ea165f8effb378b5dd3ba8efd859910f14fbf599 # v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: go-downloads-json
           path: tmp/go-downloads.json

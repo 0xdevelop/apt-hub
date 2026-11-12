@@ -61,7 +61,7 @@ bash tests/sync_test.sh && bash tests/render_test.sh && bash tests/workflow_test
 bash git_tag.sh auto
 ```
 
-需要指定版本时用 `bash git_tag.sh custom`；`bash git_tag.sh --version 0.1.0` 仅在 `VERSION` 已等于该号且工作区干净时创建标签并推送，不改版本文件。入口不移动 `latest`、不重写已有标签。软件源日常更新不调用它，本地验收只在隔离 Git 仓库运行，不在主仓发版。
+需要指定版本时用 `bash git_tag.sh custom`；首次发布输入 `0.0.1`。`bash git_tag.sh --version 0.0.1` 仅在 `VERSION` 已等于该号且工作区干净时创建标签并推送，不改版本文件。入口不移动 `latest`、不重写已有标签。软件源日常更新不调用它；本地验收只在隔离 Git 仓库运行，真实发版须经用户明确授权。
 
 ## 上游与历史索引
 
