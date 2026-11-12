@@ -1,0 +1,6 @@
+Types: deb
+URIs: mirror+https://0xdevelop.m-b-crazy.com/repos/rustdesk/mirror.list
+Suites: noble
+Components: main
+Signed-By: /etc/apt/keyrings/apt-hub.gpg
+Architectures: amd64 arm64

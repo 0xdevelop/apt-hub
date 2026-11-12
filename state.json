@@ -1,0 +1,130 @@
+{
+  "schema_version": "2",
+  "packages": [
+    {
+      "id": "golang",
+      "package": "golang",
+      "repository": "golang/go",
+      "package_repository": "0xdevelop/apt-hub",
+      "description": "Go 官方 Linux 归档构建的工具链",
+      "version": "2:1.27.4-1",
+      "release_url": "https://github.com/0xdevelop/apt-hub/releases/tag/golang-1.27.4-1",
+      "source_url": "https://go.dev",
+      "license": "BSD-3-Clause",
+      "updated_at": "2026-11-12T08:43:49Z",
+      "apt_source_uri": "mirror+https://0xdevelop.m-b-crazy.com/repos/golang/mirror.list",
+      "source_type": "go_official_archive",
+      "release_tag": "golang-1.27.4-1",
+      "upstream": {
+        "version": "go1.27.4",
+        "version_debian": "1.27.4",
+        "revision": "1",
+        "epoch": "2"
+      },
+      "ubuntu_series": [
+        "jammy",
+        "noble",
+        "resolute",
+        "stonking"
+      ],
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "assets": [
+        {
+          "package": "golang",
+          "architecture": "amd64",
+          "filename": "0xdevelop/apt-hub/releases/download/golang-1.27.4-1/golang_1.27.4-1_amd64.deb",
+          "sha256": "52e0884d27c30cd6ec34208f46261ff1e201286ec79b105dbcc8f457218f992c",
+          "size": "1554",
+          "url": "https://github.com/0xdevelop/apt-hub/releases/download/golang-1.27.4-1/golang_1.27.4-1_amd64.deb",
+          "upstream": {
+            "url": "https://go.dev/dl/go1.27.4.linux-amd64.tar.gz",
+            "sha256": "7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840",
+            "size": "70680823"
+          }
+        },
+        {
+          "package": "golang",
+          "architecture": "arm64",
+          "filename": "0xdevelop/apt-hub/releases/download/golang-1.27.4-1/golang_1.27.4-1_arm64.deb",
+          "sha256": "0fa88cc2f4a5516415223602bc2b0542722b2790d43584fd8f12c8ec7802bcc7",
+          "size": "1554",
+          "url": "https://github.com/0xdevelop/apt-hub/releases/download/golang-1.27.4-1/golang_1.27.4-1_arm64.deb",
+          "upstream": {
+            "url": "https://go.dev/dl/go1.27.4.linux-arm64.tar.gz",
+            "sha256": "3392582988a273a87ab5043ee1b2c9c17a2c3c00580bf9326c47a2e0aaaeac92",
+            "size": "67129258"
+          }
+        },
+        {
+          "package": "golang-go",
+          "architecture": "amd64",
+          "filename": "0xdevelop/apt-hub/releases/download/golang-1.27.4-1/golang-go_1.27.4-1_amd64.deb",
+          "sha256": "8fb6845e14180c498210c0a2eaf87cbdf70b9b603dbe3a5e1b6abc5c737139d4",
+          "size": "69931570",
+          "url": "https://github.com/0xdevelop/apt-hub/releases/download/golang-1.27.4-1/golang-go_1.27.4-1_amd64.deb",
+          "upstream": {
+            "url": "https://go.dev/dl/go1.27.4.linux-amd64.tar.gz",
+            "sha256": "7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840",
+            "size": "70680823"
+          }
+        },
+        {
+          "package": "golang-go",
+          "architecture": "arm64",
+          "filename": "0xdevelop/apt-hub/releases/download/golang-1.27.4-1/golang-go_1.27.4-1_arm64.deb",
+          "sha256": "00ec5bd67e889a5634b35f899d74f7771e0f517946815148bc4091a8f2b376fd",
+          "size": "66328618",
+          "url": "https://github.com/0xdevelop/apt-hub/releases/download/golang-1.27.4-1/golang-go_1.27.4-1_arm64.deb",
+          "upstream": {
+            "url": "https://go.dev/dl/go1.27.4.linux-arm64.tar.gz",
+            "sha256": "3392582988a273a87ab5043ee1b2c9c17a2c3c00580bf9326c47a2e0aaaeac92",
+            "size": "67129258"
+          }
+        }
+      ]
+    },
+    {
+      "id": "rustdesk",
+      "package": "rustdesk",
+      "repository": "rustdesk/rustdesk",
+      "description": "开源远程桌面",
+      "version": "1.5.3",
+      "release_url": "https://github.com/rustdesk/rustdesk/releases/tag/1.5.3",
+      "source_url": "https://github.com/rustdesk/rustdesk/tree/1.5.3",
+      "license": "AGPL-3.0",
+      "updated_at": "2026-11-12T08:43:49Z",
+      "apt_source_uri": "mirror+https://0xdevelop.m-b-crazy.com/repos/rustdesk/mirror.list",
+      "ubuntu_series": [
+        "jammy",
+        "noble",
+        "resolute",
+        "stonking"
+      ],
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "assets": [
+        {
+          "package": "rustdesk",
+          "architecture": "amd64",
+          "filename": "rustdesk/rustdesk/releases/download/1.5.3/rustdesk-1.5.3-x86_64.deb",
+          "sha256": "81096d2f65fd43352540c351bca15bb0712a2a6f9efa4c95e9fff25cb97b3b81",
+          "size": "25345980",
+          "url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.3/rustdesk-1.5.3-x86_64.deb"
+        },
+        {
+          "package": "rustdesk",
+          "architecture": "arm64",
+          "filename": "rustdesk/rustdesk/releases/download/1.5.3/rustdesk-1.5.3-aarch64.deb",
+          "sha256": "fa85e8d3ccd45e2e303c2d1359af5dc51aa93d880e39ba47c9b04bfabd82ae19",
+          "size": "23625528",
+          "url": "https://github.com/rustdesk/rustdesk/releases/download/1.5.3/rustdesk-1.5.3-aarch64.deb"
+        }
+      ]
+    }
+  ]
+}

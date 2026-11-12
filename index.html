@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>apt-hub</title>
+<style>
+body{font-family:sans-serif;margin:1.5rem;line-height:1.5;color:#111}
+table{border-collapse:collapse}
+th,td{border:1px solid #ccc;padding:0.4rem 0.6rem;text-align:left}
+code{white-space:pre-wrap;overflow-wrap:anywhere}
+</style>
+</head>
+<body>
+<h1>apt-hub</h1>
+<p>已生效软件版本、最后更新时间、简单说明与添加源配置入口。本页为静态展示。</p>
+<table>
+<thead><tr><th>软件</th><th>版本</th><th>Ubuntu</th><th>架构</th><th>最后更新UTC</th><th>简单说明</th><th>添加源配置</th><th>一键加源</th></tr></thead>
+<tbody>
+<tr><td><a href="https://github.com/0xdevelop/apt-hub/releases/tag/golang-1.27.4-1">golang</a></td><td>2:1.27.4-1</td><td>jammy, noble, resolute, stonking</td><td>amd64, arm64</td><td>2026-11-12T08:43:49Z</td><td>Go 官方 Linux 归档构建的工具链</td><td><a href="https://0xdevelop.m-b-crazy.com/repos/golang/jammy.sources">jammy</a> / <a href="https://0xdevelop.m-b-crazy.com/repos/golang/noble.sources">noble</a> / <a href="https://0xdevelop.m-b-crazy.com/repos/golang/resolute.sources">resolute</a> / <a href="https://0xdevelop.m-b-crazy.com/repos/golang/stonking.sources">stonking</a></td><td><code>curl -fsSL --proto &#39;=https&#39; --proto-redir &#39;=https&#39; -o add_source.sh &#39;https://0xdevelop.m-b-crazy.com/add_source.sh&#39; &amp;&amp; chmod a+x ./add_source.sh &amp;&amp; sudo ./add_source.sh --site-url &#39;https://0xdevelop.m-b-crazy.com&#39; --software &#39;golang&#39;</code></td></tr>
+<tr><td><a href="https://github.com/rustdesk/rustdesk/releases/tag/1.5.3">rustdesk</a></td><td>1.5.3</td><td>jammy, noble, resolute, stonking</td><td>amd64, arm64</td><td>2026-11-12T08:43:49Z</td><td>开源远程桌面</td><td><a href="https://0xdevelop.m-b-crazy.com/repos/rustdesk/jammy.sources">jammy</a> / <a href="https://0xdevelop.m-b-crazy.com/repos/rustdesk/noble.sources">noble</a> / <a href="https://0xdevelop.m-b-crazy.com/repos/rustdesk/resolute.sources">resolute</a> / <a href="https://0xdevelop.m-b-crazy.com/repos/rustdesk/stonking.sources">stonking</a></td><td><code>curl -fsSL --proto &#39;=https&#39; --proto-redir &#39;=https&#39; -o add_source.sh &#39;https://0xdevelop.m-b-crazy.com/add_source.sh&#39; &amp;&amp; chmod a+x ./add_source.sh &amp;&amp; sudo ./add_source.sh --site-url &#39;https://0xdevelop.m-b-crazy.com&#39; --software &#39;rustdesk&#39;</code></td></tr>
+</tbody>
+</table>
+
+</body>
+</html>
+

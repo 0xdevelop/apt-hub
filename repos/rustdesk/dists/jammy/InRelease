@@ -1,0 +1,24 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Acquire-By-Hash: yes
+Architectures: amd64 arm64
+Codename: jammy
+Components: main
+Date: Thu, 12 Nov 2026 08:43:51 +0000
+Label: apt-hub
+Origin: apt-hub
+Suite: jammy
+Valid-Until: Thu, 26 Nov 2026 08:43:51 +0000
+SHA256:
+ cd73027cf51ed597197d4545d2e8a2231c076e8a42102ae047bafc8e71ddbf64              652 main/binary-amd64/Packages
+ 792168b923563b82ea5686021290e8669c702cc8fece454a17539c5e6bedeb39              413 main/binary-amd64/Packages.gz
+ 1c1cf6698b0ae9f9509a624c711612118d75c793f0d9a4cae42c5d385b50a374              653 main/binary-arm64/Packages
+ 548df5346a11bb4358c41b1785ee2a6dcef5e29f838caccd8df3e6aef873aa27              410 main/binary-arm64/Packages.gz
+-----BEGIN PGP SIGNATURE-----
+
+iHUEARYKAB0WIQRbXv4gXjqovXW/tXIyLsbFU1aH2wUCavV8RwAKCRAyLsbFU1aH
+2/nSAQCCeAuwn2AbwfjyVBN+FUiKgRT57fDcS7Nzn8hNrtLjpAD/Z7mqSzlKaIBE
+CANkj8kfV4sl4/rr+MQIte29/uSEjQs=
+=ZED0
+-----END PGP SIGNATURE-----

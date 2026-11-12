@@ -1,0 +1,24 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Acquire-By-Hash: yes
+Architectures: amd64 arm64
+Codename: noble
+Components: main
+Date: Thu, 12 Nov 2026 08:43:55 +0000
+Label: apt-hub
+Origin: apt-hub
+Suite: noble
+Valid-Until: Thu, 26 Nov 2026 08:43:55 +0000
+SHA256:
+ 6f4f819698449e7713531a7bb9be0d8bf157b3dba64ee33e3c386f2986d6e313              955 main/binary-amd64/Packages
+ 35efc9424f00a919dc1461f04a50b8373f7ec6d672cf5b2977e4d4090380c940              466 main/binary-amd64/Packages.gz
+ 38c3840d03aef360fa1bb01063e534d73060357f8775837de696f3c45a18bd41              955 main/binary-arm64/Packages
+ 963bd08ca42ce7e479bc0b4f8d5d93a89a22798ac8d86e6be0376156f9aa59a5              466 main/binary-arm64/Packages.gz
+-----BEGIN PGP SIGNATURE-----
+
+iHUEARYKAB0WIQRbXv4gXjqovXW/tXIyLsbFU1aH2wUCavV8SwAKCRAyLsbFU1aH
+2+LIAQCn0w4T2el0j2oNR5d5zaJ/nfSg2qKNq4OYf8rMs8G+qwEA4fpsOdFtjYUE
+Xr4L88munLe/bP1XoAgWXqjVKyBDAQc=
+=zxtt
+-----END PGP SIGNATURE-----
