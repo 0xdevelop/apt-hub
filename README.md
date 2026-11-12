@@ -4,7 +4,7 @@
 
 源码仓、数据分支和 Pages 只保存脚本、包信息及签名 APT 元数据。RustDesk 等官方已有 `.deb` 的软件原样核验、官方直下；Go 官方提供 Linux `tar.gz`，由本项目打成真正的 Debian 包并通过本仓 Releases assets 分发，不冒称官方 `.deb`。客户端始终使用标准 APT，不在安装脚本里联网拉取主程序。Go 的安装入口为 `golang`，依赖同版本的 `golang-go` 工具链包；安装后使用普通 `go`、`gofmt` 命令。
 
-> 尚未完成首次生产部署，当前软件列表为空。按下文配置唯一签名私钥与 Pages，待 `ubuntu-publish` 成功后，再使用已生效列表中的加源命令。
+> 软件列表只在签名元数据部署成功后更新。使用下表中对应的一键加源命令，此后按标准 APT 安装和升级。
 
 维护以 Shell + GitHub Actions 为主，优先复用标准 APT 的索引与下载分流能力；静态页和 README 展示已生效版本。
 
@@ -21,7 +21,7 @@
 
 ## 新增其他软件
 
-首批目标仍是 **Go 与 RustDesk**，不预先接入其他软件。官方已有 `.deb` 的条目复用下方模板；Go 由独立 `gen_deb_golang.sh` 核对官方归档后构包，`build.sh` 以扩展方式调用，双架构 `.deb`、摘要和来源记录作为本仓 Release assets。Go 包与官方原始归档分别记录摘要、大小与出处，只有完整构建、上传和索引验证成功后才列为已生效。
+首批目标仍是 **Go 与 RustDesk**，不预先接入其他软件。`build.sh` 调用统一入口 `gen_debs.sh`，按软件清单发现和核验官方发布；需要转换格式的软件由 `scripts/` 中的具体脚本构包。自己生成的 `.deb`、来源记录和摘要直接归入对应本仓 `vX.Y.Z` Release assets，不另建软件专用 Release。官方已有 `.deb` 的软件仍从官方地址下载，不转存。
 
 以后接入同类 `.deb` 软件，将下面的对象复制到 `config/packages.json` 的 `packages` 数组中，填写真实官方信息并保留已有条目，无需再复制一套同步脚本：
 
@@ -46,10 +46,10 @@
 1. `id` 是唯一源标识，以 ASCII 字母或数字开头，只含字母、数字、`_`、`.`、`-`，不能含 `..`；`package` 必须等于官方包内的 `Package`。
 2. `repository` 必须是软件官方仓库。每个架构的正则须恰好匹配一个正式版本 `.deb`，且官方资产提供 SHA256 digest；缺摘要或匹配不唯一时拒绝发布，不自行补一个“官方摘要”。只填写上游实际提供的架构。
 3. `ubuntu_series` 可用 `"supported"`，也可按上游限制填写当前标准支持期内的代号数组；发布前仍逐项验证依赖。版本、文件大小和摘要由脚本读取，不手填、不把预发布版本当稳定版。
-4. 提交条目后，在自己的仓库手动运行 Actions 的 `ubuntu-publish`，或等待定时执行。维护侧共用 `scripts/update_sources.sh`，一次完成同步、验证和列表生成；本地显式参数示例见[维护说明](docs/maintenance.md#一条命令检查并更新候选)，生产签名与 Pages 的启用见[首次启用](docs/nees_user_read.md)。
+4. 提交条目后，通过 `bash git_tag.sh auto` 自动升级本仓版本并触发 `Release_Build`。同一条链运行 `build.sh → gen_debs.sh`，构建、上传该版本 assets，再验证签名源、部署 Pages 并回写列表。官方原包的后续检查与索引续签由同一工作流定时维护，不再维护另一条 Go 专用发布链。
 5. 只有部署成功，软件才进入上面的已生效列表；使用者复制对应的“一键加源”命令，此后按普通 APT 安装、升级。
 
-只有归档包的上游需要像 Go 一样增加独立构包脚本，由 `build.sh` 扩展调用，再将真实 Debian 包、摘要与来源记录接入同一发布链。不能把归档改后缀冒充 `.deb`，也不在客户端安装脚本中临时下载主程序。
+只有归档包的上游需要在 `scripts/` 增加具体构包处理，并接入 `gen_debs.sh` 的清单流程。`build.sh` 汇集最终交付文件，三段式工作流直接上传到该本仓版本；不复制另一套发布、缓存搬运或旧版清理流程。不能把归档改后缀冒充 `.deb`，也不在客户端安装脚本中临时下载主程序。
 
 ## 维护者首次启用与签名密钥
 
@@ -62,8 +62,8 @@ umask 077 && mkdir -p tmp && key_dir=$(mktemp -d "$(pwd -P)/tmp/k.XXXXXX") && ch
 若路径长度检查未通过或 GnuPG 报 `File name too long`，换到绝对路径更短的项目副本重试。
 
 2. **保存私钥**：仓库 **Settings → Secrets and variables → Actions → Secrets → New repository secret**，名称填 `APT_HUB_GPG_PRIVATE_KEY`，值填 `private-key.asc` **完整内容（含首尾标记）**。若误放在 **Variables**，请移到 **Secrets** 并删除同名 Variable；工作流只读取 Secret。离线备份整个密钥目录，不将私钥发到聊天或提交 Git；`tmp/` 不是备份位置。
-3. **启用 Pages**：**Settings → Pages → Source → GitHub Actions**。只需上述一个 Secret；`GITHUB_TOKEN` 由 Actions 自带。
-4. **发布**：**Actions → ubuntu-publish → Run workflow**，分支选 `main`，首次 `rotate_from` 留空。部署成功后再用已生效列表中的加源命令；CI 通过不代表源已上线。
+3. **启用 Pages**：**Settings → Pages → Source → Deploy from a branch**，选择 **`apt-data` → `/ (root)`**。该分支只保存公开站点产物，名字不必叫 `gh-pages`。首次没有该分支时，手动运行一次 `Release_Build`；流程只准备 `.nojekyll` 并提示选择发布源，选择后重跑同一工作流。只需上述一个 Secret，`GITHUB_TOKEN` 由 Actions 自带；推送站点产物后显式请求 Pages 构建。
+4. **首次发布或软件构建更新**：在已提交且干净的仓库执行 `bash git_tag.sh auto`，由 `Release_Build` 完成该版本的构建、assets 上传和签源部署。不手改版本号或另建软件 Release。只重签已有版本时，在 **Actions → Release_Build → Run workflow** 选 `main`，`rotate_from` 留空。
 
 ### 公钥放哪里、怎么读
 
@@ -82,7 +82,7 @@ site_url='https://packages.example.test/tools' && mkdir -p tmp && curl -fsSL --p
 **A. 原钥可用：不换钥**
 
 1. Actions Secret 仍有效则不用改；若 Secret 丢失，将备份 `private-key.asc` 的完整内容恢复到同名 Secret。
-2. **Actions → ubuntu-publish → Run workflow**，选 `main`，`rotate_from` **留空**。
+2. **Actions → Release_Build → Run workflow**，选 `main`，`rotate_from` **留空**。
 3. 发布成功即恢复。公钥没变，使用者无需操作。
 
 **B. 原钥无法恢复或疑似泄露：换新钥**
@@ -95,7 +95,7 @@ mkdir -p tmp && git fetch origin refs/heads/apt-data && git show FETCH_HEAD:apt-
 ```
 
 3. 用上面的生成命令创建新钥，将新 `private-key.asc` 完整内容更新到**同一个 Secret**。
-4. **Actions → ubuntu-publish → Run workflow**，选 `main`，`rotate_from` 填步骤 2 的**旧 40 位完整指纹**，不是新指纹。无需旧私钥，不删除 `apt-data`。
+4. **Actions → Release_Build → Run workflow**，选 `main`，`rotate_from` 填步骤 2 的**旧 40 位完整指纹**，不是新指纹。无需旧私钥，不删除 `apt-data`。
 5. 发布成功后，公告新钥生成目录中 `fingerprint.txt` 的**新完整指纹**，通知使用者按下节修复。
 
 ### 使用者恢复
@@ -135,7 +135,7 @@ APT 的索引请求与包请求分流：签名索引来自 Pages；RustDesk 原�
 ## 版本职责
 
 - **上游软件版本**：从官方发布取得，不手工追写一份 Go 版本文件。
-- **Debian 包版本**：`config/go.json` 的 `epoch` 固定为 Ubuntu 兼容的 `2`，`revision` 为打包修订；控制字段组成 `2:上游版本-修订`。同一包版本不覆盖替换，资产文件名和 Release 标签不带 epoch。
+- **Debian 包版本**：`config/go.json` 的 `epoch` 固定为 Ubuntu 兼容的 `2`，`revision` 为打包修订；控制字段组成 `2:上游版本-修订`。同一包版本不覆盖替换，资产文件名不带 epoch。构建产物所属的本仓 Release 统一使用 `vX.Y.Z`，不从上游版本再派生标签。
 - **维护脚本版本**：只通过 `bash git_tag.sh auto` 自动递增并生成版本提交和 `vX.Y.Z` 标签，不手改 `VERSION`、不手填版本。首次标签为 `v0.0.1`，以后末段每次加 1，超过 `999` 向前进位（如 `0.0.999 → 0.1.0`）。沿母版三段式发布和清理旧版本；日常接源更新不升脚本版本。
 
 ## 非破坏性原则

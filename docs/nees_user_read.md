@@ -2,14 +2,14 @@
 
 [返回 README](../README.md)
 
-> 新版尚未完成正式发布；仅在发布工作流成功、README 列表出现已生效软件后使用。
+> 仅在发布工作流成功、README 列表出现已生效软件后使用；测试通过不能代替正式部署。
 
 ## 自己部署一套源
 
 1. 使用自己的公开仓库；启用 Actions。fork 的定时工作流需要手动启用。
-2. **Settings → Pages → Source** 选择 **GitHub Actions**。
+2. **Settings → Pages → Source** 选择 **Deploy from a branch → `apt-data` → `/ (root)`**。首次没有该分支时，手动运行一次 `Release_Build` 准备 `.nojekyll`，按提示选择发布源后重跑。该分支只保存站点产物，不保存源码、安装包或私钥；已有部署切换时保留自定义域名，不必新增名为 `gh-pages` 的副本。
 3. 在 **Settings → Secrets and variables → Actions → Secrets → New repository secret** 添加 `APT_HUB_GPG_PRIVATE_KEY`，值为完整的无口令 ASCII 私钥（含首尾标记）。不要放在 Variables、提交 Git 或发到聊天。
-4. 在 Actions 手动运行 `ubuntu-publish`。成功后使用 Pages 显示的站点地址；以后按工作流定时维护。
+4. 在仓库提交修改后执行 `bash git_tag.sh auto`，由 `Release_Build` 构建、上传该版本 assets 并部署签名源。只重签已有版本时，在 Actions 手动运行同一工作流。成功后使用软件列表中的站点地址；以后由同一工作流定时维护。
 
 公钥由流程导出到 `apt-data` 分支根目录的 `apt-hub.gpg`，部署后固定从 `<站点根地址>/apt-hub.gpg` 下载，不嵌入 Markdown。Pages 地址和发布者身份由 Actions 取得，不需要第二个 Secret。
 

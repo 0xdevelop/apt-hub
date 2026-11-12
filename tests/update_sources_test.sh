@@ -6,7 +6,7 @@ export LANG=C
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 UPD="${ROOT}/scripts/update_sources.sh"
-BASE="${ROOT}/tmp/accept-v18-core-fix-worker/update-sources-test"
+BASE="${ROOT}/tmp/b-consumer/update-sources-test"
 EVIDENCE="${BASE}/evidence.log"
 SITE_URL='https://apt-hub.example.test'
 FIXTURE_JS_SRC="${ROOT}/tests/apt_release_fixture.mjs"
@@ -15,7 +15,7 @@ FAIL=0
 RESTRICTED_WORK=""
 HTTPS_SERVER_PID=""
 
-mkdir -p -- "${ROOT}/tmp/accept-v18-core-fix-worker"
+mkdir -p -- "${ROOT}/tmp/b-consumer"
 rm -rf -- "${BASE}"
 mkdir -p -- "${BASE}"
 # 隔离副本也带上 HTTPS helper，不把缺文件报成产品问题。
@@ -73,11 +73,6 @@ find_shellcheck() {
   fi
   if [[ -x "${ROOT}/tmp/metadata-C/bin/shellcheck" ]]; then
     printf '%s\n' "${ROOT}/tmp/metadata-C/bin/shellcheck"
-    return 0
-  fi
-  # 独占副本可能无 tmp/metadata-C；回退宿主仓只读 shellcheck
-  if [[ -x "/home/ubuntu/workspace/projects/apt-hub/tmp/metadata-C/bin/shellcheck" ]]; then
-    printf '%s\n' "/home/ubuntu/workspace/projects/apt-hub/tmp/metadata-C/bin/shellcheck"
     return 0
   fi
   return 1
@@ -776,38 +771,30 @@ else
   fi
 fi
 
-# ---------- workflow 接线静态断言 ----------
+# ---------- release 接线静态断言 ----------
 log "== workflow 接线 =="
-PUB="${ROOT}/.github/workflows/ubuntu-publish.yml"
-TST="${ROOT}/.github/workflows/ubuntu-test.yml"
-if grep -Fq 'scripts/update_sources.sh' "${PUB}"; then
+WF="${ROOT}/.github/workflows/release.yml"
+SITE="${ROOT}/scripts/publish_apt_site.sh"
+BUILD="${ROOT}/build.sh"
+if grep -Fq 'scripts/publish_apt_site.sh publish' "${WF}"; then
+  pass "release_calls_publish_apt_site"
+else
+  fail "release_missing_publish_apt_site"
+fi
+if grep -Fq 'scripts/update_sources.sh' "${SITE}"; then
   pass "publish_calls_update_sources"
 else
   fail "publish_missing_update_sources"
 fi
-if awk '
-  /^      - name: 生成发行版数据并构建候选站点$/ {hit=1; next}
-  hit && /^      - name:/ {exit}
-  hit && /chmod / {next}
-  hit && /(^|[[:space:]])scripts\/sync\.sh([[:space:]]|\\|$)/ {bad=1}
-  hit && /(^|[[:space:]])scripts\/verify_ubuntu\.sh([[:space:]]|\\|$)/ {bad=1}
-  hit && /(^|[[:space:]])scripts\/ubuntu_releases\.sh([[:space:]]|\\|$)/ {bad=1}
-  hit && /(^|[[:space:]])scripts\/render\.sh([[:space:]]|\\|$)/ {bad=1}
-  END { exit bad+0 }
-' "${PUB}"; then
-  pass "publish_build_step_single_entry_only"
+if grep -Fq 'tests/update_sources_test.sh' "${BUILD}"; then
+  pass "build_test_runs_update_sources_test"
 else
-  fail "publish_build_step_still_serial_scripts"
+  fail "build_test_missing_update_sources_test"
 fi
-if grep -Fq 'tests/update_sources_test.sh' "${TST}"; then
-  pass "ci_runs_update_sources_test"
+if ! grep -Eq '(^|[[:space:]])scripts/(sync|verify_ubuntu|ubuntu_releases|render)\.sh' "${WF}"; then
+  pass "release_workflow_single_entry_only"
 else
-  fail "ci_missing_update_sources_test"
-fi
-if grep -Fq 'scripts/update_sources.sh' "${TST}"; then
-  pass "ci_chmods_update_sources"
-else
-  fail "ci_missing_chmod_update_sources"
+  fail "release_workflow_still_serial_scripts"
 fi
 
 # 生产 catalog 含 rustdesk + golang；入口透传 Go/换钥参数且强制 --verify-downloads
@@ -819,7 +806,8 @@ else
   fail "catalog_unexpected_packages"
 fi
 if grep -Fq -- '--package-repository' "${UPD}" \
-  && grep -Fq -- '--go-release-tag' "${UPD}" \
+  && grep -Fq -- '--release-tag' "${UPD}" \
+  && grep -Fq -- '--upstream-dir' "${UPD}" \
   && grep -Fq -- '--rotate-from' "${UPD}" \
   && grep -Fq -- '--verify-downloads' "${UPD}" \
   && grep -Fq -- '--acquire-https-ca' "${UPD}" \

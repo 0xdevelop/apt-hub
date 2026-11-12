@@ -7,7 +7,7 @@ export LANG=C
 export LANGUAGE=C
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="${SCRIPT_DIR}"
+PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 PROJECT_TMP="${PROJECT_ROOT}/tmp"
 
 HEX64='^[a-f0-9]{64}$'
@@ -35,7 +35,7 @@ die() {
 
 usage() {
   cat >&2 <<'EOF'
-用法: ./gen_deb_golang.sh --config <config/go.json> --output <全新/空的本项目tmp内目录> [--version <goX.Y.Z>] [--downloads-json <官方JSON普通文件>] [--archive-dir <已下载归档目录>]
+用法: scripts/gen_deb_golang.sh --config <config/go.json> --output <全新/空的本项目tmp内目录> [--version <goX.Y.Z>] [--downloads-json <官方JSON普通文件>] [--archive-dir <已下载归档目录>]
 EOF
   exit 2
 }

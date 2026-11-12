@@ -9,16 +9,18 @@ SYNC="${ROOT}/scripts/sync.sh"
 UPD="${ROOT}/scripts/update_sources.sh"
 VER="${ROOT}/scripts/verify_ubuntu.sh"
 FIXTURE_JS="${ROOT}/tests/apt_release_fixture.mjs"
-TMP="${ROOT}/tmp/release-readiness-core-worker/go-source"
+TMP="${ROOT}/tmp/b-consumer/go-source"
 EVIDENCE="${TMP}/evidence.log"
 SITE_URL='https://apt-hub.example.test'
 PKG_REPO='fixture/apt-hub'
-GO_TAG='golang-9.9.9-1'
+GO_TAG='v0.0.9'
+PROV_ASSET='golang.provenance.json'
+LEGACY_TAG='golang-9.9.9-1'
 PASS=0
 FAIL=0
 SERVER_PID=""
 
-mkdir -p -- "${ROOT}/tmp/release-readiness-core-worker"
+mkdir -p -- "${ROOT}/tmp/b-consumer"
 rm -rf -- "${TMP}"
 mkdir -p -- "${TMP}/bin" "${TMP}/debs" "${TMP}/api" "${TMP}/empty-prev" "${TMP}/tls" "${TMP}/assets"
 
@@ -129,6 +131,7 @@ build_deb golang-go "${VER_FULL}" arm64 "${TMP}/debs/golang-go_9.9.9-1_arm64.deb
 build_deb golang "${VER_FULL}" amd64 "${TMP}/debs/golang_9.9.9-1_amd64.deb" "golang-go (= ${VER_FULL})"
 build_deb golang "${VER_FULL}" arm64 "${TMP}/debs/golang_9.9.9-1_arm64.deb" "golang-go (= ${VER_FULL})"
 build_deb golang "${VER_FULL}" amd64 "${TMP}/debs/golang_9.9.9-1_amd64-replaced.deb" "golang-go (= ${VER_FULL})" replaced
+build_deb alpha 1.0.0 amd64 "${TMP}/debs/alpha_1.0.0_amd64.deb"
 META_AMD_SHA="$(sha_of "${TMP}/debs/golang_9.9.9-1_amd64.deb")"
 META_ARM_SHA="$(sha_of "${TMP}/debs/golang_9.9.9-1_arm64.deb")"
 TOOL_AMD_SHA="$(sha_of "${TMP}/debs/golang-go_9.9.9-1_amd64.deb")"
@@ -194,6 +197,7 @@ write_release_json() {
     --arg d1 "sha256:${meta_amd_sha}" --arg d2 "sha256:${TOOL_AMD_SHA}" \
     --arg d3 "sha256:${META_ARM_SHA}" --arg d4 "sha256:${TOOL_ARM_SHA}" --arg dp "sha256:${dp}" \
     --arg base "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}" \
+    --arg pname "${PROV_ASSET}" \
     '{
       tag_name:$tag, html_url:$html, draft:false, prerelease:false,
       assets:[
@@ -201,7 +205,7 @@ write_release_json() {
         {name:"golang-go_9.9.9-1_amd64.deb",size:$s2,browser_download_url:($base+"/golang-go_9.9.9-1_amd64.deb"),digest:$d2},
         {name:"golang_9.9.9-1_arm64.deb",size:$s3,browser_download_url:($base+"/golang_9.9.9-1_arm64.deb"),digest:$d3},
         {name:"golang-go_9.9.9-1_arm64.deb",size:$s4,browser_download_url:($base+"/golang-go_9.9.9-1_arm64.deb"),digest:$d4},
-        {name:"provenance.json",size:$sp,browser_download_url:($base+"/provenance.json"),digest:$dp}
+        {name:$pname,size:$sp,browser_download_url:($base+"/"+$pname),digest:$dp}
       ]
     }' >"${dest}"
 }
@@ -227,9 +231,12 @@ reset_curl_map() {
   map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/golang-go_9.9.9-1_amd64.deb" "${TMP}/debs/golang-go_9.9.9-1_amd64.deb"
   map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/golang_9.9.9-1_arm64.deb" "${TMP}/debs/golang_9.9.9-1_arm64.deb"
   map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/golang-go_9.9.9-1_arm64.deb" "${TMP}/debs/golang-go_9.9.9-1_arm64.deb"
-  map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/provenance.json" "${TMP}/api/provenance.json"
+  map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/${PROV_ASSET}" "${TMP}/api/provenance.json"
 }
 reset_curl_map
+mkdir -p -- "${TMP}/upstream"
+printf '%s\n' '{"tag_name":"v9.9.9","draft":false,"prerelease":false,"html_url":"https://github.com/fixture/apt-hub/releases/tag/v9.9.9","assets":[]}' \
+  >"${TMP}/upstream/golang.json"
 
 # HTTPS 资产树（Filename 相对 github.com/）
 ASSET_REL="fixture/apt-hub/releases/download/${GO_TAG}"
@@ -277,7 +284,7 @@ rc="$(capture_rc "${TMP}/run-legacy-cat.log" "${SYNC}" \
   --catalog "${TMP}/catalog-legacy.json" --releases "${TMP}/releases.json" \
   --previous "${TMP}/empty-prev" --output "${TMP}/site-legacy" \
   --gnupghome "${GNUPG}" --fingerprint "${FP}" --site-url "${SITE_URL}" \
-  --package-repository "${PKG_REPO}" --go-release-tag "${GO_TAG}" \
+  --package-repository "${PKG_REPO}" --release-tag "${GO_TAG}" \
   --go-downloads-json "${TMP}/api/go-downloads.json")"
 record_rc legacy_apt_hub_go_catalog_rejected "${rc}" 1 || true
 rc=0
@@ -297,12 +304,13 @@ run_sync_go() {
     --fingerprint "${FP}" \
     --site-url "${SITE_URL}" \
     --package-repository "${PKG_REPO}" \
-    --go-release-tag "${GO_TAG}" \
+    --release-tag "${GO_TAG}" \
+    --upstream-dir "${TMP}/upstream" \
     --go-downloads-json "${TMP}/api/go-downloads.json" \
     "$@"
 }
 
-# 缺 go-release-tag 拒
+# 缺 release-tag 拒
 rc="$(capture_rc "${TMP}/run-no-tag.log" "${SYNC}" \
   --catalog "${TMP}/catalog-go.json" --releases "${TMP}/releases.json" \
   --previous "${TMP}/empty-prev" --output "${TMP}/site-no-tag" \
@@ -310,11 +318,23 @@ rc="$(capture_rc "${TMP}/run-no-tag.log" "${SYNC}" \
   --package-repository "${PKG_REPO}")"
 record_rc go_missing_release_tag_rejected "${rc}" 1 || true
 rc=0
-grep -Fq 'go-release-tag' "${TMP}/run-no-tag.log" || rc=1
+grep -Fq 'release-tag' "${TMP}/run-no-tag.log" || rc=1
 record_rc go_missing_tag_reason "${rc}" 0 || true
 rc=0
 [[ ! -e "${TMP}/site-no-tag" ]] || rc=1
 record_rc go_missing_tag_no_output "${rc}" 0 || true
+
+# 新活跃拒绝存量 golang-* tag
+rc="$(capture_rc "${TMP}/run-legacy-tag.log" "${SYNC}" \
+  --catalog "${TMP}/catalog-go.json" --releases "${TMP}/releases.json" \
+  --previous "${TMP}/empty-prev" --output "${TMP}/site-legacy-tag" \
+  --gnupghome "${GNUPG}" --fingerprint "${FP}" --site-url "${SITE_URL}" \
+  --package-repository "${PKG_REPO}" --release-tag "${LEGACY_TAG}" \
+  --go-downloads-json "${TMP}/api/go-downloads.json")"
+record_rc go_legacy_tag_active_rejected "${rc}" 1 || true
+rc=0
+grep -Fq '严格 vX.Y.Z' "${TMP}/run-legacy-tag.log" || rc=1
+record_rc go_legacy_tag_reason "${rc}" 0 || true
 
 # 缺工具包 golang-go arm64：release 去掉该资产，外层 provenance 仍完整
 jq '(.assets |= map(select(.name != "golang-go_9.9.9-1_arm64.deb")))' \
@@ -349,7 +369,8 @@ reset_curl_map
 # provenance 外层 digest 不符（内层文件未改）
 BAD_PROV_SHA="$(printf 'bad-prov' | sha256sum | awk '{print $1}')"
 jq --arg d "sha256:${BAD_PROV_SHA}" \
-  '(.assets |= map(if .name=="provenance.json" then .digest=$d else . end))' \
+  --arg n "${PROV_ASSET}" \
+  '(.assets |= map(if .name==$n then .digest=$d else . end))' \
   "${TMP}/api/go-release.json" >"${TMP}/api/go-release-bad-prov.json"
 cp -f -- "${TMP}/api/go-release-bad-prov.json" "${TMP}/api/go-release.json"
 rc="$(capture_rc "${TMP}/run-bad-prov.log" run_sync_go "${TMP}/empty-prev" "${TMP}/site-bad-prov")"
@@ -365,7 +386,7 @@ write_provenance "${TMP}/api/provenance-bad-up.json" \
 cp -f -- "${TMP}/api/provenance-bad-up.json" "${TMP}/api/provenance.json"
 write_release_json "${TMP}/api/go-release.json" "${TMP}/api/provenance.json"
 reset_curl_map
-map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/provenance.json" "${TMP}/api/provenance.json"
+map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/${PROV_ASSET}" "${TMP}/api/provenance.json"
 rc="$(capture_rc "${TMP}/run-bad-up.log" run_sync_go "${TMP}/empty-prev" "${TMP}/site-bad-up")"
 record_rc go_upstream_tar_hash_rejected "${rc}" 1 || true
 rc=0
@@ -387,7 +408,7 @@ jq -e '
   and .packages[0].package=="golang"
   and .packages[0].source_type=="go_official_archive"
   and .packages[0].version=="2:9.9.9-1"
-  and .packages[0].release_tag=="golang-9.9.9-1"
+  and .packages[0].release_tag=="v0.0.9"
   and (.packages[0].assets|length==4)
   and ([.packages[0].assets[].package]|sort)==["golang","golang","golang-go","golang-go"]
   and all(.packages[0].assets[]; (.upstream.sha256|type)=="string")
@@ -416,7 +437,7 @@ map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/golang_9.9.9
 map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/golang-go_9.9.9-1_amd64.deb" "${TMP}/debs/golang-go_9.9.9-1_amd64.deb"
 map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/golang_9.9.9-1_arm64.deb" "${TMP}/debs/golang_9.9.9-1_arm64.deb"
 map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/golang-go_9.9.9-1_arm64.deb" "${TMP}/debs/golang-go_9.9.9-1_arm64.deb"
-map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/provenance.json" "${TMP}/api/provenance-repl.json"
+map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/${PROV_ASSET}" "${TMP}/api/provenance-repl.json"
 cp -f -- "${TMP}/api/go-release-repl.json" "${TMP}/api/go-release.json"
 cp -f -- "${TMP}/api/provenance-repl.json" "${TMP}/api/provenance.json"
 (cd "${TMP}/site-go1" && find . -type f -print0 | sort -z | xargs -0 sha256sum) >"${TMP}/site-go1-before-repl"
@@ -434,6 +455,135 @@ cmp -s "${TMP}/site-go1-before-repl" \
 record_rc go_replace_previous_unchanged "${rc}" 0 || true
 write_provenance "${TMP}/api/provenance.json"
 write_release_json "${TMP}/api/go-release.json"
+reset_curl_map
+
+# 跨 tag 同版换字节：URL 不同也必须拒
+saved_tag="${GO_TAG}"
+GO_TAG='v0.0.10'
+write_provenance "${TMP}/api/provenance-cross-bad.json" \
+  "${REPL_SHA}" "${META_ARM_SHA}" "${TOOL_AMD_SHA}" "${TOOL_ARM_SHA}" \
+  "${UP_AMD_SHA}" "${UP_ARM_SHA}" \
+  "${REPL_SZ}" "${META_ARM_SZ}" "${TOOL_AMD_SZ}" "${TOOL_ARM_SZ}"
+write_release_json "${TMP}/api/go-release-cross-bad.json" "${TMP}/api/provenance-cross-bad.json" \
+  "${REPL_SHA}" "${REPL_SZ}"
+: >"${TMP}/curl-map.tsv"
+map_add "https://api.github.com/repos/${PKG_REPO}/releases/tags/${GO_TAG}" "${TMP}/api/go-release-cross-bad.json"
+map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/golang_9.9.9-1_amd64.deb" "${TMP}/debs/golang_9.9.9-1_amd64-replaced.deb"
+map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/golang-go_9.9.9-1_amd64.deb" "${TMP}/debs/golang-go_9.9.9-1_amd64.deb"
+map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/golang_9.9.9-1_arm64.deb" "${TMP}/debs/golang_9.9.9-1_arm64.deb"
+map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/golang-go_9.9.9-1_arm64.deb" "${TMP}/debs/golang-go_9.9.9-1_arm64.deb"
+map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/${PROV_ASSET}" "${TMP}/api/provenance-cross-bad.json"
+cp -f -- "${TMP}/api/go-release-cross-bad.json" "${TMP}/api/go-release.json"
+cp -f -- "${TMP}/api/provenance-cross-bad.json" "${TMP}/api/provenance.json"
+rc="$(capture_rc "${TMP}/run-cross-bad.log" run_sync_go "${TMP}/site-go1" "${TMP}/site-cross-bad")"
+record_rc go_cross_tag_byte_rejected "${rc}" 1 || true
+rc=0
+grep -Fq '禁止同包同版内容替换' "${TMP}/run-cross-bad.log" || rc=1
+record_rc go_cross_tag_byte_reason "${rc}" 0 || true
+rc=0
+[[ ! -e "${TMP}/site-cross-bad" ]] || rc=1
+record_rc go_cross_tag_byte_no_output "${rc}" 0 || true
+
+# 跨 tag 同字节换址：允许，并保留 previous by-hash
+GO_TAG='v0.0.10'
+write_provenance "${TMP}/api/provenance.json"
+write_release_json "${TMP}/api/go-release.json"
+reset_curl_map
+old_byhash="$(find "${TMP}/site-go1/repos/golang/dists/jammy/main/binary-amd64/by-hash/SHA256" -type f -printf '%f\n' | head -1)"
+rc="$(capture_rc "${TMP}/run-cross-ok.log" run_sync_go "${TMP}/site-go1" "${TMP}/site-cross-ok")"
+record_rc go_cross_tag_same_bytes "${rc}" 0 || true
+rc=0
+jq -e --arg t "${GO_TAG}" --arg s "${META_AMD_SHA}" '
+  .packages[0].release_tag==$t
+  and any(.packages[0].assets[]; .package=="golang" and .architecture=="amd64" and .sha256==$s)
+' "${TMP}/site-cross-ok/state.json" >/dev/null || rc=1
+record_rc go_cross_tag_same_bytes_state "${rc}" 0 || true
+rc=0
+[[ -n "${old_byhash}" && -f "${TMP}/site-cross-ok/repos/golang/dists/jammy/main/binary-amd64/by-hash/SHA256/${old_byhash}" ]] || rc=1
+record_rc go_cross_tag_keeps_byhash "${rc}" 0 || true
+GO_TAG="${saved_tag}"
+write_provenance "${TMP}/api/provenance.json"
+write_release_json "${TMP}/api/go-release.json"
+reset_curl_map
+
+# 存量 previous：旧 golang-* 与 provenance.json 仍可再验，不改写成新 tag
+legacy_src="${TMP}/site-legacy-prev"
+rm -rf -- "${legacy_src}"
+cp -a -- "${TMP}/site-go1" "${legacy_src}"
+jq --arg a "${saved_tag}" --arg b "${LEGACY_TAG}" '
+  def swap($x;$y): split($x)|join($y);
+  .packages[0].release_tag=$b
+  | .packages[0].release_url |= swap($a;$b)
+  | .packages[0].assets |= map(.url |= swap($a;$b) | .filename |= swap($a;$b))
+' "${legacy_src}/state.json" >"${legacy_src}/state.json.tmp"
+mv -- "${legacy_src}/state.json.tmp" "${legacy_src}/state.json"
+legacy_dist="${legacy_src}/repos/golang/dists/jammy"
+for arch in amd64 arm64; do
+  sed -i "s|${saved_tag}|${LEGACY_TAG}|g" "${legacy_dist}/main/binary-${arch}/Packages"
+  gzip -n -9 -c -- "${legacy_dist}/main/binary-${arch}/Packages" >"${legacy_dist}/main/binary-${arch}/Packages.gz"
+done
+rm -f -- "${legacy_dist}/Release" "${legacy_dist}/Release.gpg" "${legacy_dist}/InRelease"
+cat >"${TMP}/legacy-release.conf" <<'EOF'
+APT::FTPArchive::MD5 "false";
+APT::FTPArchive::SHA1 "false";
+APT::FTPArchive::SHA512 "false";
+APT::FTPArchive::SHA256 "true";
+APT::FTPArchive::Release::Origin "apt-hub";
+APT::FTPArchive::Release::Label "apt-hub";
+APT::FTPArchive::Release::Suite "jammy";
+APT::FTPArchive::Release::Codename "jammy";
+APT::FTPArchive::Release::Components "main";
+APT::FTPArchive::Release::Architectures "amd64 arm64";
+APT::FTPArchive::Release::Acquire-By-Hash "yes";
+APT::FTPArchive::Release::ValidTime "1209600";
+EOF
+apt-ftparchive -c "${TMP}/legacy-release.conf" release "${legacy_dist}" >"${TMP}/legacy-Release.body"
+mv -- "${TMP}/legacy-Release.body" "${legacy_dist}/Release"
+for arch in amd64 arm64; do
+  for pkgf in Packages Packages.gz; do
+    h="$(sha256sum -- "${legacy_dist}/main/binary-${arch}/${pkgf}" | awk '{print $1}')"
+    install -m 644 -- "${legacy_dist}/main/binary-${arch}/${pkgf}" \
+      "${legacy_dist}/main/binary-${arch}/by-hash/SHA256/${h}"
+  done
+done
+gpg --homedir "${GNUPG}" --batch --yes --pinentry-mode loopback \
+  --local-user "${FP}" --passphrase '' \
+  --detach-sign --armor --output "${legacy_dist}/Release.gpg" -- "${legacy_dist}/Release"
+gpg --homedir "${GNUPG}" --batch --yes --pinentry-mode loopback \
+  --local-user "${FP}" --passphrase '' \
+  --clearsign --output "${legacy_dist}/InRelease" -- "${legacy_dist}/Release"
+jq --arg tag "${LEGACY_TAG}" --arg old "${saved_tag}" --arg repo "${PKG_REPO}" '
+  def swap($x;$y): split($x)|join($y);
+  .tag_name=$tag
+  | .html_url=("https://github.com/"+$repo+"/releases/tag/"+$tag)
+  | .assets |= map(
+      .browser_download_url |= swap($old;$tag)
+      | if .name=="golang.provenance.json" then
+          .name="provenance.json"
+          | .browser_download_url |= swap("golang.provenance.json";"provenance.json")
+        else . end
+    )
+' "${TMP}/api/go-release.json" >"${TMP}/api/go-release-legacy.json"
+map_add "https://api.github.com/repos/${PKG_REPO}/releases/tags/${LEGACY_TAG}" "${TMP}/api/go-release-legacy.json"
+map_add "https://github.com/${PKG_REPO}/releases/download/${LEGACY_TAG}/golang_9.9.9-1_amd64.deb" "${TMP}/debs/golang_9.9.9-1_amd64.deb"
+map_add "https://github.com/${PKG_REPO}/releases/download/${LEGACY_TAG}/golang-go_9.9.9-1_amd64.deb" "${TMP}/debs/golang-go_9.9.9-1_amd64.deb"
+map_add "https://github.com/${PKG_REPO}/releases/download/${LEGACY_TAG}/golang_9.9.9-1_arm64.deb" "${TMP}/debs/golang_9.9.9-1_arm64.deb"
+map_add "https://github.com/${PKG_REPO}/releases/download/${LEGACY_TAG}/golang-go_9.9.9-1_arm64.deb" "${TMP}/debs/golang-go_9.9.9-1_arm64.deb"
+map_add "https://github.com/${PKG_REPO}/releases/download/${LEGACY_TAG}/provenance.json" "${TMP}/api/provenance.json"
+legacy_byhash="$(find "${legacy_src}/repos/golang/dists/jammy/main/binary-amd64/by-hash/SHA256" -type f -printf '%f\n' | head -1)"
+rc="$(capture_rc "${TMP}/run-legacy-read.log" "${SYNC}" \
+  --catalog "${TMP}/catalog-empty.json" --releases "${TMP}/releases.json" \
+  --previous "${legacy_src}" --output "${TMP}/site-legacy-read" \
+  --gnupghome "${GNUPG}" --fingerprint "${FP}" --site-url "${SITE_URL}" \
+  --go-downloads-json "${TMP}/api/go-downloads.json")"
+record_rc go_legacy_previous_read "${rc}" 0 || true
+rc=0
+jq -e --arg t "${LEGACY_TAG}" '.packages[0].release_tag==$t and .packages[0].source_type=="go_official_archive"' \
+  "${TMP}/site-legacy-read/state.json" >/dev/null || rc=1
+record_rc go_legacy_tag_kept "${rc}" 0 || true
+rc=0
+[[ -n "${legacy_byhash}" && -f "${TMP}/site-legacy-read/repos/golang/dists/jammy/main/binary-amd64/by-hash/SHA256/${legacy_byhash}" ]] || rc=1
+record_rc go_legacy_keeps_byhash "${rc}" 0 || true
 reset_curl_map
 
 # retained 续签
@@ -456,7 +606,7 @@ rc="$(capture_rc "${TMP}/run-silent-rot.log" "${SYNC}" \
   --catalog "${TMP}/catalog-go.json" --releases "${TMP}/releases.json" \
   --previous "${TMP}/site-go1" --output "${TMP}/site-silent-rot" \
   --gnupghome "${GNUPG2}" --fingerprint "${FP2}" --site-url "${SITE_URL}" \
-  --package-repository "${PKG_REPO}" --go-release-tag "${GO_TAG}" \
+  --package-repository "${PKG_REPO}" --release-tag "${GO_TAG}" \
   --go-downloads-json "${TMP}/api/go-downloads.json")"
 record_rc silent_rotate_rejected "${rc}" 1 || true
 rc=0
@@ -468,7 +618,7 @@ rc="$(capture_rc "${TMP}/run-bad-rot-fp.log" "${SYNC}" \
   --catalog "${TMP}/catalog-go.json" --releases "${TMP}/releases.json" \
   --previous "${TMP}/site-go1" --output "${TMP}/site-bad-rot-fp" \
   --gnupghome "${GNUPG2}" --fingerprint "${FP2}" --site-url "${SITE_URL}" \
-  --package-repository "${PKG_REPO}" --go-release-tag "${GO_TAG}" \
+  --package-repository "${PKG_REPO}" --release-tag "${GO_TAG}" \
   --go-downloads-json "${TMP}/api/go-downloads.json" \
   --rotate-from AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA)"
 record_rc rotate_wrong_fp_rejected "${rc}" 1 || true
@@ -484,7 +634,7 @@ rc="$(capture_rc "${TMP}/run-bad-sig-active.log" "${SYNC}" \
   --catalog "${TMP}/catalog-go.json" --releases "${TMP}/releases.json" \
   --previous "${TMP}/site-bad-sig-active" --output "${TMP}/site-bad-sig-active-out" \
   --gnupghome "${GNUPG2}" --fingerprint "${FP2}" --site-url "${SITE_URL}" \
-  --package-repository "${PKG_REPO}" --go-release-tag "${GO_TAG}" \
+  --package-repository "${PKG_REPO}" --release-tag "${GO_TAG}" \
   --go-downloads-json "${TMP}/api/go-downloads.json" \
   --rotate-from "${FP}")"
 record_rc rotate_active_bad_signature_rejected "${rc}" 1 || true
@@ -516,7 +666,7 @@ rc="$(capture_rc "${TMP}/run-rot-ok.log" "${SYNC}" \
   --catalog "${TMP}/catalog-go.json" --releases "${TMP}/releases.json" \
   --previous "${TMP}/site-go1" --output "${TMP}/site-go-rot" \
   --gnupghome "${GNUPG2}" --fingerprint "${FP2}" --site-url "${SITE_URL}" \
-  --package-repository "${PKG_REPO}" --go-release-tag "${GO_TAG}" \
+  --package-repository "${PKG_REPO}" --release-tag "${GO_TAG}" \
   --go-downloads-json "${TMP}/api/go-downloads.json" \
   --rotate-from "${FP}")"
 cat "${TMP}/run-rot-ok.log" >>"${EVIDENCE}"
@@ -544,9 +694,52 @@ rc="$(capture_rc "${TMP}/run-amd64-only.log" "${SYNC}" \
   --catalog "${TMP}/catalog-go-amd64.json" --releases "${TMP}/releases.json" \
   --previous "${TMP}/empty-prev" --output "${TMP}/site-go-amd64" \
   --gnupghome "${GNUPG}" --fingerprint "${FP}" --site-url "${SITE_URL}" \
-  --package-repository "${PKG_REPO}" --go-release-tag "${GO_TAG}" \
+  --package-repository "${PKG_REPO}" --release-tag "${GO_TAG}" \
   --go-downloads-json "${TMP}/api/go-downloads.json")"
 record_rc go_amd64_only_sync "${rc}" 0 || true
+
+# githubdeb：upstream-dir 是真实响应缓存，digest 仍核验
+ALPHA_SHA="$(sha_of "${TMP}/debs/alpha_1.0.0_amd64.deb")"
+ALPHA_SZ="$(stat -c '%s' -- "${TMP}/debs/alpha_1.0.0_amd64.deb")"
+jq -n --arg digest "sha256:${ALPHA_SHA}" --argjson sz "${ALPHA_SZ}" '{
+  tag_name:"v1.2.3",
+  html_url:"https://github.com/fixture/alpha/releases/tag/v1.2.3",
+  draft:false, prerelease:false,
+  assets:[{
+    name:"alpha_1.0.0_amd64.deb", size:$sz, digest:$digest,
+    browser_download_url:"https://github.com/fixture/alpha/releases/download/v1.2.3/alpha_1.0.0_amd64.deb"
+  }]
+}' >"${TMP}/upstream/alpha.json"
+jq -n '{
+  schema_version:"2",
+  packages:[{
+    id:"alpha", repository:"fixture/alpha", package:"alpha",
+    description:"alpha fixture", source_url:"https://github.com/fixture/alpha",
+    license:"MIT", ubuntu_series:["jammy"],
+    architectures:{amd64:"^alpha_1\\.0\\.0_amd64\\.deb$"}
+  }]
+}' >"${TMP}/catalog-alpha.json"
+map_add "https://github.com/fixture/alpha/releases/download/v1.2.3/alpha_1.0.0_amd64.deb" "${TMP}/debs/alpha_1.0.0_amd64.deb"
+rc="$(capture_rc "${TMP}/run-upstream.log" "${SYNC}" \
+  --catalog "${TMP}/catalog-alpha.json" --releases "${TMP}/releases.json" \
+  --previous "${TMP}/empty-prev" --output "${TMP}/site-alpha" \
+  --gnupghome "${GNUPG}" --fingerprint "${FP}" --site-url "${SITE_URL}" \
+  --upstream-dir "${TMP}/upstream")"
+record_rc upstream_dir_githubdeb "${rc}" 0 || true
+rc=0
+jq -e '.packages[0].source_url=="https://github.com/fixture/alpha/tree/v1.2.3"
+  and .packages[0].release_url=="https://github.com/fixture/alpha/releases/tag/v1.2.3"' \
+  "${TMP}/site-alpha/state.json" >/dev/null || rc=1
+record_rc upstream_dir_tag "${rc}" 0 || true
+jq '.assets[0].digest="sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"' \
+  "${TMP}/upstream/alpha.json" >"${TMP}/upstream/alpha-bad.json"
+mv -- "${TMP}/upstream/alpha-bad.json" "${TMP}/upstream/alpha.json"
+rc="$(capture_rc "${TMP}/run-upstream-bad.log" "${SYNC}" \
+  --catalog "${TMP}/catalog-alpha.json" --releases "${TMP}/releases.json" \
+  --previous "${TMP}/empty-prev" --output "${TMP}/site-alpha-bad" \
+  --gnupghome "${GNUPG}" --fingerprint "${FP}" --site-url "${SITE_URL}" \
+  --upstream-dir "${TMP}/upstream")"
+record_rc upstream_dir_bad_digest_rejected "${rc}" 1 || true
 
 # --- HTTPS 夹具：真 APT download + upgrade（type:deb 不改写）---
 command -v node >/dev/null 2>&1 || { log "缺少 node，无法跑 APT HTTPS fixture"; exit 1; }
@@ -652,7 +845,7 @@ rc="$(capture_rc "${TMP}/run-upd.log" "${UPD}" \
   --site-url "${SITE_URL}" \
   --releases "${TMP}/releases.json" \
   --package-repository "${PKG_REPO}" \
-  --go-release-tag "${GO_TAG}" \
+  --release-tag "${GO_TAG}" \
   --go-downloads-json "${TMP}/api/go-downloads.json" \
   --acquire-https-ca "${TMP}/tls/cert.pem" \
   --github-https-proxy "${PROXY_URL}")"
@@ -667,6 +860,50 @@ if [[ "${rc}" -eq 0 ]]; then
     "${TMP}/work-upd/verify/summary.json" >/dev/null || rc=1
   record_rc update_verify_gate "${rc}" 0 || true
 fi
+
+# 未传 release-tag：由根 VERSION 派生，不向 go.dev 要本仓 tag
+DERIVED_RAW="$(tr -d '[:space:]' <"${ROOT}/VERSION")"
+case "${DERIVED_RAW}" in
+  v[0-9]*.[0-9]*.[0-9]*) DERIVED="${DERIVED_RAW}" ;;
+  *) DERIVED="v${DERIVED_RAW}" ;;
+esac
+saved_tag="${GO_TAG}"
+GO_TAG="${DERIVED}"
+write_provenance "${TMP}/api/provenance.json"
+write_release_json "${TMP}/api/go-release-derived.json"
+derived_rel="fixture/apt-hub/releases/download/${DERIVED}"
+mkdir -p -- "${TMP}/assets/${derived_rel}"
+cp -- "${TMP}/debs/golang_9.9.9-1_amd64.deb" "${TMP}/debs/golang-go_9.9.9-1_amd64.deb" \
+  "${TMP}/assets/${derived_rel}/"
+map_add "https://api.github.com/repos/${PKG_REPO}/releases/tags/${DERIVED}" "${TMP}/api/go-release-derived.json"
+map_add "https://github.com/${PKG_REPO}/releases/download/${DERIVED}/golang_9.9.9-1_amd64.deb" "${TMP}/debs/golang_9.9.9-1_amd64.deb"
+map_add "https://github.com/${PKG_REPO}/releases/download/${DERIVED}/golang-go_9.9.9-1_amd64.deb" "${TMP}/debs/golang-go_9.9.9-1_amd64.deb"
+map_add "https://github.com/${PKG_REPO}/releases/download/${DERIVED}/${PROV_ASSET}" "${TMP}/api/provenance.json"
+rm -rf -- "${TMP}/work-derived" "${TMP}/work-derived.lock"
+mkdir -p -- "${TMP}/work-derived" "${TMP}/prev-derived"
+rc="$(capture_rc "${TMP}/run-derived.log" "${UPD}" \
+  --catalog "${TMP}/catalog-go-amd64.json" \
+  --previous "${TMP}/prev-derived" \
+  --work-dir "${TMP}/work-derived" \
+  --gnupghome "${GNUPG}" \
+  --fingerprint "${FP}" \
+  --site-url "${SITE_URL}" \
+  --releases "${TMP}/releases.json" \
+  --package-repository "${PKG_REPO}" \
+  --go-downloads-json "${TMP}/api/go-downloads.json" \
+  --acquire-https-ca "${TMP}/tls/cert.pem" \
+  --github-https-proxy "${PROXY_URL}")"
+record_rc update_version_derived_tag "${rc}" 0 || true
+rc=0
+grep -Fq "由 VERSION 派生 release-tag=${DERIVED}" "${TMP}/run-derived.log" || rc=1
+if grep -Fq 'go.dev/dl' "${TMP}/run-derived.log"; then rc=1; fi
+record_rc update_version_derived_log "${rc}" 0 || true
+if [[ -f "${TMP}/work-derived/site/state.json" ]]; then
+  rc=0
+  jq -e --arg t "${DERIVED}" '.packages[0].release_tag==$t' "${TMP}/work-derived/site/state.json" >/dev/null || rc=1
+  record_rc update_version_derived_state "${rc}" 0 || true
+fi
+GO_TAG="${saved_tag}"
 
 # 精确 pid 清理
 if [[ -n "${SERVER_PID}" ]]; then

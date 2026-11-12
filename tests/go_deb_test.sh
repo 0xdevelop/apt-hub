@@ -6,13 +6,15 @@ export LANG=C
 export LANGUAGE=C
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD="${ROOT}/gen_deb_golang.sh"
+BUILD="${ROOT}/scripts/gen_deb_golang.sh"
 CONFIG="${ROOT}/config/go.json"
 TMP="${ROOT}/tmp/go-build-v9"
 EVIDENCE="${TMP}/evidence.log"
 # 优先仓内 tmp/metadata-C/bin；其次 PATH。
 SHELLCHECK_BIN=""
-if [[ -x "${ROOT}/tmp/metadata-C/bin/shellcheck" ]]; then
+if [[ -x "${ROOT}/tmp/go-final-parent/bin/shellcheck" ]]; then
+  SHELLCHECK_BIN="${ROOT}/tmp/go-final-parent/bin/shellcheck"
+elif [[ -x "${ROOT}/tmp/metadata-C/bin/shellcheck" ]]; then
   SHELLCHECK_BIN="${ROOT}/tmp/metadata-C/bin/shellcheck"
 elif command -v shellcheck >/dev/null 2>&1; then
   SHELLCHECK_BIN="$(command -v shellcheck)"

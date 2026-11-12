@@ -1,39 +1,40 @@
-name: Go 三段发版
+name: Release_Build
 
 on:
-  workflow_call:
-    outputs:
-      go_release_tag:
-        description: 已上传/幂等的 golang 精确 tag
-        value: ${{ jobs.Build.outputs.go_release_tag }}
-      downloads_json_artifact:
-        description: prepare 冻结索引 artifact 名
-        value: go-downloads-json
   push:
     tags:
       - 'v*'
+  schedule:
+    - cron: "17 4 * * *"
   workflow_dispatch:
+    inputs:
+      rotate_from:
+        description: 旧公钥完整 40hex 指纹（可选，换钥时传入）
+        required: false
+        type: string
+        default: ""
 
 permissions: {}
 
 concurrency:
-  group: golang-release-${{ github.workflow }}-${{ github.ref }}
+  group: apt-hub-publish
   cancel-in-progress: false
 
 jobs:
-  prepare:
+  release:
     name: Release
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: write
     outputs:
-      go_release_tag: ${{ steps.prep.outputs.go_release_tag }}
-      go_version: ${{ steps.prep.outputs.go_version }}
-      source_sha: ${{ steps.prep.outputs.source_sha }}
+      release_tag: ${{ steps.tag.outputs.release_tag }}
+      build_packages: ${{ steps.tag.outputs.build_packages }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: 安装临时依赖
         run: |
@@ -42,194 +43,124 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ca-certificates curl jq
 
-      # 母版 ncipollo：仅严格 vX.Y.Z push 创建本仓脚本 Release；workflow_call/手动不创建。
-      - name: 解析脚本 tag
-        id: script_tag
+      - name: 解析本次或既有 vtag
+        id: tag
         env:
           EVENT_NAME: ${{ github.event_name }}
           REF: ${{ github.ref }}
         run: |
           set -euo pipefail
-          echo "ok=0" >>"$GITHUB_OUTPUT"
-          echo "tag=" >>"$GITHUB_OUTPUT"
-          if [[ "${EVENT_NAME}" != "push" ]]; then
+          got="$(tr -d '[:space:]' <VERSION)"
+          [[ "${got}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "VERSION 非法" >&2; exit 1; }
+          if [[ "${EVENT_NAME}" == "push" && "${REF}" =~ ^refs/tags/(v[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            tag="${BASH_REMATCH[1]}"
+            [[ "v${got}" == "${tag}" ]] || { echo "VERSION 与 tag 不符" >&2; exit 1; }
+            echo "release_tag=${tag}" >>"$GITHUB_OUTPUT"
+            echo "build_packages=1" >>"$GITHUB_OUTPUT"
             exit 0
           fi
-          if [[ "${REF}" =~ ^refs/tags/(v[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-            echo "ok=1" >>"$GITHUB_OUTPUT"
-            echo "tag=${BASH_REMATCH[1]}" >>"$GITHUB_OUTPUT"
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" || "${EVENT_NAME}" == "schedule" ]]; then
+            tag="v${got}"
+            git rev-parse -q --verify "refs/tags/${tag}" >/dev/null \
+              || { echo "缺少既有 tag ${tag}" >&2; exit 1; }
+            echo "release_tag=${tag}" >>"$GITHUB_OUTPUT"
+            echo "build_packages=0" >>"$GITHUB_OUTPUT"
+            exit 0
           fi
+          echo "不支持的事件: ${EVENT_NAME}" >&2
+          exit 1
 
-      - name: 本仓脚本 Release
-        if: steps.script_tag.outputs.ok == '1'
+
+      - name: 本仓 vtag Release
+        if: steps.tag.outputs.build_packages == '1'
         uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1
         with:
           skipIfReleaseExists: true
-          tag: ${{ steps.script_tag.outputs.tag }}
-          name: ${{ steps.script_tag.outputs.tag }}
-          bodyFile: changelog/${{ steps.script_tag.outputs.tag }}.md
-          makeLatest: false
-
-      - name: prepare
-        id: prep
-        env:
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          chmod a+x scripts/release_golang.sh
-          rm -rf tmp/go-release-prepare
-          mkdir -p tmp
-          outf=$(mktemp tmp/prepare-out.XXXXXX)
-          set +e
-          scripts/release_golang.sh prepare \
-            --repository "${REPOSITORY}" \
-            --config config/go.json \
-            --work-dir tmp/go-release-prepare \
-            >"${outf}"
-          prep_rc=$?
-          set -e
-          if [[ "${prep_rc}" -ne 0 ]]; then
-            echo "prepare 失败 rc=${prep_rc}" >&2
-            cat -- "${outf}" >&2 || true
-            exit "${prep_rc}"
-          fi
-          mapfile -t lines <"${outf}"
-          rm -f -- "${outf}"
-          go_release_tag=""
-          go_version=""
-          downloads_json=""
-          for line in "${lines[@]}"; do
-            case "${line}" in
-              go_release_tag=*) go_release_tag="${line#go_release_tag=}" ;;
-              go_version=*) go_version="${line#go_version=}" ;;
-              downloads_json=*) downloads_json="${line#downloads_json=}" ;;
-            esac
-          done
-          [[ -n "${go_release_tag}" && -n "${go_version}" && -f "${downloads_json}" ]] \
-            || { echo "prepare 输出不完整" >&2; exit 1; }
-          [[ "${go_release_tag}" =~ ^golang-[0-9]+\.[0-9]+\.[0-9]+-[1-9][0-9]*$ ]] \
-            || { echo "go_release_tag 非法: ${go_release_tag}" >&2; exit 1; }
-          source_sha="$(git rev-parse HEAD)"
-          [[ "${source_sha}" =~ ^[0-9a-f]{40}$ ]] || { echo "HEAD sha 非法" >&2; exit 1; }
-          echo "go_release_tag=${go_release_tag}" >>"$GITHUB_OUTPUT"
-          echo "go_version=${go_version}" >>"$GITHUB_OUTPUT"
-          echo "source_sha=${source_sha}" >>"$GITHUB_OUTPUT"
-          cp -a -- "${downloads_json}" tmp/go-downloads.json
-
-      - name: 上传冻结索引
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: go-downloads-json
-          path: tmp/go-downloads.json
-          if-no-files-found: error
+          tag: ${{ steps.tag.outputs.release_tag }}
+          name: ${{ steps.tag.outputs.release_tag }}
+          bodyFile: changelog/${{ steps.tag.outputs.release_tag }}.md
 
   Build:
     name: Build
-    needs: prepare
+    needs: release
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     permissions:
       contents: write
-    outputs:
-      go_release_tag: ${{ steps.up.outputs.go_release_tag }}
+      pages: write
     steps:
-      - name: Checkout 固定出处 SHA
+      - name: Checkout 本次 vtag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 0
 
-      - name: 安装构包依赖
+      - name: 安装构包与签源依赖
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates curl jq dpkg-dev binutils xxd
+            ca-certificates curl jq gh gnupg dpkg-dev apt-utils binutils shellcheck xxd
 
-      - name: 下载冻结索引
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: go-downloads-json
-          path: tmp
+      - name: 读取 Pages 来源和发布者
+        id: config
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/publish_apt_site.sh preflight
 
-      - name: 复用或构包并上传
-        id: up
+      - name: 构包或跳过已完成 vtag
+        id: assets
+        if: needs.release.outputs.build_packages == '1'
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-          TAG: ${{ needs.prepare.outputs.go_release_tag }}
-          GO_VERSION: ${{ needs.prepare.outputs.go_version }}
-          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          TAG: ${{ needs.release.outputs.release_tag }}
         run: |
           set -euo pipefail
-          chmod a+x build.sh gen_deb_golang.sh scripts/release_golang.sh
-          mkdir -p tmp
-          reused=0
-          stf=$(mktemp tmp/status-out.XXXXXX)
+          chmod a+x scripts/release_assets.sh build.sh gen_debs.sh scripts/gen_deb_golang.sh
           set +e
-          scripts/release_golang.sh status \
-            --repository "${REPOSITORY}" \
-            --tag "${TAG}" \
-            --fetch-dir tmp/go-release-assets \
-            >"${stf}"
-          st_rc=$?
+          scripts/release_assets.sh remote-status --repository "${REPOSITORY}" --tag "${TAG}"
+          st=$?
           set -e
-          if [[ "${st_rc}" -ne 0 ]]; then
-            echo "status 失败 rc=${st_rc}" >&2
-            cat -- "${stf}" >&2 || true
-            exit "${st_rc}"
+          if [[ "${st}" -eq 0 ]]; then
+            echo "upload=0" >>"$GITHUB_OUTPUT"
+            echo "已有完整构造包，跳过构建与上传"
+            exit 0
           fi
-          mapfile -t st <"${stf}"
-          rm -f -- "${stf}"
-          for line in "${st[@]}"; do
-            case "${line}" in
-              assets_reused=1) reused=1 ;;
-              release_state=draft)
-                echo "draft 半套不视 complete，将重建/补全" >&2
-                ;;
-            esac
-          done
-          if [[ "${reused}" -ne 1 ]]; then
-            rm -rf tmp/go-release-assets
-            ./build.sh \
-              --output tmp/go-release-assets \
-              --go-version "${GO_VERSION}" \
-              --downloads-json tmp/go-downloads.json
+          if [[ "${st}" -ne 10 ]]; then
+            echo "构造包不完整或冲突，拒绝覆盖" >&2
+            exit "${st}"
           fi
-          [[ -f tmp/go-release-assets/provenance.json ]]
-          [[ -f tmp/go-release-assets/SHA256SUMS ]]
-          test -n "$(find tmp/go-release-assets -maxdepth 1 -name 'golang_*.deb' -print -quit)"
-          test -n "$(find tmp/go-release-assets -maxdepth 1 -name 'golang-go_*.deb' -print -quit)"
-          upf=$(mktemp tmp/upload-out.XXXXXX)
-          set +e
-          scripts/release_golang.sh upload \
-            --repository "${REPOSITORY}" \
-            --tag "${TAG}" \
-            --asset-dir tmp/go-release-assets \
-            --source-sha "${SOURCE_SHA}" \
-            >"${upf}"
-          up_rc=$?
-          set -e
-          if [[ "${up_rc}" -ne 0 ]]; then
-            echo "upload 失败 rc=${up_rc}" >&2
-            cat -- "${upf}" >&2 || true
-            exit "${up_rc}"
-          fi
-          mapfile -t lines <"${upf}"
-          rm -f -- "${upf}"
-          go_release_tag=""
-          for line in "${lines[@]}"; do
-            case "${line}" in
-              go_release_tag=*) go_release_tag="${line#go_release_tag=}" ;;
-            esac
-          done
-          [[ -n "${go_release_tag}" ]] || { echo "upload 未输出 go_release_tag" >&2; exit 1; }
-          echo "go_release_tag=${go_release_tag}" >>"$GITHUB_OUTPUT"
+          bash ./build.sh && bash ./build.sh test || exit $?
+          scripts/release_assets.sh local-status --asset-dir ./build/upload_tmp_dir || exit $?
+          echo "upload=1" >>"$GITHUB_OUTPUT"
+
+      - name: 上传构造包
+        if: steps.assets.outputs.upload == '1'
+        uses: george012/upload_github_release_assets_action@b56f61e7a10692c6ee2d7482b451911393479030
+        with:
+          path: ./build/upload_tmp_dir/*
+          tag_name: ${{ needs.release.outputs.release_tag }}
+          token: ${{ github.token }}
+          fail_on_unmatched_files: true
+
+      - name: 生成并发布 Pages 产物分支
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APT_HUB_GPG_PRIVATE_KEY: ${{ secrets.APT_HUB_GPG_PRIVATE_KEY }}
+          APT_HUB_GIT_NAME: ${{ steps.config.outputs.git_name }}
+          APT_HUB_GIT_EMAIL: ${{ steps.config.outputs.git_email }}
+          SITE_URL: ${{ steps.config.outputs.site_url }}
+          PAGES_CNAME: ${{ steps.config.outputs.cname }}
+          RELEASE_TAG: ${{ needs.release.outputs.release_tag }}
+          ROTATE_FROM: ${{ inputs.rotate_from }}
+        run: bash scripts/publish_apt_site.sh publish
 
   RemoveOldRelease:
     name: RemoveOldRelease
     needs:
-      - prepare
+      - release
       - Build
+    if: needs.release.outputs.build_packages == '1'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -237,101 +168,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: 安装临时依赖
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates curl jq
+            ca-certificates curl jq gh
 
-      - name: prune
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-          TAG: ${{ needs.Build.outputs.go_release_tag }}
-        run: |
-          set -euo pipefail
-          chmod a+x scripts/release_golang.sh
-          scripts/release_golang.sh prune \
-            --repository "${REPOSITORY}" \
-            --current-tag "${TAG}" \
-            --apt-data-ref apt-data \
-            --keep-recent 2
-
-      # 母版两代前清理：仅严格 vtag push 且 Build 成功后；不存在则无操作。
-      - name: 清理旧脚本 Release
+      - name: 清理两代前 Release
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
           REF: ${{ github.ref }}
         run: |
           set -euo pipefail
-          if [[ "${EVENT_NAME}" != "push" ]]; then
-            echo "非 tag push，跳过脚本两代清理"
-            exit 0
-          fi
-          if [[ ! "${REF}" =~ ^refs/tags/(v[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-            echo "非严格 vX.Y.Z，跳过脚本两代清理"
-            exit 0
-          fi
-          APP_VERSION="${BASH_REMATCH[1]}"
-          get_pre_del_tag() {
-            local v_str="$1"
-            local baseStr base major minor
-            baseStr=$(echo "$v_str" | cut -d'.' -f1)
-            base=${baseStr//v/}
-            major=$(echo "$v_str" | cut -d'.' -f2)
-            minor=$(echo "$v_str" | cut -d'.' -f3)
-            if ((minor>0)); then
-              minor=$((minor-1))
-            else
-              minor=999
-              if ((major>0)); then
-                major=$((major-1))
-              else
-                major=999
-                if ((base>0)); then
-                  base=$((base-1))
-                else
-                  # 初期下溢：无更低版本，返回地板供后续 view 不存在则无操作（不因首版失败）
-                  echo "v0.0.0"
-                  return 0
-                fi
-              fi
-            fi
-            echo "v${base}.${major}.${minor}"
-          }
-          APP_OLD_VERSION=$(get_pre_del_tag "$(get_pre_del_tag "${APP_VERSION}")")
-          echo "Old version to remove: ${APP_OLD_VERSION}"
-          case "${APP_OLD_VERSION}" in
-            golang-*|latest)
-              echo "拒绝删除受保护引用: ${APP_OLD_VERSION}" >&2
-              exit 1
-              ;;
-          esac
-          [[ "${APP_OLD_VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-            echo "旧版本非严格 vX.Y.Z: ${APP_OLD_VERSION}" >&2
-            exit 1
-          }
-          mkdir -p tmp
-          errf="$(mktemp tmp/script-old-view.XXXXXX)"
-          set +e
-          gh release view "${APP_OLD_VERSION}" >/dev/null 2>"${errf}"
-          view_rc=$?
-          set -e
-          if [[ "${view_rc}" -ne 0 ]]; then
-            # 仅明确不存在才无操作；权限/网络等通用 exit1 不得吞掉
-            if grep -Eiq 'release not found|HTTP 404|Not Found' "${errf}"; then
-              rm -f -- "${errf}"
-              echo "旧脚本 Release ${APP_OLD_VERSION} 不存在，无操作"
-              exit 0
-            fi
-            echo "查询旧脚本 Release 失败 rc=${view_rc}" >&2
-            cat -- "${errf}" >&2 || true
-            rm -f -- "${errf}"
-            exit "${view_rc}"
-          fi
-          rm -f -- "${errf}"
-          gh release delete "${APP_OLD_VERSION}" -y
-          git push origin --delete "${APP_OLD_VERSION}"
+          chmod a+x scripts/publish_apt_site.sh
+          scripts/publish_apt_site.sh remove-old

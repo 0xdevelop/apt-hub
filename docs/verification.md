@@ -1,5 +1,14 @@
 # 验证记录
 
+## 2026-11-12 已上线基线与本次架构调整
+
+- 原发布运行 [43185095856](https://github.com/0xdevelop/apt-hub/actions/runs/43185095856) 成功；公网首页、公钥与 `state.json` 实际返回 `200`，签名索引验签通过。隔离 APT 根完成更新、下载和安装计划；下载的 Go 包另在独占根内实际安装，并离线编译运行成功。下文“尚未上线”“列表为空”属于当时快照，不是当前状态。
+- 本轮新入口 `build.sh → gen_debs.sh → scripts/gen_deb_golang.sh` 已用官方 Go `1.27.4` 双架构归档构出四个包，`SHA256SUMS`、控制字段与精确依赖核对通过；四个 `.deb` 与已发布的同 Debian 版本逐字一致。证据：`tmp/first-live-deploy/template-realignment/official-inputs/build.rc`、`build.log` 与 `official-build/`。
+- 本次按用户要求收敛为一个 `release.yml`，保留 `Release → Build → RemoveOldRelease`，构造文件直接归对应本仓 `vX.Y.Z` assets；Pages 复用 `apt-data` 纯站点产物分支，不再使用 Actions Artifacts 或额外发布工作流。
+- 固定源码执行完整 `build.sh test`，九套测试全部完成、退出 `0`；真实上传文件测试前后逐字一致。随后仅修复上传接线：无构造条目时跳过上传，首次上传复用完整目录校验，构建、测试和校验失败显式传播。集成后定点复跑发版测试 `71` 项、工作流测试 `39` 项，均零失败；全仓 ShellCheck 通过。独立复审通过，生产文件与获批快照一致。
+- 从真实 YAML 抽取上传步骤重放：构建退出 `23`、测试退出 `24`、本地校验退出 `1`，均不写入上传成功输出；官方 `.deb` 清单直接跳过构建与上传。当前真实官方 Go 构造文件通过同一本地校验。证据：`tmp/first-live-deploy/template-realignment/final-parent/`、`integrated/`、`parent-review-delta/` 与 `review-delta-verdict.stream.jsonl`。
+- 上述是本地集成与复审结果，不是新工作流的生产发布。切换 Pages 发布源、对应新版本的 GitHub 运行及公网消费者仍须实际验证；旧线上成功不能代替本轮验收。
+
 > **当前范围修订（用户 2026-11-09 后续决定）**：RustDesk 官方 `.deb` 原样直下；Go 官方归档由独立脚本构成 Debian 包，经本仓 Releases assets 分发。用户随后要求 Go 的包名为 `golang`，因此下文旧 `apt-hub-go` 产物结果只对应旧快照；新包名、同版本 `golang-go` 依赖及已有 Ubuntu 包的升级必须另验。下文早期“不另设本项目下载落点”等结论只反映当时的范围，已被该决定替代，保留作历史记录，不是当前限制。`f5c1eb3` 是供跨机评审的阶段快照，尚未完成本轮验收；其 CI 在 ShellCheck 失败，后续测试未执行。新一轮结果须与该快照分开记录。
 
 ## 2026-11-06 元数据适配版实测

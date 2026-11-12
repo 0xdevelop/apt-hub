@@ -118,9 +118,15 @@ else
   fail "bash -n"
 fi
 
+render_shellcheck=""
 if command -v shellcheck >/dev/null 2>&1; then
+  render_shellcheck="$(command -v shellcheck)"
+elif [[ -x "$ROOT/tmp/go-final-parent/bin/shellcheck" ]]; then
+  render_shellcheck="$ROOT/tmp/go-final-parent/bin/shellcheck"
+fi
+if [[ -n "$render_shellcheck" ]]; then
   set +e
-  shellcheck -s bash "$RENDER" "$GIT_TAG" "$ROOT/tests/render_test.sh"
+  "$render_shellcheck" -s bash "$RENDER" "$GIT_TAG" "$ROOT/tests/render_test.sh"
   sc_rc=$?
   set -e
   echo "$sc_rc" >"$EVIDENCE/shellcheck.rc"
@@ -215,7 +221,12 @@ mkdir -p -- "$empty_site/extra"
 printf 'keep\n' >"$empty_site/extra/keep.txt"
 printf 'OLDHTML\n' >"$empty_site/index.html"
 make_readme "$empty_readme"
-cp -f -- "$ROOT/data/published.json" "$EVIDENCE/published.empty.json"
+cat >"$EVIDENCE/published.empty.json" <<'EOF'
+{
+  "schema_version": "2",
+  "packages": []
+}
+EOF
 empty_state_hash=$(hash_file "$EVIDENCE/published.empty.json")
 empty_outside_before=$(readme_outside_hash "$empty_readme")
 
@@ -697,15 +708,10 @@ after_published=$(sha256sum -- "$ROOT/data/published.json" | awk '{print $1}')
 after_version=$(sha256sum -- "$ROOT/VERSION" | awk '{print $1}')
 after_git_tag=$(sha256sum -- "$ROOT/git_tag.sh" | awk '{print $1}')
 assert_eq "主 README 未被测试改写" "$after_readme" "$MAIN_README_SUM"
-assert_eq "data/published.json 仍为空状态原文" "$after_published" "$PUBLISHED_SUM"
+assert_eq "data/published.json 字节未变" "$after_published" "$PUBLISHED_SUM"
 assert_eq "VERSION 未被 git_tag 测试改写" "$after_version" "$VERSION_SUM"
 assert_eq "git_tag.sh 字节未变" "$after_git_tag" "$GIT_TAG_SUM"
 
-if jq -e '.schema_version=="2" and .packages==[]' "$ROOT/data/published.json" >/dev/null; then
-  pass "published.json schema2 空 packages"
-else
-  fail "published.json 不是 schema2 空 packages"
-fi
 if grep -F -q -- '1.5.0' "$ROOT/data/published.json"; then
   fail "published.json 含候选 1.5.0"
 else

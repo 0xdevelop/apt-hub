@@ -18,7 +18,8 @@ fingerprint=""
 site_url=""
 releases_arg=""
 package_repository=""
-go_release_tag=""
+package_release_tag=""
+upstream_dir=""
 go_downloads_json=""
 rotate_from=""
 acquire_https_ca=""
@@ -33,7 +34,7 @@ die() {
 
 usage() {
   cat >&2 <<'EOF'
-用法: scripts/update_sources.sh --catalog <file> --previous <dir> --work-dir <全新/空目录> --gnupghome <dir> --fingerprint <完整指纹> --site-url <https> [--releases <已生成的官方发行版JSON>] [--package-repository <owner/repo>] [--go-release-tag <golang-X.Y.Z-R>] [--go-downloads-json <file>] [--rotate-from <旧完整指纹>] [--acquire-https-ca <pem>] [--github-https-proxy <http://host:port>]
+用法: scripts/update_sources.sh --catalog <file> --previous <dir> --work-dir <全新/空目录> --gnupghome <dir> --fingerprint <完整指纹> --site-url <https> [--releases <已生成的官方发行版JSON>] [--package-repository <owner/repo>] [--release-tag <vX.Y.Z>] [--upstream-dir <dir>] [--go-downloads-json <file>] [--rotate-from <旧完整指纹>] [--acquire-https-ca <pem>] [--github-https-proxy <http://host:port>]
 EOF
   exit 2
 }
@@ -216,9 +217,12 @@ while [[ $# -gt 0 ]]; do
     --package-repository)
       [[ $# -ge 2 ]] || usage
       package_repository="$2"; shift 2 ;;
-    --go-release-tag)
+    --release-tag)
       [[ $# -ge 2 ]] || usage
-      go_release_tag="$2"; shift 2 ;;
+      package_release_tag="$2"; shift 2 ;;
+    --upstream-dir)
+      [[ $# -ge 2 ]] || usage
+      upstream_dir="$2"; shift 2 ;;
     --go-downloads-json)
       [[ $# -ge 2 ]] || usage
       go_downloads_json="$2"; shift 2 ;;
@@ -264,33 +268,27 @@ if [[ -n "${releases_arg}" ]]; then
   releases="$(assert_allowed_file releases "${releases_arg}")"
 fi
 
-# catalog 含 Go 且未显式给 tag：可从官方索引 + config/go.json revision 派生，但不假造已上传。
+# catalog 含 Go 且未显式给 tag：根 VERSION 派生严格 vX.Y.Z，不从 Go 上游推本仓 tag。
 if jq -e '.packages|any((.source_type // "") == "go_official_archive")' "${catalog}" >/dev/null; then
   [[ -n "${package_repository}" ]] || die "catalog 含 go_official_archive 时必须传 --package-repository"
-  if [[ -z "${go_release_tag}" ]]; then
-    go_cfg="${PROJECT_ROOT}/config/go.json"
-    [[ -f "${go_cfg}" && ! -L "${go_cfg}" ]] || die "缺少 config/go.json 无法派生 go-release-tag"
-    rev="$(jq -r '.revision|tostring' "${go_cfg}")"
-    [[ "${rev}" =~ ^[1-9][0-9]*$ ]] || die "config/go.json revision 非法"
-    dl_tmp="${PROJECT_TMP}/update-go-dl-$$.json"
-    if [[ -n "${go_downloads_json}" ]]; then
-      cp -- "${go_downloads_json}" "${dl_tmp}"
+  if [[ -z "${package_release_tag}" ]]; then
+    ver_file="${PROJECT_ROOT}/VERSION"
+    [[ -f "${ver_file}" && ! -L "${ver_file}" ]] || die "缺少 VERSION，无法派生 release-tag"
+    raw="$(tr -d '[:space:]' <"${ver_file}")"
+    if [[ "${raw}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      package_release_tag="${raw}"
+    elif [[ "${raw}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      package_release_tag="v${raw}"
     else
-      curl --fail --silent --show-error --location \
-        --proto '=https' --proto-redir '=https' --tlsv1.2 \
-        --connect-timeout 20 --max-time 60 \
-        -o "${dl_tmp}" -- 'https://go.dev/dl/?mode=json&include=all' \
-        || die "派生 go-release-tag 时拉取 go.dev 失败"
+      die "VERSION 无法派生严格 vX.Y.Z: ${raw}"
     fi
-    ver_deb="$(jq -r '
-      ([.[] | select(.stable==true)][0].version // empty) as $v
-      | if ($v|startswith("go")) then $v[2:] else empty end
-    ' "${dl_tmp}")"
-    rm -f -- "${dl_tmp}"
-    [[ "${ver_deb}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "无法从官方索引派生 Go 版本"
-    go_release_tag="golang-${ver_deb}-${rev}"
-    printf 'update_sources.sh: 派生 go-release-tag=%s（仍须上游已上传该 tag）\n' "${go_release_tag}"
+    printf 'update_sources.sh: 由 VERSION 派生 release-tag=%s\n' "${package_release_tag}"
+  elif [[ ! "${package_release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    die "release-tag 必须是严格 vX.Y.Z: ${package_release_tag}"
   fi
+fi
+if [[ -n "${upstream_dir}" ]]; then
+  upstream_dir="$(assert_allowed_dir upstream-dir "${upstream_dir}" yes)"
 fi
 if [[ -n "${acquire_https_ca}" ]]; then
   acquire_https_ca="$(assert_allowed_file acquire-https-ca "${acquire_https_ca}")"
@@ -379,7 +377,8 @@ sync_args=(
   --site-url "${site_url}"
 )
 [[ -n "${package_repository}" ]] && sync_args+=(--package-repository "${package_repository}")
-[[ -n "${go_release_tag}" ]] && sync_args+=(--go-release-tag "${go_release_tag}")
+[[ -n "${package_release_tag}" ]] && sync_args+=(--release-tag "${package_release_tag}")
+[[ -n "${upstream_dir}" ]] && sync_args+=(--upstream-dir "${upstream_dir}")
 [[ -n "${go_downloads_json}" ]] && sync_args+=(--go-downloads-json "${go_downloads_json}")
 [[ -n "${rotate_from}" ]] && sync_args+=(--rotate-from "${rotate_from}")
 "${SCRIPT_DIR}/sync.sh" "${sync_args[@]}"

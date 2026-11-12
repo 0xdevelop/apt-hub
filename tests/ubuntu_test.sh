@@ -10,8 +10,9 @@ export LANGUAGE=C
 
 REL="$ROOT/scripts/ubuntu_releases.sh"
 VER="$ROOT/scripts/verify_ubuntu.sh"
-PUB=".github/workflows/ubuntu-publish.yml"
-TST=".github/workflows/ubuntu-test.yml"
+PUB="$ROOT/.github/workflows/release.yml"
+SITE="$ROOT/scripts/publish_apt_site.sh"
+
 BASE="$ROOT/tmp/metadata-C"
 mkdir -p "$ROOT/tmp"
 # 只清本路自测子树，不动 probe / A / B / controller 证据。
@@ -284,6 +285,10 @@ find_shellcheck() {
   fi
   if [[ -x "$ROOT/tmp/metadata-C/bin/shellcheck" ]]; then
     printf '%s\n' "$ROOT/tmp/metadata-C/bin/shellcheck"
+    return 0
+  fi
+  if [[ -x "$ROOT/tmp/go-final-parent/bin/shellcheck" ]]; then
+    printf '%s\n' "$ROOT/tmp/go-final-parent/bin/shellcheck"
     return 0
   fi
   return 1
@@ -652,16 +657,12 @@ else
 fi
 
 echo "== workflow 约束 =="
-for sha in \
-  'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' \
-  'actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9' \
-  'actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346'; do
-  if grep -Fq "$sha" "$PUB" "$TST"; then
-    pass "workflow 固定 SHA $sha"
-  else
-    fail "workflow 缺少 SHA $sha"
-  fi
-done
+if [[ ! -e "$ROOT/.github/workflows/ubuntu-test.yml" && ! -e "$ROOT/.github/workflows/ubuntu-publish.yml" ]] \
+  && ! grep -Eq 'upload-pages-artifact|deploy-pages@|upload-artifact|download-artifact' "$PUB"; then
+  pass "只有母版发布链，无 Artifact 影子流程"
+else
+  fail "仍有影子工作流或 Artifact 部署链"
+fi
 if grep -Fq 'cancel-in-progress: false' "$PUB"; then
   pass "发布 concurrency 不取消在途"
 else
@@ -683,20 +684,18 @@ if grep -Fq "APT_HUB_GIT_NAME='yerikokay'" "$PUB" \
 else
   pass "publish 无硬编码原维护者身份"
 fi
-if grep -Fq 'github.actor' "$PUB" && grep -Fq 'github.actor_id' "$PUB" \
-  && grep -Fq '解析发布者命令级身份' "$PUB" \
-  && grep -Fq 'steps.publisher.outputs.git_name' "$PUB" \
-  && grep -Fq 'needs.build_verify.outputs.git_name' "$PUB"; then
+if grep -Fq 'GITHUB_ACTOR' "$SITE" && grep -Fq 'GITHUB_ACTOR_ID' "$SITE" \
+  && grep -Fq 'steps.config.outputs.git_name' "$PUB"; then
   pass "提交身份经 github.actor 核验后命令级消费"
 else
   fail "缺少 actor 核验与命令级身份消费"
 fi
-if grep -Fq '拒绝非人类 actor' "$PUB" && grep -Fq '"User"' "$PUB"; then
+if grep -Fq '拒绝非人类发布者' "$SITE" && grep -Fq '"User"' "$SITE"; then
   pass "发布者身份拒绝非 User"
 else
   fail "未拒绝非人类 actor"
 fi
-if grep -Eq 'git[[:space:]]+push[[:space:]].*(--force|-f )|push[[:space:]]+--force' "$PUB"; then
+if grep -Eq 'git[[:space:]]+push[[:space:]].*(--force|-f )|push[[:space:]]+--force' "$PUB" "$SITE"; then
   fail "publish 含 force-push"
 else
   pass "publish 无 force-push"
@@ -711,12 +710,12 @@ if grep -Fq 'APT_HUB_GPG_PRIVATE_KEY' "$PUB"; then
 else
   fail "缺少私钥 Secret"
 fi
-if grep -Fq 'primary secret identity' "$PUB" || grep -Fq '恰好一个 primary' "$PUB"; then
+if grep -Fq '需要恰好一个主私钥身份' "$SITE"; then
   pass "导入后核验唯一 primary secret identity"
 else
   fail "未核验唯一 primary fingerprint"
 fi
-if grep -Fq 'pages: read' "$PUB" && grep -Fq '/pages' "$PUB" && grep -Fq 'html_url' "$PUB"; then
+if grep -Fq '/pages' "$SITE" && grep -Fq 'html_url' "$SITE"; then
   pass "Pages URL 经只读 API 取得"
 else
   fail "未用 Pages 只读 API 取 html_url"
@@ -726,7 +725,7 @@ if grep -Eq 'configure-pages|peaceiris/actions-gh-pages|启用 Pages|custom doma
 else
   pass "不自动启用 Pages / 不猜域名"
 fi
-if grep -Fq -- '--site-url' "$PUB"; then
+if grep -Fq -- '--site-url' "$SITE"; then
   pass "构建步向 sync 传 --site-url"
 else
   fail "构建步未传 --site-url"
@@ -736,55 +735,61 @@ if grep -Fq '104857600' "$PUB" || grep -Fq '100MiB' "$PUB"; then
 else
   pass "已移除 100MiB 包门禁"
 fi
-if grep -Fq '1073741824' "$PUB"; then
+if grep -Fq '1073741824' "$SITE"; then
   pass "Pages 1GB 上限检查"
 else
   fail "缺少 1GB 上限"
 fi
-if grep -Fq 'names=(apt-hub.gpg state.json index.html add_source.sh repos)' "$PUB"; then
+if grep -Fq 'names=(.nojekyll CNAME apt-hub.gpg state.json index.html add_source.sh repos)' "$SITE"; then
   pass "apt-data 白名单为元数据与单一公开加源脚本"
 else
   fail "apt-data 白名单不是 gpg/state/index/add_source.sh/repos"
 fi
-if grep -E 'names=\(.*pool|tmp/site/pool' "$PUB"; then
+if grep -E 'names=\(.*pool|tmp/site/pool' "$SITE"; then
   fail "apt-data 白名单仍含 pool"
 else
   pass "保存路径不再要求 pool"
 fi
-if grep -Fq 'git add -A' "$PUB"; then
+if grep -Fq 'git add -A' "$SITE"; then
   fail "apt-data 保存仍 git add -A"
 else
   pass "apt-data 保存无 git add -A"
 fi
-if grep -A20 '^  update_readme:' "$PUB" | grep -q 'build_verify' \
-  && grep -A20 '^  update_readme:' "$PUB" | grep -q 'deploy_pages'; then
-  pass "README 回写同时 needs build_verify 与 deploy_pages"
+if awk '
+  /^publish\(\)/ {active=1}
+  active && /^  deploy_pages$/ {deploy=NR}
+  active && /^  update_readme$/ {readme=NR}
+  END { exit !(deploy>0 && readme>deploy) }
+' "$SITE"; then
+  pass "README 回写在同一 job 的 deploy 之后"
 else
-  fail "README 回写未同时绑定 build 与 deploy"
+  fail "README 回写不在 deploy 之后"
 fi
-if grep -Fq 'apt_data_sha' "$PUB"; then
+if grep -Fq 'apt_data_sha' "$SITE"; then
   pass "build 输出已保存 apt-data SHA"
 else
   fail "缺少 apt_data_sha 输出"
 fi
-archive_sha_needle="git archive \"\$SHA\""
-if grep -A80 '用已部署 state 更新 README' "$PUB" | grep -Fq -- "$archive_sha_needle"; then
-  pass "README 从指定 SHA 取 state"
+if grep -Fq "git show \"\${sha}:state.json\"" "$SITE" \
+  && grep -Fq "git worktree add --detach \"\${work}\" refs/remotes/origin/main" "$SITE" \
+  && grep -Fq 'push origin HEAD:refs/heads/main' "$SITE"; then
+  pass "README 从指定 SHA 取 state，并在 main 上提交"
 else
-  fail "README 未从指定 SHA 取 state"
+  fail "README 未从 main 回写或仍推 detached HEAD"
 fi
-if grep -A80 '用已部署 state 更新 README' "$PUB" | grep -q 'git archive origin/apt-data'; then
+if grep -Fq 'git archive origin/apt-data' "$SITE"; then
   fail "README 仍 archive 当时最新 apt-data"
 else
   pass "README 不取 apt-data 最新 tip"
 fi
 if sed -n '/^on:/,/^permissions:/p' "$PUB" | grep -q 'workflow_dispatch:' \
   && sed -n '/^on:/,/^permissions:/p' "$PUB" | grep -q 'schedule:' \
+  && sed -n '/^on:/,/^permissions:/p' "$PUB" | grep -q 'push:' \
   && ! sed -n '/^on:/,/^permissions:/p' "$PUB" | grep -q 'pull_request:' \
-  && ! sed -n '/^on:/,/^permissions:/p' "$PUB" | grep -q 'push:'; then
-  pass "发布仅 schedule/dispatch"
+  && [[ ! -e "$ROOT/.github/workflows/ubuntu-publish.yml" ]]; then
+  pass "发布在 release.yml，无独立 ubuntu-publish"
 else
-  fail "发布触发条件不是仅 schedule/dispatch"
+  fail "发布触发或残留 ubuntu-publish 不对"
 fi
 if grep -Fq "awk -F: '/^fpr:/{print toupper(\$10); exit}'" "$PUB"; then
   fail "仍取密钥列表首条指纹"
@@ -796,69 +801,19 @@ if grep -Fq 'gpg-preset-passphrase' "$PUB" || grep -Fq 'allow-preset-passphrase'
 else
   pass "无 gpg-preset-passphrase"
 fi
-if grep -Fq 'tmp/gnupg' "$PUB" && grep -Fq 'gpgconf --kill gpg-agent' "$PUB"; then
+if grep -Fq 'tmp/gnupg' "$SITE" && grep -Fq 'gpgconf --homedir' "$SITE"; then
   pass "私钥仅临时 gnupg 并清理 agent"
 else
   fail "未限制/清理 gnupg"
 fi
-if grep -Fq 'shellcheck' "$TST"; then
-  pass "CI 安装 shellcheck"
-else
-  fail "CI 未安装 shellcheck"
-fi
-if grep -Fq 'tests/workflow_test.sh tests/add_source_test.sh' "$TST" \
-  && grep -Fq 'tests/update_sources_test.sh' "$TST" \
-  && grep -Fq 'scripts/update_sources.sh' "$TST" \
-  && grep -Fq "git ls-files -z -- '*.sh'" "$TST" \
-  && ! grep -Eq 'setup-(bun|node)|bun install|npm install' "$TST"; then
-  pass "CI 加源/单入口测试 chmod 并执行，保留 tracked 全 ShellCheck 且无新运行时"
-else
-  fail "CI 加源/单入口测试未接线或破坏既有静态检查/运行时约束"
-fi
-if grep -Fq 'scripts/update_sources.sh' "$PUB" \
-  && awk '
-    /^      - name: 生成发行版数据并构建候选站点$/ {hit=1; next}
-    hit && /^      - name:/ {exit}
-    hit && /chmod / {next}
-    hit && /(^|[[:space:]])scripts\/sync\.sh([[:space:]]|\\|$)/ {bad=1}
-    hit && /(^|[[:space:]])scripts\/verify_ubuntu\.sh([[:space:]]|\\|$)/ {bad=1}
-    hit && /(^|[[:space:]])scripts\/ubuntu_releases\.sh([[:space:]]|\\|$)/ {bad=1}
-    hit && /(^|[[:space:]])scripts\/render\.sh([[:space:]]|\\|$)/ {bad=1}
-    END { exit bad+0 }
-  ' "$PUB"; then
+if grep -Fq 'scripts/update_sources.sh' "$SITE" && grep -Fq 'publish_apt_site.sh publish' "$PUB"; then
   pass "发布构建步改为单入口 update_sources"
 else
   fail "发布构建步未改为单入口或不干净"
 fi
-if grep -Fq 'ShellCheck:' "$TST" || grep -Fq 'shellcheck' "$TST"; then
-  pass "失败注解收集 ShellCheck 诊断"
-else
-  fail "失败注解未收集 ShellCheck"
-fi
-if grep -Fq "::error title=夹具测试失败::" "$TST"; then
-  pass "失败注解标题为常量"
-else
-  fail "失败注解标题不是简化常量"
-fi
-if awk '
-  /pull_request:/ { pr=1 }
-  /secrets\./ { if (pr && FILENAME ~ /ubuntu-test/) bad=1 }
-  END { exit bad+0 }
-' "$TST"; then
-  pass "PR 测试工作流不引用 secrets"
-else
-  fail "PR 测试工作流引用了 secrets"
-fi
-if grep -qE 'permissions:[[:space:]]*$' "$TST" && grep -A1 'permissions:' "$TST" | grep -q '{}'; then
-  pass "test 工作流默认无权限"
-else
-  fail "test 工作流 permissions 未收口"
-fi
-if grep -A6 'name: 部署 GitHub Pages' "$PUB" | grep -q 'pages: write' \
-  && grep -A20 'name: 构建校验并保存候选' "$PUB" | grep -q 'contents: write' \
-  && grep -A20 'name: 构建校验并保存候选' "$PUB" | grep -q 'pages: read' \
-  && ! grep -A20 'name: 构建校验并保存候选' "$PUB" | grep -q 'pages: write'; then
-  pass "权限按 job 拆分且 build 含 pages:read"
+if grep -Fq 'permissions: {}' "$PUB" && grep -Fq 'pages: write' "$PUB" \
+  && ! grep -Fq 'id-token:' "$PUB"; then
+  pass "Pages 分支构建只用内置工作流令牌"
 else
   fail "job 权限拆分不符合契约"
 fi
@@ -867,13 +822,11 @@ echo "== 真实消费者：copy/site + 隔离 Git 保存/读回/并发 =="
 GIT_NAME='fixture-publisher'
 GIT_EMAIL='fixture-publisher@invalid'
 
-extract_workflow_fn() {
-  local name="$1"
-  awk -v name="$name" '
-    index($0, "          " name "() {") == 1 {grab=1}
-    grab { print }
-    grab && $0 == "          }" {exit}
-  ' "$ROOT/.github/workflows/ubuntu-publish.yml" | sed 's/^          //'
+install_publish_script() {
+  local sandbox="$1"
+  mkdir -p "$sandbox/scripts"
+  cp "$SITE" "$sandbox/scripts/publish_apt_site.sh"
+  chmod a+x "$sandbox/scripts/publish_apt_site.sh"
 }
 
 make_git_site() {
@@ -905,20 +858,13 @@ make_git_site() {
   chmod 0644 "$site/add_source.sh"
 }
 
-extract_workflow_run() {
-  local step="$1"
-  awk -v step="$step" '
-    /^      - name:/ { hit=($0 == "      - name: " step); grab=0 }
-    hit && /^        run: \|$/ { grab=1; next }
-    grab && /^          / { print substr($0, 11); next }
-    grab && NF { grab=0 }
-  ' "$ROOT/.github/workflows/ubuntu-publish.yml"
-}
-
 # 仅运行候选 gate，不执行构建、安装器、私钥导入或网络 APT 矩阵。
 gate_root="$BASE/site-gate"
 gate_run="$BASE/site-gate.sh"
-extract_workflow_run '检查产物大小并无符号链接' >"$gate_run"
+cat >"$gate_run" <<'EOF'
+set -euo pipefail
+bash scripts/publish_apt_site.sh gate-site
+EOF
 # 加源脚本复制已收口进 update_sources.sh；gate 正向用例按同一契约就地消费，不再 awk 截取失效构建步。
 copy_run="$BASE/site-copy-add-source.sh"
 cat >"$copy_run" <<'EOF'
@@ -930,6 +876,7 @@ EOF
 for gate_case in ok missing symlink directory fifo private deb version mode; do
   rm -rf "$gate_root"
   mkdir -p "$gate_root/tmp" "$gate_root/scripts"
+  install_publish_script "$gate_root"
   make_git_site "$gate_root/tmp/site" gate
   cp "$gate_root/tmp/site/add_source.sh" "$gate_root/scripts/add_source.sh"
   if [[ "$gate_case" == ok ]]; then
@@ -969,6 +916,7 @@ done
 for gate_batch in fifo symlink deb; do
   rm -rf "$gate_root"
   mkdir -p "$gate_root/tmp" "$gate_root/scripts"
+  install_publish_script "$gate_root"
   make_git_site "$gate_root/tmp/site" gate
   cp "$gate_root/tmp/site/add_source.sh" "$gate_root/scripts/add_source.sh"
   case "$gate_batch" in
@@ -1002,6 +950,7 @@ done
 
 rm -rf "$gate_root"
 mkdir -p "$gate_root/tmp" "$gate_root/scripts" "$gate_root/bin"
+install_publish_script "$gate_root"
 make_git_site "$gate_root/tmp/site" gate
 cp "$gate_root/tmp/site/add_source.sh" "$gate_root/scripts/add_source.sh"
 cat >"$gate_root/bin/find" <<'EOF'
@@ -1023,81 +972,35 @@ fi
 isolated_save() {
   local sandbox="$1" origin="$2" out="$3" log="$4"
   local rc=0
-  (
-    cd "$sandbox"
-    set -euo pipefail
-    export GIT_CONFIG_GLOBAL=/dev/null
-    export GIT_CONFIG_NOSYSTEM=1
-    export GIT_AUTHOR_NAME="$GIT_NAME"
-    export GIT_AUTHOR_EMAIL="$GIT_EMAIL"
-    export GIT_COMMITTER_NAME="$GIT_NAME"
-    export GIT_COMMITTER_EMAIL="$GIT_EMAIL"
-    APT_HUB_GIT_NAME="$GIT_NAME"
-    APT_HUB_GIT_EMAIL="$GIT_EMAIL"
-    work="$PWD/tmp/apt-data-git"
-    rm -rf "$work"
-    mkdir -p "$work"
-    git -C "$work" init
-    git -C "$work" remote add origin "$origin"
-    git_auth() { git -C "$work" "$@"; }
-    eval "$(extract_workflow_fn copy_site)"
-    eval "$(extract_workflow_fn refuse_non_whitelist)"
-    if [[ -s tmp/apt-data-base.sha ]]; then
-      base=$(tr -d '[:space:]' < tmp/apt-data-base.sha)
-      [[ "$base" =~ ^[0-9a-f]{40}$ ]] || { echo "apt-data 基线 SHA 非法" >&2; exit 1; }
-      git_auth fetch origin refs/heads/apt-data:refs/remotes/origin/apt-data
-      git -C "$work" checkout -B apt-data "$base"
-      refuse_non_whitelist
-      copy_site
-      refuse_non_whitelist
-      if git -C "$work" diff --cached --quiet; then
-        echo "apt-data 已与候选一致，无需新提交"
-      else
-        git -C "$work" -c "user.name=${APT_HUB_GIT_NAME}" -c "user.email=${APT_HUB_GIT_EMAIL}" commit -m "更新候选 APT 站点数据"
+  install_publish_script "$sandbox"
+  # shellcheck disable=SC2016
+  env GIT_NAME="${GIT_NAME}" GIT_EMAIL="${GIT_EMAIL}" \
+    sandbox="${sandbox}" origin="${origin}" out="${out}" \
+    bash -c '
+      set -euo pipefail
+      cd "${sandbox}"
+      server_url="file://$(dirname "${origin}")"
+      repo_name="$(basename "${origin}" .git)"
+      if [[ ! -d .git ]]; then
+        git init -b main >/dev/null
+        git add -- scripts
+        git -c "user.name=${GIT_NAME}" -c "user.email=${GIT_EMAIL}" commit -m "测试发布脚本" >/dev/null
+        git remote add origin "${origin}"
       fi
-      if ! git_auth push origin apt-data; then
-        echo "apt-data 快进推送失败，禁止 force，请重跑" >&2
-        exit 1
-      fi
-    else
-      if git -C "$work" ls-remote --heads origin apt-data | grep -q .; then
-        echo "apt-data 在恢复后被创建，禁止把首轮快照覆到新分支上" >&2
-        exit 1
-      fi
-      git -C "$work" checkout -B apt-data
-      copy_site
-      refuse_non_whitelist
-      git -C "$work" -c "user.name=${APT_HUB_GIT_NAME}" -c "user.email=${APT_HUB_GIT_EMAIL}" commit -m "初始化候选 APT 站点数据"
-      if ! git_auth push -u origin apt-data; then
-        echo "创建 apt-data 失败（网络/鉴权/并发），不能当已发布" >&2
-        exit 1
-      fi
-    fi
-    saved=$(git -C "$work" rev-parse HEAD)
-    [[ "$saved" =~ ^[0-9a-f]{40}$ ]] || { echo "无法读取保存后的 apt-data SHA" >&2; exit 1; }
-    printf '%s\n' "$saved" >"$out"
-  ) >"$log" 2>&1 || rc=$?
-  return "$rc"
+      : >"${sandbox}/github-output.txt"
+      env GIT_CONFIG_GLOBAL=/dev/null \
+        GIT_CONFIG_NOSYSTEM=1 \
+        APT_HUB_GIT_NAME="${GIT_NAME}" \
+        APT_HUB_GIT_EMAIL="${GIT_EMAIL}" \
+        GH_TOKEN=fixture-token \
+        GITHUB_SERVER_URL="${server_url}" \
+        GITHUB_REPOSITORY="${repo_name}" \
+        GITHUB_OUTPUT="${sandbox}/github-output.txt" \
+        bash scripts/publish_apt_site.sh save-apt-data
+      sed -n "s/^apt_data_sha=//p" "${sandbox}/github-output.txt" >"${out}"
+    ' >"${log}" 2>&1 || rc=$?
+  return "${rc}"
 }
-
-copy_fn=$(extract_workflow_fn copy_site)
-refuse_fn=$(extract_workflow_fn refuse_non_whitelist)
-copy_add_needle="git -C \"\$work\" add --"
-if [[ "$copy_fn" == copy_site* ]] && grep -Fq -- "$copy_add_needle" <<<"$copy_fn"; then
-  pass "从 workflow 提取到真实 copy_site"
-else
-  fail "未能提取 copy_site"
-fi
-if [[ "$refuse_fn" == refuse_non_whitelist* ]]; then
-  pass "从 workflow 提取到 refuse_non_whitelist"
-else
-  fail "未能提取 refuse_non_whitelist"
-fi
-if grep -q 'repos' <<<"$copy_fn" && ! grep -qE '\bpool\b' <<<"$copy_fn"; then
-  pass "copy_site 含 repos、不含 pool"
-else
-  fail "copy_site 白名单不符合元数据布局"
-fi
 
 gs="$BASE/git-save"
 sandbox="$gs/root"
@@ -1235,7 +1138,7 @@ set +e
 isolated_save "$sandbox" "$origin" "$shafile" "$savelog"
 save3_rc=$?
 set -e
-if [[ "$save3_rc" -ne 0 ]] && grep -Fq 'apt-data 快进推送失败，禁止 force' "$savelog"; then
+if [[ "$save3_rc" -ne 0 ]] && grep -Fq 'apt-data 非快进推送失败' "$savelog"; then
   pass "基线被并发推进时普通推送拒绝 (exit $save3_rc)"
 else
   fail "并发推进未拒绝 rc=$save3_rc log=$(cat "$savelog" 2>/dev/null || true)"
@@ -1259,13 +1162,14 @@ git -C "$dirty_side" \
   commit -m "脏历史未知根文件" >/dev/null
 git -C "$dirty_side" push -q origin apt-data >/dev/null 2>&1
 dirty_sha=$(git --git-dir="$origin" rev-parse apt-data)
+git -C "$sandbox" fetch -q origin refs/heads/apt-data
 printf '%s\n' "$dirty_sha" >"$sandbox/tmp/apt-data-base.sha"
 make_git_site "$sandbox/tmp/site" v4
 set +e
 isolated_save "$sandbox" "$origin" "$shafile" "$savelog"
 save4_rc=$?
 set -e
-if [[ "$save4_rc" -ne 0 ]] && grep -Fq 'apt-data 含白名单外路径，拒绝保存' "$savelog"; then
+if [[ "$save4_rc" -ne 0 ]] && grep -Fq 'apt-data 含非站点文件' "$savelog"; then
   pass "历史脏数据明确拒绝 (exit $save4_rc)"
 else
   fail "脏历史未拒绝 rc=$save4_rc log=$(cat "$savelog" 2>/dev/null || true)"
@@ -1275,6 +1179,102 @@ if [[ "$after_dirty" == "$dirty_sha" ]]; then
   pass "脏历史拒绝后未改写远端"
 else
   fail "脏历史拒绝后远端被改写"
+fi
+
+echo "== detached tag 下 README 回写读 main =="
+readme_root="$BASE/readme-main"
+readme_origin="$readme_root/origin.git"
+readme_work="$readme_root/work"
+rm -rf "$readme_root"
+mkdir -p "$readme_work/scripts" "$readme_work/templates" "$readme_work/data"
+cp "$SITE" "$readme_work/scripts/publish_apt_site.sh"
+cp "$ROOT/scripts/render.sh" "$readme_work/scripts/render.sh"
+cp "$ROOT/templates/readme_packages.md" "$ROOT/templates/readme_empty.md" "$ROOT/templates/index.html" \
+  "$readme_work/templates/"
+chmod a+x "$readme_work/scripts/publish_apt_site.sh" "$readme_work/scripts/render.sh"
+cat >"$readme_work/README.md" <<'EOF'
+MAIN_ONLY_SENTINEL
+<!-- APT-HUB:PACKAGES:BEGIN -->
+旧列表
+<!-- APT-HUB:PACKAGES:END -->
+后缀保留
+EOF
+printf '%s\n' '{}' >"$readme_work/data/published.json"
+git -C "$readme_work" init -b main >/dev/null
+git -C "$readme_work" add -- README.md data/published.json scripts templates
+git -C "$readme_work" -c "user.name=$GIT_NAME" -c "user.email=$GIT_EMAIL" commit -m "main 基线" >/dev/null
+git init --bare "$readme_origin" >/dev/null
+git -C "$readme_work" remote add origin "$readme_origin"
+git -C "$readme_work" push -q origin main
+git -C "$readme_work" checkout -q -B tagpoint
+printf '%s\n' 'TAG_ONLY_SENTINEL' >"$readme_work/README.md"
+cat >>"$readme_work/README.md" <<'EOF'
+<!-- APT-HUB:PACKAGES:BEGIN -->
+tag列表
+<!-- APT-HUB:PACKAGES:END -->
+EOF
+git -C "$readme_work" add -- README.md
+git -C "$readme_work" -c "user.name=$GIT_NAME" -c "user.email=$GIT_EMAIL" commit -m "tag 点" >/dev/null
+git -C "$readme_work" tag v0.0.9
+git -C "$readme_work" push -q origin v0.0.9
+tag_sha=$(git -C "$readme_work" rev-parse v0.0.9)
+git -C "$readme_work" checkout -q --orphan apt-data
+git -C "$readme_work" rm -rfq . >/dev/null 2>&1 || true
+cat >"$readme_work/state.json" <<'EOF'
+{
+  "schema_version": "2",
+  "packages": [
+    {
+      "id": "alpha-app",
+      "package": "alpha-app",
+      "repository": "example/alpha-app",
+      "description": "测试软件甲",
+      "version": "1.0.0",
+      "release_url": "https://github.com/example/alpha-app/releases/tag/1.0.0",
+      "source_url": "https://github.com/example/alpha-app/tree/1.0.0",
+      "license": "MIT",
+      "updated_at": "2026-11-02T00:00:00Z",
+      "ubuntu_series": ["jammy"],
+      "architectures": ["amd64"],
+      "apt_source_uri": "mirror+https://apt.example.test/repos/alpha-app/mirror.list",
+      "assets": [
+        {
+          "architecture": "amd64",
+          "filename": "example/alpha-app/releases/download/1.0.0/alpha-app_1.0.0_amd64.deb",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": "10",
+          "url": "https://github.com/example/alpha-app/releases/download/1.0.0/alpha-app_1.0.0_amd64.deb"
+        }
+      ]
+    }
+  ]
+}
+EOF
+git -C "$readme_work" add -- state.json
+git -C "$readme_work" -c "user.name=$GIT_NAME" -c "user.email=$GIT_EMAIL" commit -m "apt-data" >/dev/null
+apt_sha=$(git -C "$readme_work" rev-parse HEAD)
+git -C "$readme_work" push -q origin apt-data
+git -C "$readme_work" checkout -q --detach v0.0.9
+readme_rc=0
+(
+  cd "$readme_work"
+  env GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 \
+    APT_HUB_GIT_NAME="$GIT_NAME" \
+    APT_HUB_GIT_EMAIL="$GIT_EMAIL" \
+    APT_DATA_SHA="$apt_sha" \
+    bash scripts/publish_apt_site.sh update-readme
+) >"$readme_root/update.log" 2>&1 || readme_rc=$?
+main_readme=$(git --git-dir="$readme_origin" show main:README.md 2>/dev/null || true)
+tag_now=$(git --git-dir="$readme_origin" rev-parse v0.0.9 2>/dev/null || true)
+if [[ "$readme_rc" -eq 0 \
+  && "$tag_now" == "$tag_sha" \
+  && "$main_readme" == *MAIN_ONLY_SENTINEL* \
+  && "$main_readme" == *alpha-app* \
+  && "$main_readme" != *TAG_ONLY_SENTINEL* ]]; then
+  pass "detached tag 回写读当前 main，不推 tag HEAD"
+else
+  fail "README 回写未落在 main rc=$readme_rc log=$(cat "$readme_root/update.log" 2>/dev/null || true)"
 fi
 
 echo "== 证据清单 =="

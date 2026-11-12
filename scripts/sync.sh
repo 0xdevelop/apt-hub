@@ -20,6 +20,9 @@ PKG_NAME='^[a-z0-9][a-z0-9.+-]+$'
 DATE_ISO='^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
 GITHUB_TAG='^[A-Za-z0-9._+-]+$'
 GO_RELEASE_TAG_RE='^golang-[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$'
+PACKAGE_RELEASE_TAG_RE='^v[0-9]+\.[0-9]+\.[0-9]+$'
+GO_PROVENANCE_ASSET='golang.provenance.json'
+LEGACY_GO_PROVENANCE_ASSET='provenance.json'
 GO_META_PACKAGE='golang'
 GO_TOOL_PACKAGE='golang-go'
 SITE_URL_RE='^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]+)?(/[A-Za-z0-9._~/-]*)?$'
@@ -33,7 +36,8 @@ gnupghome=""
 fingerprint=""
 site_url=""
 package_repository=""
-go_release_tag=""
+package_release_tag=""
+upstream_dir=""
 go_downloads_json=""
 rotate_from=""
 work=""
@@ -52,7 +56,7 @@ die() {
 
 usage() {
   cat >&2 <<'EOF'
-用法: scripts/sync.sh --catalog <file> --releases <file> --previous <dir> --output <dir> --gnupghome <dir> --fingerprint <完整指纹> --site-url <https站点URL> [--package-repository <owner/repo>] [--go-release-tag <golang-X.Y.Z-R>] [--go-downloads-json <file>] [--rotate-from <旧完整指纹>]
+用法: scripts/sync.sh --catalog <file> --releases <file> --previous <dir> --output <dir> --gnupghome <dir> --fingerprint <完整指纹> --site-url <https站点URL> [--package-repository <owner/repo>] [--release-tag <vX.Y.Z>] [--upstream-dir <dir>] [--go-downloads-json <file>] [--rotate-from <旧完整指纹>]
 EOF
   exit 2
 }
@@ -381,6 +385,7 @@ load_go_downloads_index() {
   jq -e 'type=="array" and length>0' "${dest}" >/dev/null || die "go 下载索引不是非空数组"
 }
 
+# 仅存量 previous 的 golang-* tag。新活跃 tag 不由 Go 上游版本推导。
 assert_go_release_tag_matches_provenance() {
   local tag="$1" prov="$2"
   local ver_deb rev epoch expect
@@ -391,7 +396,20 @@ assert_go_release_tag_matches_provenance() {
   [[ "${rev}" =~ ^[1-9][0-9]*$ ]] || die "provenance revision 非法"
   [[ "${epoch}" == "2" ]] || die "provenance upstream.epoch 必须是 \"2\""
   expect="golang-${ver_deb}-${rev}"
-  [[ "${tag}" == "${expect}" ]] || die "go-release-tag 与 provenance 不符: ${tag} != ${expect}"
+  [[ "${tag}" == "${expect}" ]] || die "存量 golang tag 与 provenance 不符: ${tag} != ${expect}"
+}
+
+go_provenance_name_for_tag() {
+  local tag="$1"
+  if [[ "${tag}" =~ ${PACKAGE_RELEASE_TAG_RE} ]]; then
+    printf '%s\n' "${GO_PROVENANCE_ASSET}"
+    return 0
+  fi
+  if [[ "${tag}" =~ ${GO_RELEASE_TAG_RE} ]]; then
+    printf '%s\n' "${LEGACY_GO_PROVENANCE_ASSET}"
+    return 0
+  fi
+  die "release tag 非法: ${tag}"
 }
 
 go_expected_deb_version() {
@@ -474,17 +492,24 @@ reconfirm_retained_upstream_identity() {
       || die "存量 ${id} 上游 size 与 state 不符: ${name}"
   done < <(jq -c '.assets[]' <<<"${prev_row}")
   if [[ "${st}" == "go_official_archive" ]]; then
-    prov_asset="$(jq -c '.assets[]? | select(.name=="provenance.json")' <<<"${release_json}" || true)"
-    [[ -n "${prov_asset}" ]] || die "存量 ${id} 上游缺少 provenance.json"
+    prov_name="$(go_provenance_name_for_tag "${tag}")"
+    prov_asset="$(jq -c --arg n "${prov_name}" '
+      [.assets[]? | select(.name==$n)] | if length==1 then .[0] else empty end
+    ' <<<"${release_json}")"
+    [[ -n "${prov_asset}" ]] || die "存量 ${id} 上游缺少 ${prov_name}"
     official="$(official_sha256 "${prov_asset}")"
     size="$(jq -r '.size|tostring' <<<"${prov_asset}")"
     url="$(jq -r '.browser_download_url // empty' <<<"${prov_asset}")"
-    assert_github_asset_url "${asset_repo}" "${tag}" "provenance.json" "${url}"
+    assert_github_asset_url "${asset_repo}" "${tag}" "${prov_name}" "${url}"
     prov_path="${scratch}/retained-prov-${id}.json"
     without_xtrace curl_https "${DOWNLOAD_TIMEOUT}" -o "${prov_path}" -- "${url}" || die "存量 ${id} 下载 provenance 失败"
     [[ "$(file_size "${prov_path}")" == "${size}" ]] || die "存量 ${id} provenance size 不符"
     [[ "$(hex_sha256 "${prov_path}")" == "${official}" ]] || die "存量 ${id} provenance hash 不符"
-    assert_go_release_tag_matches_provenance "${tag}" "${prov_path}"
+    if [[ "${tag}" =~ ${GO_RELEASE_TAG_RE} ]]; then
+      assert_go_release_tag_matches_provenance "${tag}" "${prov_path}"
+    else
+      go_expected_deb_version "${prov_path}" >/dev/null
+    fi
     downloads="${scratch}/retained-go-dl-${id}.json"
     load_go_downloads_index "${downloads}"
     version_go="$(jq -r '.upstream.version // empty' "${prov_path}")"
@@ -1267,9 +1292,12 @@ while [[ $# -gt 0 ]]; do
     --package-repository)
       [[ $# -ge 2 ]] || usage
       package_repository="$2"; shift 2 ;;
-    --go-release-tag)
+    --release-tag)
       [[ $# -ge 2 ]] || usage
-      go_release_tag="$2"; shift 2 ;;
+      package_release_tag="$2"; shift 2 ;;
+    --upstream-dir)
+      [[ $# -ge 2 ]] || usage
+      upstream_dir="$2"; shift 2 ;;
     --go-downloads-json)
       [[ $# -ge 2 ]] || usage
       go_downloads_json="$2"; shift 2 ;;
@@ -1302,8 +1330,12 @@ fi
 if [[ -n "${package_repository}" ]]; then
   [[ "${package_repository}" =~ ${REPO_NAME} ]] || die "package-repository 非法: ${package_repository}"
 fi
-if [[ -n "${go_release_tag}" ]]; then
-  [[ "${go_release_tag}" =~ ${GO_RELEASE_TAG_RE} ]] || die "go-release-tag 非法: ${go_release_tag}"
+if [[ -n "${package_release_tag}" ]]; then
+  [[ "${package_release_tag}" =~ ${PACKAGE_RELEASE_TAG_RE} ]] \
+    || die "release-tag 必须是严格 vX.Y.Z: ${package_release_tag}"
+fi
+if [[ -n "${upstream_dir}" ]]; then
+  upstream_dir="$(assert_allowed_dir upstream-dir "${upstream_dir}" yes)"
 fi
 if [[ -n "${go_downloads_json}" ]]; then
   go_downloads_json="$(assert_allowed_file go-downloads-json "${go_downloads_json}")"
@@ -1319,7 +1351,7 @@ validate_releases "${releases}"
 
 if catalog_has_go_official "${catalog}"; then
   [[ -n "${package_repository}" ]] || die "catalog 含 go_official_archive 时必须传 --package-repository"
-  [[ -n "${go_release_tag}" ]] || die "catalog 含 go_official_archive 时必须传 --go-release-tag"
+  [[ -n "${package_release_tag}" ]] || die "catalog 含 go_official_archive 时必须传 --release-tag"
 fi
 
 gpg --homedir "${gnupghome}" --batch --list-secret-keys --with-colons -- "${fingerprint}" >/dev/null 2>&1 \
@@ -1410,7 +1442,7 @@ while IFS= read -r pkgjson; do
   go_upstream_meta="{}"
   if [[ "${source_type}" == "go_official_archive" ]]; then
     download_repo="${package_repository}"
-    tag="${go_release_tag}"
+    tag="${package_release_tag}"
     assert_github_tag "${tag}"
     api_url="https://api.github.com/repos/${download_repo}/releases/tags/${tag}"
     release_json="$(without_xtrace github_get "${api_url}")" || die "GitHub tags API 失败: ${download_repo} ${tag}"
@@ -1421,8 +1453,11 @@ while IFS= read -r pkgjson; do
     [[ "$(jq -r '.tag_name' <<<"${release_json}")" == "${tag}" ]] || die "Go release tag 与请求不符"
     html_url="$(jq -r '.html_url' <<<"${release_json}")"
     assert_github_html_url "${download_repo}" "${tag}" "${html_url}"
-    prov_asset="$(match_unique_asset "${release_json}" '^provenance\.json$')"
-    prov_name="$(jq -r '.name' <<<"${prov_asset}")"
+    prov_name="$(go_provenance_name_for_tag "${tag}")"
+    prov_asset="$(jq -c --arg n "${prov_name}" '
+      [.assets[]? | select(.name==$n)] | if length==1 then .[0] else empty end
+    ' <<<"${release_json}")"
+    [[ -n "${prov_asset}" ]] || die "Go release 缺少 ${prov_name}"
     prov_size="$(jq -r '.size|tostring' <<<"${prov_asset}")"
     prov_url="$(jq -r '.browser_download_url // empty' <<<"${prov_asset}")"
     prov_sha="$(official_sha256 "${prov_asset}")"
@@ -1435,7 +1470,7 @@ while IFS= read -r pkgjson; do
     [[ "$(hex_sha256 "${go_prov_path}")" == "${prov_sha}" ]] || die "provenance 实际 SHA256 不符"
     jq -e '.schema_version=="1" and (.upstream|type)=="object" and (.packages|type)=="array"' "${go_prov_path}" >/dev/null \
       || die "provenance 结构非法"
-    assert_go_release_tag_matches_provenance "${tag}" "${go_prov_path}"
+    go_expected_deb_version "${go_prov_path}" >/dev/null
     go_downloads_path="${scratch}/go-downloads-${id}.json"
     load_go_downloads_index "${go_downloads_path}"
     go_version="$(jq -r '.upstream.version // empty' "${go_prov_path}")"
@@ -1445,8 +1480,15 @@ while IFS= read -r pkgjson; do
     state_source_url="${src}"
     release_tag_out="${tag}"
   else
-    api_url="https://api.github.com/repos/${download_repo}/releases/latest"
-    release_json="$(without_xtrace github_get "${api_url}")" || die "GitHub API 失败: ${download_repo}"
+    if [[ -n "${upstream_dir}" ]]; then
+      cached_release="${upstream_dir}/${id}.json"
+      [[ -f "${cached_release}" && ! -L "${cached_release}" ]] || die "upstream-dir 缺少 ${id}.json"
+      assert_no_symlink_components "${cached_release}"
+      release_json="$(cat -- "${cached_release}")" || die "读取 upstream-dir/${id}.json 失败"
+    else
+      api_url="https://api.github.com/repos/${download_repo}/releases/latest"
+      release_json="$(without_xtrace github_get "${api_url}")" || die "GitHub API 失败: ${download_repo}"
+    fi
     echo "${release_json}" | jq -e 'type=="object" and (.tag_name|type=="string") and (.html_url|type=="string") and (.assets|type=="array")' >/dev/null \
       || die "GitHub latest 响应不是合法 release 对象: ${download_repo}"
     jq -e '.draft!=true and .prerelease!=true' <<<"${release_json}" >/dev/null \
@@ -1684,9 +1726,23 @@ while IFS= read -r pkgjson; do
       for row in "${asset_rows[@]}"; do
         fn="$(jq -r '.filename' <<<"${row}")"
         sha="$(jq -r '.sha256' <<<"${row}")"
+        bin_pkg="$(jq -r '.package // empty' <<<"${row}")"
+        arch="$(jq -r '.architecture // empty' <<<"${row}")"
         oldsha="$(jq -r --arg f "${fn}" '.assets[]?|select(.filename==$f)|.sha256 // empty' <<<"${prev_row}")"
         if [[ -n "${oldsha}" && "${oldsha}" != "${sha}" ]]; then
           die "禁止同名版本内容替换: ${id} ${fn}"
+        fi
+        if [[ -n "${bin_pkg}" && -n "${arch}" ]]; then
+          idsha="$(jq -r --arg p "${bin_pkg}" --arg a "${arch}" '
+            [.assets[]? | select(.package==$p and .architecture==$a)]
+            | if length==0 then ""
+              elif length==1 then .[0].sha256
+              else "ambiguous" end
+          ' <<<"${prev_row}")"
+          [[ "${idsha}" != "ambiguous" ]] || die "previous 同包同架构资产不唯一: ${id} ${bin_pkg} ${arch}"
+          if [[ -n "${idsha}" && "${idsha}" != "${sha}" ]]; then
+            die "禁止同包同版内容替换: ${id} ${bin_pkg} ${arch}"
+          fi
         fi
       done
     fi

@@ -30,12 +30,14 @@
 Actions 和本地维护共用 `scripts/update_sources.sh`。本地运行时提供已有签名密钥目录和公开指纹；指纹不是 Secret，Actions 会从导入的签名私钥取得。
 
 ```bash
-bash scripts/update_sources.sh --catalog config/packages.json --previous tmp/previous --work-dir tmp/update-001 --gnupghome '<签名密钥目录>' --fingerprint '<公开指纹>' --site-url 'https://packages.example.test/tools' --package-repository '<自己的owner/repo>' --go-release-tag 'golang-<上游版本>-<修订>' --go-downloads-json '<构包时冻结的官方索引JSON>'
+bash scripts/update_sources.sh --catalog config/packages.json --previous tmp/previous --work-dir tmp/update-001 --gnupghome '<签名密钥目录>' --fingerprint '<公开指纹>' --site-url 'https://packages.example.test/tools' --package-repository '<自己的owner/repo>' --release-tag '<已上传资产的本仓vX.Y.Z>'
 ```
 
 其余参数是候选目录、站点和发行版数据输入；入口只生成候选，不上传、不推送、不部署。
 
-以上地址、版本和指纹均需替换；`tmp/previous` 须为已有发布快照或首次使用的空目录，工作目录必须是新建或空目录。Go 精确 tag 必须已完成 `golang`、`golang-go` × `amd64`、`arm64` 四个包的构建、上传与回验，不能仅凭本地产物声称已发布。入口包依赖同版本工具链；控制字段使用完整 `2:上游版本-修订`，资产文件名和 `golang-上游版本-修订` 标签不带 epoch。`gen_deb_golang.sh` 独立构包，`build.sh` 扩展调用，Actions 共用发版、构建上传和按引用清理流程。源码、`apt-data` 和 Pages 仍不保存大包。
+以上地址、版本和指纹均需替换；`tmp/previous` 须为已有发布快照或首次使用的空目录，工作目录必须是新建或空目录。本仓 `vX.Y.Z` 必须已有该版的构造包与来源记录，不能仅凭本地产物声称已发布。Go 入口包依赖同版本工具链，控制字段为 `2:上游版本-修订`；这些软件版本不是本仓 Release 标签。
+
+`git_tag.sh auto` 触发同一条三段式发布链；`build.sh` 调用 `gen_debs.sh` 按清单处理软件，Go 专用格式转换位于 `scripts/gen_deb_golang.sh`。官方已有 `.deb` 只发现和核验官方发布，不转存；构造包、`<软件id>.provenance.json` 与 `SHA256SUMS` 才进入 `build/upload_tmp_dir/`，直接上传到对应本仓版本的 assets。归档、内部索引、日志和测试不进入发布成果。Pages 复用 `apt-data` 产物分支发布，只保存公开站点与签名索引，不走 Actions Artifacts，也不再另建站点副本。
 
 签名私钥生成、备份、换钥和客户端报错修复统一见 [README](../README.md#维护者首次启用与签名密钥)。只更新同一个 `APT_HUB_GPG_PRIVATE_KEY` Secret；换钥时显式提供旧完整指纹，客户端显式核对新完整指纹。
 

@@ -1,896 +1,283 @@
 #!/usr/bin/env bash
-# 真实抽取 ubuntu-publish.yml 的关键 run 段：无口令签名预检与发布者身份。
-# 证据只写 tmp/final-fix；密钥仅本目录测试身份；不读用户凭证、不走长网络矩阵。
-# 抽取用 awk 按 job/step/run 缩进定位，不引入额外 YAML 运行时。
+# 本地 API 夹具验证发布脚本；不代表真实 GitHub Pages 部署。
 set -euo pipefail
 export LC_ALL=C
-export LANG=C
-
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-PUB="${ROOT}/.github/workflows/ubuntu-publish.yml"
-EVIDENCE="${ROOT}/tmp/final-fix/workflow-test"
+BASE="${ROOT}/tmp/workflow-test"
+[[ ! -L "${BASE}" ]] || exit 1
+mkdir -p "${BASE}"
+WORK="$(mktemp -d "${BASE}/run.XXXXXX")"
+mkdir -p "${WORK}/scripts" "${WORK}/bin" "${WORK}/tmp/site"
+cp "${ROOT}/scripts/publish_apt_site.sh" "${WORK}/scripts/"
 PASS=0
 FAIL=0
-OWNED_HOMES=()
-OWNED_SANDBOX_GNUPG=()
-
-mkdir -p -- "${ROOT}/tmp"
-rm -rf -- "${EVIDENCE}"
-mkdir -p -- "${EVIDENCE}/bin" "${EVIDENCE}/keys" "${EVIDENCE}/runs"
-
-log() { printf '%s\n' "$*" | tee -a "${EVIDENCE}/test.log"; }
-pass() { PASS=$((PASS + 1)); log "PASS: $*"; }
-fail() { FAIL=$((FAIL + 1)); log "FAIL: $*"; }
-
-path_is_under_evidence() {
-  case "$1" in
-    "${EVIDENCE}"|"${EVIDENCE}"/*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-# 仅清理本测试登记的真实目录；拒 symlink，绝不碰项目 tmp/gnupg。
-assert_owned_real_dir() {
-  local p="$1"
-  if ! path_is_under_evidence "${p}"; then
-    log "refuse scrub outside evidence: ${p}"
-    return 1
-  fi
-  if [[ -L "${p}" ]]; then
-    log "refuse scrub symlink: ${p}"
-    return 1
-  fi
-  if [[ ! -d "${p}" ]]; then
-    return 1
-  fi
-  return 0
-}
-
-cleanup_gpg_home() {
-  local home="$1"
-  if [[ -d "${home}" && ! -L "${home}" ]]; then
-    gpgconf --homedir "${home}" --kill gpg-agent >/dev/null 2>&1 || true
-  fi
-}
-
-register_owned_home() {
-  local home="$1"
-  if ! path_is_under_evidence "${home}"; then
-    echo "home 必须落在证据目录: ${home}" >&2
-    exit 99
-  fi
-  if [[ -L "${home}" ]]; then
-    echo "拒绝 symlink home: ${home}" >&2
-    exit 99
-  fi
-  OWNED_HOMES+=("${home}")
-}
-
-register_owned_sandbox_gnupg() {
-  local home="$1"
-  if ! path_is_under_evidence "${home}"; then
-    echo "sandbox gnupg 必须落在证据目录: ${home}" >&2
-    exit 99
-  fi
-  if [[ -e "${home}" && -L "${home}" ]]; then
-    echo "拒绝 symlink sandbox gnupg: ${home}" >&2
-    exit 99
-  fi
-  OWNED_SANDBOX_GNUPG+=("${home}")
-}
-
-scrub_owned_home() {
-  local home="$1"
-  assert_owned_real_dir "${home}" || return 0
-  cleanup_gpg_home "${home}"
-  rm -rf -- \
-    "${home}/private-keys-v1.d" \
-    "${home}/openpgp-revocs.d" 2>/dev/null || true
-  rm -f -- "${home}/batch" "${home}/fixture_protect.txt" 2>/dev/null || true
-  # 目录内偶然残留的 armor / 密钥材料
-  find "${home}" -maxdepth 1 -type f \( -name '*.asc' -o -name '*.key' \) -delete 2>/dev/null || true
-}
-
-scrub_test_secrets() {
-  local home f
-  for home in "${OWNED_HOMES[@]+"${OWNED_HOMES[@]}"}"; do
-    scrub_owned_home "${home}"
+cleanup() {
+  local home
+  for home in "${WORK}/key" "${WORK}/key-other" "${WORK}/key-protected" "${WORK}/tmp/gnupg"; do
+    [[ ! -d "${home}" ]] || gpgconf --homedir "${home}" --kill all >/dev/null 2>&1 || true
+    rm -rf -- "${home}/private-keys-v1.d" "${home}/openpgp-revocs.d"
   done
-  for home in "${OWNED_SANDBOX_GNUPG[@]+"${OWNED_SANDBOX_GNUPG[@]}"}"; do
-    scrub_owned_home "${home}"
-  done
-  if assert_owned_real_dir "${EVIDENCE}/keys"; then
-    for f in "${EVIDENCE}/keys/"*.asc; do
-      [[ -e "${f}" ]] || continue
-      if [[ -L "${f}" ]]; then
-        log "refuse remove symlink asc: ${f}"
-        continue
-      fi
-      rm -f -- "${f}"
-    done
-    if [[ -f "${EVIDENCE}/keys/fixture_protect.txt" && ! -L "${EVIDENCE}/keys/fixture_protect.txt" ]]; then
-      rm -f -- "${EVIDENCE}/keys/fixture_protect.txt"
-    fi
-  fi
+  rm -f -- "${WORK}/key.asc" "${WORK}/multi.asc" "${WORK}/protected.asc"
 }
-
-trap 'scrub_test_secrets' EXIT
-
-# --- 从真实 workflow 按 job/step name 与 run 缩进抽取；缺失/重复明确拒绝 ---
-# 第4参可选：workflow 路径；默认 ubuntu-publish.yml，旧调用不变。
-extract_step_run() {
-  local job="$1" step_name="$2" out="$3"
-  local wf="${4:-${PUB}}"
-  local awk_rc=0
-  local had_errexit=0
-  [[ $- == *e* ]] && had_errexit=1
-  set +e
-  awk -v job="${job}" -v step="${step_name}" '
-    BEGIN { in_jobs=0; in_job=0; in_step=0; job_seen=0; hits=0; grabbing=0; body=0 }
-    /^jobs:[[:space:]]*$/ { in_jobs=1; next }
-    in_jobs && /^  [A-Za-z0-9_]+:[[:space:]]*$/ {
-      name=$1
-      sub(/:$/, "", name)
-      if (name == job) {
-        in_job=1
-        job_seen=1
-        in_step=0
-        grabbing=0
-      } else if (in_job) {
-        in_job=0
-        in_step=0
-        grabbing=0
-      }
-      next
-    }
-    in_job && /^      - name:[[:space:]]+/ {
-      line=$0
-      sub(/^      - name:[[:space:]]+/, "", line)
-      if (line == step) {
-        hits++
-        if (hits > 1) {
-          print "duplicate step: " step > "/dev/stderr"
-          exit 4
-        }
-        in_step=1
-        grabbing=0
-      } else {
-        in_step=0
-        grabbing=0
-      }
-      next
-    }
-    in_step && /^        run:[[:space:]]*\|[[:space:]]*$/ {
-      grabbing=1
-      next
-    }
-    grabbing {
-      if ($0 == "" || $0 ~ /^          /) {
-        sub(/^          /, "", $0)
-        print
-        body=1
-        next
-      }
-      grabbing=0
-      in_step=0
-    }
-    END {
-      if (!job_seen) {
-        print "missing job: " job > "/dev/stderr"
-        exit 2
-      }
-      if (hits == 0) {
-        print "missing step: " step > "/dev/stderr"
-        exit 3
-      }
-      if (hits != 1) {
-        print "duplicate step: " step > "/dev/stderr"
-        exit 4
-      }
-      if (!body) {
-        print "missing step.run body: " step > "/dev/stderr"
-        exit 5
-      }
-    }
-  ' "${wf}" >"${out}"
-  awk_rc=$?
-  if [[ "${had_errexit}" -eq 1 ]]; then
-    set -e
-  else
-    set +e
-  fi
-  if [[ "${awk_rc}" -ne 0 ]]; then
-    return "${awk_rc}"
-  fi
-  if [[ ! -s "${out}" ]]; then
-    echo "empty step.run: ${step_name}" >&2
-    return 5
-  fi
-  printf 'extracted_bytes=%s\n' "$(wc -c <"${out}" | tr -d '[:space:]')"
+trap cleanup EXIT
+pass() { PASS=$((PASS + 1)); printf 'PASS: %s\n' "$*"; }
+fail() { FAIL=$((FAIL + 1)); printf 'FAIL: %s\n' "$*"; }
+expect() {
+  local label="$1" want="$2" rc=0
+  shift 2
+  "$@" >"${WORK}/${label}.log" 2>&1 || rc=$?
+  if [[ "${rc}" -eq "${want}" ]]; then pass "${label}"; else fail "${label}: rc=${rc}, want=${want}"; fi
 }
-
-# --- 生成仅用于本测试的密钥（口令不进 argv；第4参为指纹变量名，避免 $() 子壳丢 OWNED_HOMES） ---
-gen_key() {
-  local home="$1" email="$2" pass_file="$3" fpr_var="$4"
-  local fpr=""
-  cleanup_gpg_home "${home}"
-  rm -rf -- "${home}"
-  mkdir -p -- "${home}"
-  chmod 700 -- "${home}"
-  register_owned_home "${home}"
-  printf '%s\n' 'pinentry-mode loopback' >"${home}/gpg.conf"
-  printf '%s\n' 'allow-loopback-pinentry' >"${home}/gpg-agent.conf"
-  chmod 600 -- "${home}/gpg.conf" "${home}/gpg-agent.conf"
-  local batch="${home}/batch"
-  if [[ -n "${pass_file}" ]]; then
-    cat >"${batch}" <<EOF
-%echo generating-enc
-Key-Type: RSA
-Key-Length: 2048
-Name-Real: apt-hub-workflow-test
-Name-Email: ${email}
-Expire-Date: 0
-Passphrase: $(cat -- "${pass_file}")
-%commit
-%echo done
-EOF
-  else
-    cat >"${batch}" <<EOF
-%echo generating-empty
-Key-Type: RSA
-Key-Length: 2048
-Name-Real: apt-hub-workflow-test
-Name-Email: ${email}
-Expire-Date: 0
-%no-protection
-%commit
-%echo done
-EOF
-  fi
-  chmod 600 -- "${batch}"
-  GNUPGHOME="${home}" gpg --batch --pinentry-mode loopback --generate-key "${batch}" \
-    >"${home}/gen.log" 2>&1
-  chmod 600 -- "${home}/gen.log" 2>/dev/null || true
-  # batch 含口令时尽快删，指纹仍可从 log / list 得到
-  rm -f -- "${batch}"
-  fpr="$(
-    GNUPGHOME="${home}" gpg --batch --with-colons --list-secret-keys 2>/dev/null \
-      | awk -F: '/^fpr:/{print toupper($10); exit}'
-  )"
-  printf -v "${fpr_var}" '%s' "${fpr}"
-}
-
-armor_secret() {
-  local home="$1" out="$2" pass_file="${3:-}"
-  if [[ -n "${pass_file}" ]]; then
-    # 口令仅经 fd 传入，不放 argv。
-    GNUPGHOME="${home}" gpg --batch --pinentry-mode loopback --passphrase-fd 3 \
-      --export-secret-keys --armor 3<"${pass_file}" >"${out}"
-  else
-    GNUPGHOME="${home}" gpg --batch --export-secret-keys --armor >"${out}"
-  fi
-  chmod 600 -- "${out}"
-}
-
-run_gpg_import_step() {
-  local key_file="$1" out_dir="$2"
-  local script="${EVIDENCE}/runs/gpg-import.sh"
-  local logf="${out_dir}/run.log"
-  local rcfile="${out_dir}/rc"
-  local ghub_out="${out_dir}/github_output"
-  local sandbox="${out_dir}/sandbox"
-  local sand_gnupg="${sandbox}/tmp/gnupg"
-  local key_body
-  mkdir -p -- "${out_dir}" "${sandbox}"
-  chmod 700 -- "${sandbox}"
-  if [[ -L "${out_dir}" || -L "${sandbox}" ]]; then
-    echo "拒绝 symlink out_dir/sandbox" >&2
-    exit 99
-  fi
-  register_owned_sandbox_gnupg "${sand_gnupg}"
-  : >"${ghub_out}"
-  extract_step_run build_verify '导入生产签名密钥到临时 gnupg' "${script}" \
-    >"${out_dir}/extract.log" 2>&1
-  chmod 600 -- "${script}" 2>/dev/null || true
-  key_body="$(cat -- "${key_file}")"
-  (
-    # 真实 workflow 用 $PWD/tmp/gnupg；独占 sandbox 后自然落证据目录内。
-    # 生产只注入 APT_HUB_GPG_PRIVATE_KEY；不提供第二口令输入。
-    cd -- "${sandbox}"
-    mkdir -p -- tmp
-    set +e
-    env \
-      GITHUB_OUTPUT="${ghub_out}" \
-      APT_HUB_GPG_PRIVATE_KEY="${key_body}" \
-      bash "${script}" >"${logf}" 2>&1
-    echo "$?" >"${rcfile}"
-    set -e
-    scrub_owned_home "${sand_gnupg}"
-  )
-}
-
-expect_rc() {
-  local name="$1" got_file="$2" want="$3"
-  local got
-  got="$(tr -d '[:space:]' <"${got_file}" 2>/dev/null || echo missing)"
-  if [[ "${got}" == "${want}" ]]; then
-    pass "${name} rc=${got}"
-  else
-    fail "${name} rc=${got} want=${want} log=$(tail -n 20 "${got_file%/*}/run.log" 2>/dev/null | tr '\n' '|' || true)"
-  fi
-}
-
-log "date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-log "root=${ROOT}"
-
-# 项目根 tmp/gnupg 哨兵：本测试不得改动（若预存）。
-SENTINEL="${ROOT}/tmp/gnupg/sentinel.txt"
-SENTINEL_HASH=""
-if [[ -f "${SENTINEL}" && ! -L "${ROOT}/tmp/gnupg" && ! -L "${SENTINEL}" ]]; then
-  SENTINEL_HASH="$(sha256sum -- "${SENTINEL}" | awk '{print $1}')"
-  log "sentinel_pre=${SENTINEL_HASH}"
-fi
-
-# ---------- 1) 无口令签名预检：先对真实抽取脚本取证 ----------
-# 夹具保护口令仅文件持有（测试命名），不写进日志与命令行参数，不扩生产接口。
-FIXTURE_PROTECT="${EVIDENCE}/keys/fixture_protect.txt"
-printf '%s' 'wf-test-protect-ok' >"${FIXTURE_PROTECT}"
-chmod 600 -- "${FIXTURE_PROTECT}"
-
-EMPTY_HOME="${EVIDENCE}/keys/empty-home"
-ENC_HOME="${EVIDENCE}/keys/enc-home"
-OTHER_HOME="${EVIDENCE}/keys/other-home"
-EMPTY_KEY="${EVIDENCE}/keys/empty.asc"
-ENC_KEY="${EVIDENCE}/keys/enc.asc"
-MULTI_KEY="${EVIDENCE}/keys/multi.asc"
-OTHER_KEY="${EVIDENCE}/keys/other.asc"
-
-log "== 生成测试密钥 =="
-EMPTY_FPR=""
-ENC_FPR=""
-OTHER_FPR=""
-gen_key "${EMPTY_HOME}" 'empty@apt-hub-workflow-test.invalid' '' EMPTY_FPR
-armor_secret "${EMPTY_HOME}" "${EMPTY_KEY}"
-gen_key "${ENC_HOME}" 'enc@apt-hub-workflow-test.invalid' "${FIXTURE_PROTECT}" ENC_FPR
-armor_secret "${ENC_HOME}" "${ENC_KEY}" "${FIXTURE_PROTECT}"
-gen_key "${OTHER_HOME}" 'other@apt-hub-workflow-test.invalid' '' OTHER_FPR
-armor_secret "${OTHER_HOME}" "${OTHER_KEY}"
-cleanup_gpg_home "${OTHER_HOME}"
-{
-  cat -- "${EMPTY_KEY}"
-  echo
-  cat -- "${OTHER_KEY}"
-} >"${MULTI_KEY}"
-chmod 600 -- "${MULTI_KEY}"
-log "empty_fpr=${EMPTY_FPR}"
-log "enc_fpr=${ENC_FPR}"
-log "other_fpr=${OTHER_FPR}"
-
-log "== GPG 导入/预检真实 run 段 =="
-run_gpg_import_step "${EMPTY_KEY}" "${EVIDENCE}/runs/empty_ok"
-expect_rc unprotected_key_sign_success "${EVIDENCE}/runs/empty_ok/rc" 0
-if [[ -s "${EVIDENCE}/runs/empty_ok/github_output" ]] \
-  && grep -Eq '^fingerprint=[A-F0-9]{40}$' "${EVIDENCE}/runs/empty_ok/github_output"; then
-  pass "无口令私钥派生唯一 fingerprint"
-else
-  fail "无口令私钥未写出合法 fingerprint"
-fi
-
-run_gpg_import_step "${ENC_KEY}" "${EVIDENCE}/runs/enc_reject"
-expect_rc protected_key_without_second_input_rejected "${EVIDENCE}/runs/enc_reject/rc" 1
-
-run_gpg_import_step "${MULTI_KEY}" "${EVIDENCE}/runs/multi_reject"
-expect_rc multiple_primary_rejected "${EVIDENCE}/runs/multi_reject/rc" 1
-
-if grep -E 'APT_HUB_GPG_PASSPHRASE|GPG_PASSPHRASE' "${PUB}" >/dev/null \
-  || grep -E 'APT_HUB_GPG_PASSPHRASE|GPG_PASSPHRASE' "${ROOT}/scripts/sync.sh" >/dev/null; then
-  fail "生产 workflow/sync 仍含口令 Secret 接口"
-else
-  pass "生产 workflow/sync 无口令 Secret 接口"
-fi
-
-if grep -E 'wf-test-protect|Passphrase:' "${EVIDENCE}/test.log" >/dev/null; then
-  fail "证据日志泄漏夹具保护口令"
-else
-  pass "证据日志无夹具保护口令"
-fi
-
-# ---------- 2) 发布者身份：必须存在可抽取步骤，且消费 github.actor ----------
-log "== 发布者身份真实 run 段 =="
-ID_SCRIPT="${EVIDENCE}/runs/publisher.sh"
-set +e
-extract_step_run preflight '解析发布者命令级身份' "${ID_SCRIPT}" \
-  >"${EVIDENCE}/runs/publisher-extract.log" 2>&1
-id_extract_rc=$?
-set -e
-if [[ "${id_extract_rc}" -eq 0 && -s "${ID_SCRIPT}" ]]; then
-  pass "抽取到解析发布者命令级身份步骤"
-else
-  fail "缺少解析发布者命令级身份步骤（extract_rc=${id_extract_rc}）"
-fi
-
-if grep -Fq "APT_HUB_GIT_NAME='yerikokay'" "${PUB}" \
-  || grep -Fq '129245892+yerikokay@users.noreply.github.com' "${PUB}"; then
-  fail "publish 仍硬编码原维护者身份"
-else
-  pass "publish 无硬编码原维护者身份"
-fi
-
-if grep -Fq 'github.actor' "${PUB}" && grep -Fq 'github.actor_id' "${PUB}"; then
-  pass "publish 引用 github.actor / github.actor_id"
-else
-  fail "publish 未引用 github.actor / github.actor_id"
-fi
-
-# curl shim：仅服务本测试标注的 mock 用户，不冒充真实网络。
-cat >"${EVIDENCE}/bin/curl" <<'EOF'
+cat >"${WORK}/bin/gh" <<'SH'
 #!/usr/bin/env bash
+# 仅本地 API 夹具。
 set -euo pipefail
-# mock-api: apt-hub workflow_test 本地夹具，非真实 GitHub 网络。
+[[ "$1" == api ]] || exit 90
+shift
+method=GET
+if [[ "${1:-}" == --method ]]; then method="$2"; shift 2; fi
+printf '%s %s\n' "${method}" "$1" >>"${FIXTURE}/calls.log"
+case "${method} $1" in
+  'GET repos/example/apt-hub/pages')
+    status=200
+    if [[ -f "${FIXTURE}/pages.status" ]]; then
+      status="$(tr -d '[:space:]' <"${FIXTURE}/pages.status")"
+    fi
+    case "${status}" in
+      200) cat "${FIXTURE}/pages.json" ;;
+      404) printf '%s\n' 'gh: HTTP 404: Not Found' >&2; exit 1 ;;
+      403) printf '%s\n' 'gh: HTTP 403: Forbidden' >&2; exit 1 ;;
+      *) printf '%s\n' "gh: HTTP ${status}" >&2; exit 1 ;;
+    esac
+    ;;
+  'GET users/fixture-human') cat "${FIXTURE}/actor.json" ;;
+  'POST repos/example/apt-hub/pages/builds') cat "${FIXTURE}/build-request.json" ;;
+  'GET repos/example/apt-hub/pages/builds/123') cat "${FIXTURE}/build-result.json" ;;
+  *) exit 90 ;;
+esac
+SH
+cat >"${WORK}/bin/curl" <<'SH'
+#!/usr/bin/env bash
+# 仅本地站点夹具。
+set -euo pipefail
 out=""
 url=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -o)
-      out="$2"
-      shift 2
-      ;;
-    -w)
-      shift 2
-      ;;
-    -sS|-s|--silent)
-      shift
-      ;;
-    -H)
-      shift 2
-      ;;
-    http*)
-      url="$1"
-      shift
-      ;;
-    *)
-      shift
-      ;;
+    -o|--output) out="$2"; shift 2 ;;
+    --connect-timeout|--max-time|--proto|--proto-redir) shift 2 ;;
+    https://*) url="$1"; shift ;;
+    *) shift ;;
   esac
 done
-[[ -n "${out}" && -n "${url}" ]] || exit 90
-login="${url##*/}"
-case "${login}" in
-  yerikokay)
-    printf '%s\n' '{"login":"yerikokay","id":129245892,"type":"User"}' >"${out}"
-    printf '200'
-    ;;
-  fork-human)
-    printf '%s\n' '{"login":"fork-human","id":424242,"type":"User"}' >"${out}"
-    printf '200'
-    ;;
-  some-bot)
-    printf '%s\n' '{"login":"some-bot","id":7,"type":"Bot"}' >"${out}"
-    printf '200'
-    ;;
-  *)
-    printf '%s\n' '{"message":"mock Not Found"}' >"${out}"
-    printf '404'
-    ;;
-esac
-EOF
-chmod a+x -- "${EVIDENCE}/bin/curl"
+[[ "${url}" == 'https://packages.example.test/state.json' && -n "${out}" ]] || exit 90
+cp "${FIXTURE}/public-state.json" "${out}"
+SH
+printf '#!/usr/bin/env bash\nexit 0\n' >"${WORK}/bin/sleep"
+chmod a+x "${WORK}/bin/"*
+export FIXTURE="${WORK}" GH_TOKEN=fixture-not-a-credential
+export GITHUB_REPOSITORY=example/apt-hub GITHUB_API_URL=https://api.github.com
+export GITHUB_ACTOR=fixture-human GITHUB_ACTOR_ID=12345
+export GITHUB_OUTPUT="${WORK}/outputs"
+export PATH="${WORK}/bin:${PATH}"
+export APT_DATA_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+export SITE_URL=https://packages.example.test
+printf '%s\n' '{"login":"fixture-human","id":12345,"type":"User"}' >"${WORK}/actor.json"
+printf '200\n' >"${WORK}/pages.status"
+git -C "${WORK}" init -b main >/dev/null
+printf 'fixture\n' >"${WORK}/README.md"
+git -C "${WORK}" add -- README.md scripts/publish_apt_site.sh
+git -C "${WORK}" -c user.name=fixture -c user.email=fixture@invalid commit -m init >/dev/null
+git init --bare "${WORK}/origin.git" >/dev/null
+git -C "${WORK}" remote add origin "${WORK}/origin.git"
+git -C "${WORK}" push -q origin HEAD:refs/heads/main
+seed="$(mktemp -d "${WORK}/tmp/seed.XXXXXX")"
+git -C "${seed}" init -b apt-data >/dev/null
+: >"${seed}/.nojekyll"
+git -C "${seed}" add -- .nojekyll
+git -C "${seed}" -c user.name=fixture -c user.email=fixture@invalid commit -m site >/dev/null
+git -C "${seed}" remote add origin "${WORK}/origin.git"
+git -C "${seed}" push -q origin HEAD:refs/heads/apt-data
+seed_sha="$(git -C "${seed}" rev-parse HEAD)"
+rm -rf -- "${seed}"
+printf '%s\n' '{"html_url":"http://packages.example.test/","build_type":"legacy","source":{"branch":"apt-data","path":"/"},"cname":"packages.example.test"}' >"${WORK}/pages.json"
+printf '%s\n' '{"url":"https://api.github.com/repos/example/apt-hub/pages/builds/123"}' >"${WORK}/build-request.json"
+printf '%s\n' '{"status":"built","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' >"${WORK}/build-result.json"
+printf '%s\n' '{"schema_version":"2","packages":[]}' >"${WORK}/tmp/site/state.json"
+cp "${WORK}/tmp/site/state.json" "${WORK}/public-state.json"
+run() { (cd "${WORK}" && bash scripts/publish_apt_site.sh "$@"); }
+: >"${GITHUB_OUTPUT}"
+expect preflight_branch 0 run preflight
+if grep -Fxq 'site_url=https://packages.example.test' "${GITHUB_OUTPUT}"; then pass '同域规范化 HTTPS'; else fail 'HTTPS 输出'; fi
+if grep -Fxq 'git_email=12345+fixture-human@users.noreply.github.com' "${GITHUB_OUTPUT}"; then pass '真人提交身份'; else fail '真人身份输出'; fi
+cp "${WORK}/pages.json" "${WORK}/pages-good.json"
+printf '%s\n' '{"html_url":"https://packages.example.test","build_type":"workflow","source":{"branch":"main","path":"/"}}' >"${WORK}/pages.json"
+expect pages_wrong_source 1 run preflight
+printf '%s\n' '{"html_url":null,"build_type":"legacy","source":{"branch":"apt-data","path":"/"}}' >"${WORK}/pages.json"
+expect pages_null_url 1 run preflight
+printf '%s\n' '{"html_url":"https://packages.example.test\nother=x","build_type":"legacy","source":{"branch":"apt-data","path":"/"}}' >"${WORK}/pages.json"
+expect pages_newline_url 1 run preflight
+cp "${WORK}/pages-good.json" "${WORK}/pages.json"
+printf '%s\n' '{"login":"fixture-human","id":12345,"type":"Bot"}' >"${WORK}/actor.json"
+expect actor_bot 1 run preflight
+printf '%s\n' '{"login":"fixture-human","id":54321,"type":"User"}' >"${WORK}/actor.json"
+expect actor_id_mismatch 1 run preflight
+printf '%s\n' '{"login":"fixture-human","id":12345,"type":"User"}' >"${WORK}/actor.json"
+if [[ "$(git --git-dir="${WORK}/origin.git" rev-parse refs/heads/apt-data)" == "${seed_sha}" ]]; then
+  pass '已有 apt-data 未被 preflight 改写'
+else
+  fail 'preflight 改写了已有 apt-data'
+fi
+if grep -Fq '产物分支 apt-data 已就绪' "${WORK}/pages_wrong_source.log"; then
+  pass '源未选对时提示分支已就绪'
+else
+  fail '源未选对时未提示分支已就绪'
+fi
 
-run_publisher() {
-  local actor="$1" actor_id="$2" out_dir="$3"
-  local ghub_out="${out_dir}/github_output"
-  local sandbox="${out_dir}/sandbox"
-  mkdir -p -- "${out_dir}" "${sandbox}"
-  if [[ -L "${out_dir}" || -L "${sandbox}" ]]; then
-    echo "拒绝 symlink publisher sandbox" >&2
-    exit 99
-  fi
-  : >"${ghub_out}"
-  if [[ ! -s "${ID_SCRIPT}" ]]; then
-    echo 97 >"${out_dir}/rc"
-    printf 'no publisher script\n' >"${out_dir}/run.log"
-    return 0
-  fi
-  (
-    cd -- "${sandbox}"
-    mkdir -p -- tmp
-    set +e
-    env \
-      PATH="${EVIDENCE}/bin:${PATH}" \
-      GITHUB_OUTPUT="${ghub_out}" \
-      ACTOR_LOGIN="${actor}" \
-      ACTOR_ID="${actor_id}" \
-      GH_TOKEN='mock-token-not-real' \
-      GITHUB_API_URL='https://api.github.com' \
-      GITHUB_ACTOR="${actor}" \
-      GITHUB_ACTOR_ID="${actor_id}" \
-      bash "${ID_SCRIPT}" >"${out_dir}/run.log" 2>&1
-    echo "$?" >"${out_dir}/rc"
-    set -e
-  )
+git init --bare "${WORK}/origin-404.git" >/dev/null
+git -C "${WORK}" remote set-url origin "${WORK}/origin-404.git"
+git -C "${WORK}" push -q origin HEAD:refs/heads/main
+printf '404\n' >"${WORK}/pages.status"
+export GIT_AUTHOR_NAME=decoy GIT_AUTHOR_EMAIL=decoy@invalid
+export GIT_COMMITTER_NAME=decoy GIT_COMMITTER_EMAIL=decoy@invalid
+expect pages_unconfigured 1 run preflight
+unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+if grep -Fq '产物分支 apt-data 已就绪' "${WORK}/pages_unconfigured.log" \
+  && ! grep -Fq 'state.json' <<<"$(git --git-dir="${WORK}/origin-404.git" ls-tree -r --name-only refs/heads/apt-data)" \
+  && [[ "$(git --git-dir="${WORK}/origin-404.git" ls-tree -r --name-only refs/heads/apt-data)" == ".nojekyll" ]]; then
+  pass '404 只准备 .nojekyll，不发假 state'
+else
+  fail '404 未只准备 .nojekyll'
+fi
+ready_sha="$(git --git-dir="${WORK}/origin-404.git" rev-parse refs/heads/apt-data)"
+author="$(git --git-dir="${WORK}/origin-404.git" log -1 --format='%an <%ae>' refs/heads/apt-data)"
+committer="$(git --git-dir="${WORK}/origin-404.git" log -1 --format='%cn <%ce>' refs/heads/apt-data)"
+ident='fixture-human <12345+fixture-human@users.noreply.github.com>'
+if [[ "${author}" == "${ident}" && "${committer}" == "${ident}" ]]; then
+  pass '404 分支 author 与 committer 都是已核验发布者'
+else
+  fail "404 分支身份不对: author=${author} committer=${committer}"
+fi
+common="$(git -C "${WORK}" rev-parse --path-format=absolute --git-common-dir)"
+if git --git-dir="${common}" cat-file -e "${ready_sha}^{commit}" \
+  && [[ "$(git -C "${WORK}" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]]; then
+  pass '骨架提交在原仓共同 gitdir，临时 worktree 已移除'
+else
+  fail '骨架提交不在原仓或 worktree 未移除'
+fi
+printf '403\n' >"${WORK}/pages.status"
+expect pages_forbidden 1 run preflight
+if grep -Fq '读取 Pages 失败（权限或网络），不能当作未启用' "${WORK}/pages_forbidden.log" \
+  && ! grep -Fq '产物分支 apt-data 已就绪' "${WORK}/pages_forbidden.log" \
+  && [[ "$(git --git-dir="${WORK}/origin-404.git" rev-parse refs/heads/apt-data)" == "${ready_sha}" ]]; then
+  pass '403 不当成未启用，且不改已有分支'
+else
+  fail '403 被当成未启用或改写了分支'
+fi
+printf '200\n' >"${WORK}/pages.status"
+git -C "${WORK}" remote set-url origin "${WORK}/origin.git"
+
+expect explicit_pages_build 0 run deploy-pages
+if grep -Fxq 'POST repos/example/apt-hub/pages/builds' "${WORK}/calls.log"; then pass '显式请求分支构建'; else fail '未请求构建'; fi
+printf '%s\n' '{"status":"built","commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}' >"${WORK}/build-result.json"
+expect pages_other_commit 1 run deploy-pages
+printf '%s\n' '{"status":"errored","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","error":{"message":"fixture build failure"}}' >"${WORK}/build-result.json"
+expect pages_build_failed 1 run deploy-pages
+printf '%s\n' '{"status":"built","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' >"${WORK}/build-result.json"
+printf '%s\n' '{"stale":true}' >"${WORK}/public-state.json"
+expect pages_public_state_stale 1 run deploy-pages
+cp "${WORK}/tmp/site/state.json" "${WORK}/public-state.json"
+
+for item in key key-other key-protected; do mkdir -p "${WORK}/${item}"; chmod 700 "${WORK}/${item}"; done
+gpg --homedir "${WORK}/key" --batch --pinentry-mode loopback --passphrase '' --quick-generate-key 'Workflow fixture <workflow@invalid>' ed25519 sign 1d >"${WORK}/keygen.log" 2>&1
+gpg --homedir "${WORK}/key-other" --batch --pinentry-mode loopback --passphrase '' --quick-generate-key 'Other fixture <other@invalid>' ed25519 sign 1d >>"${WORK}/keygen.log" 2>&1
+gpg --homedir "${WORK}/key-protected" --batch --pinentry-mode loopback --passphrase 'fixture-only-protection' --quick-generate-key 'Protected fixture <protected@invalid>' ed25519 sign 1d >>"${WORK}/keygen.log" 2>&1
+gpg --homedir "${WORK}/key" --batch --armor --export-secret-keys >"${WORK}/key.asc"
+cp "${WORK}/key.asc" "${WORK}/multi.asc"
+gpg --homedir "${WORK}/key-other" --batch --armor --export-secret-keys >>"${WORK}/multi.asc"
+gpg --homedir "${WORK}/key-protected" --batch --pinentry-mode loopback --passphrase 'fixture-only-protection' --armor --export-secret-keys >"${WORK}/protected.asc"
+run_import() {
+  local file="$1"
+  [[ ! -d "${WORK}/tmp/gnupg" ]] || gpgconf --homedir "${WORK}/tmp/gnupg" --kill all >/dev/null 2>&1 || true
+  rm -rf -- "${WORK}/tmp/gnupg"
+  (export APT_HUB_GPG_PRIVATE_KEY; APT_HUB_GPG_PRIVATE_KEY="$(<"${file}")"; run import-key)
 }
+expect key_unprotected 0 run_import "${WORK}/key.asc"
+expect key_multiple 1 run_import "${WORK}/multi.asc"
+expect key_protected 1 run_import "${WORK}/protected.asc"
+if grep -Eq '^fingerprint=[A-F0-9]{40}$' "${GITHUB_OUTPUT}"; then pass '私钥派生公开指纹'; else fail '未输出派生指纹'; fi
 
-read_output() {
-  local file="$1" key="$2"
-  awk -F= -v k="${key}" '$1==k {print substr($0, index($0,"=")+1); exit}' "${file}" 2>/dev/null || true
-}
-
-if [[ -s "${ID_SCRIPT}" ]]; then
-  run_publisher yerikokay 129245892 "${EVIDENCE}/runs/id_confirmed"
-  expect_rc identity_confirmed_user_rc "${EVIDENCE}/runs/id_confirmed/rc" 0
-  got_name="$(read_output "${EVIDENCE}/runs/id_confirmed/github_output" git_name)"
-  got_email="$(read_output "${EVIDENCE}/runs/id_confirmed/github_output" git_email)"
-  if [[ "${got_name}" == "yerikokay" \
-    && "${got_email}" == "129245892+yerikokay@users.noreply.github.com" ]]; then
-    pass "确认用户身份输出保持 yerikokay / 129245892+yerikokay@users.noreply.github.com"
-  else
-    fail "确认用户身份输出偏离: name=${got_name} email=${got_email}"
-  fi
-
-  run_publisher fork-human 424242 "${EVIDENCE}/runs/id_fork"
-  expect_rc identity_fork_human_rc "${EVIDENCE}/runs/id_fork/rc" 0
-  fork_name="$(read_output "${EVIDENCE}/runs/id_fork/github_output" git_name)"
-  fork_email="$(read_output "${EVIDENCE}/runs/id_fork/github_output" git_email)"
-  if [[ "${fork_name}" == "fork-human" \
-    && "${fork_email}" == "424242+fork-human@users.noreply.github.com" ]]; then
-    pass "fork 人类身份生成为自身而非 yerikokay"
-  else
-    fail "fork 身份错误: name=${fork_name} email=${fork_email}"
-  fi
-
-  run_publisher some-bot 7 "${EVIDENCE}/runs/id_bot"
-  expect_rc identity_bot_rejected "${EVIDENCE}/runs/id_bot/rc" 1
-
-  run_publisher yerikokay 1 "${EVIDENCE}/runs/id_mismatch"
-  expect_rc identity_id_mismatch_rejected "${EVIDENCE}/runs/id_mismatch/rc" 1
+WF="${ROOT}/.github/workflows/release.yml"
+if [[ ! -e "${ROOT}/.github/workflows/ubuntu-publish.yml" && ! -e "${ROOT}/.github/workflows/ubuntu-test.yml" ]]; then pass '无影子工作流'; else fail '仍有额外工作流'; fi
+if ! grep -Eq 'upload-pages-artifact|deploy-pages@|upload-artifact|download-artifact|id-token:' "${WF}"; then pass '无 Actions Artifact 与 OIDC 部署链'; else fail 'Artifact 影子链残留'; fi
+if grep -q '^  release:' "${WF}" && grep -q '^  Build:' "${WF}" && grep -q '^  RemoveOldRelease:' "${WF}"; then pass '母版三段保留'; else fail '三段缺失'; fi
+if grep -Fq 'george012/upload_github_release_assets_action@' "${WF}" && grep -Fq 'bash ./build.sh test' "${WF}"; then pass '母版构建检验与直传 assets'; else fail '母版调用链缺失'; fi
+assets_run="${WORK}/assets-run.sh"
+awk '
+  /^      - / { step = 0; cap = 0 }
+  $0 == "        id: assets" { step = 1 }
+  step && $0 == "        run: |" { cap = 1; next }
+  cap && substr($0, 1, 10) == "          " { print substr($0, 11); next }
+  cap { exit }
+' "${WF}" >"${assets_run}"
+if [[ -s "${assets_run}" ]] \
+  && grep -Fq 'bash ./build.sh && bash ./build.sh test || exit $?' "${assets_run}" \
+  && grep -Fq 'local-status --asset-dir ./build/upload_tmp_dir || exit $?' "${assets_run}"; then
+  pass '抽出的 assets run 含失败传播与 local-status'
 else
-  fail "跳过身份执行：无抽取脚本"
+  fail '抽出的 assets run 不符'
 fi
-
-# preflight 先核 publisher；build_verify/README 经 job outputs 透传同一身份。
-if grep -Fq 'needs.preflight.outputs.git_name' "${PUB}" \
-  && grep -Fq 'needs.preflight.outputs.git_email' "${PUB}" \
-  && grep -Fq 'needs.build_verify.outputs.git_name' "${PUB}" \
-  && grep -Fq 'needs.build_verify.outputs.git_email' "${PUB}"; then
-  pass "保存/回写消费同一 publisher 核验输出"
-else
-  fail "保存/回写未消费 publisher 核验输出"
-fi
-if grep -Eq 'go_release:[[:space:]]*$' "${PUB}" \
-  && awk '
-    $0 ~ /^  go_release:/ {hit=1}
-    hit && $0 ~ /^    needs:[[:space:]]*preflight[[:space:]]*$/ {found=1}
-    hit && /^  [a-zA-Z0-9_]+:/ && $0 !~ /go_release:/ {exit}
-    END {exit found?0:1}
-  ' "${PUB}"; then
-  pass "go_release 依赖 preflight（缺私钥不发版）"
-else
-  fail "go_release 未 needs preflight"
-fi
-
-# ---------- Go 离线构包 CI 步骤消费者回归（shim，非 Go 构包验收） ----------
-# 证据仅 tmp/go-ci-integration；不跑完整 go_deb_test 矩阵。
-UBUNTU_TEST_WF="${ROOT}/.github/workflows/ubuntu-test.yml"
-GO_CI_EVIDENCE="${ROOT}/tmp/go-ci-integration/workflow-consumer"
-GO_STEP_NAME='Go 离线构包与 APT 升级夹具'
-rm -rf -- "${GO_CI_EVIDENCE}"
-mkdir -p -- "${GO_CI_EVIDENCE}/runs"
-
-log "== Go 离线 CI 步骤真实 run 段 =="
-GO_SCRIPT="${GO_CI_EVIDENCE}/runs/go-offline.sh"
-set +e
-extract_step_run fixture_test "${GO_STEP_NAME}" "${GO_SCRIPT}" "${UBUNTU_TEST_WF}" \
-  >"${GO_CI_EVIDENCE}/runs/go-offline-extract.log" 2>&1
-go_extract_rc=$?
-set -e
-if [[ "${go_extract_rc}" -eq 0 && -s "${GO_SCRIPT}" ]]; then
-  pass "抽取到唯一非空 Go 离线构包步骤"
-else
-  fail "缺少 Go 离线构包步骤（extract_rc=${go_extract_rc}）"
-fi
-
-if [[ -s "${GO_SCRIPT}" ]]; then
-  set +e
-  bash -n -- "${GO_SCRIPT}" >"${GO_CI_EVIDENCE}/runs/go-offline-bash-n.log" 2>&1
-  go_bashn_rc=$?
-  set -e
-  if [[ "${go_bashn_rc}" -eq 0 ]]; then
-    pass "Go 离线步骤 bash -n 通过"
-  else
-    fail "Go 离线步骤 bash -n 失败 rc=${go_bashn_rc}"
-  fi
-
-  if grep -Fq -- '--live' "${GO_SCRIPT}"; then
-    fail "Go 离线步骤含 --live"
-  else
-    pass "Go 离线步骤无 --live"
-  fi
-  if grep -Eq 'chmod a\+x[[:space:]].*gen_deb_golang\.sh' "${GO_SCRIPT}" \
-    && grep -Eq 'chmod a\+x[[:space:]].*tests/go_deb_test\.sh|chmod a\+x[[:space:]].*gen_deb_golang\.sh[[:space:]].*tests/go_deb_test\.sh' "${GO_SCRIPT}" \
-    && grep -Eq '(^|[[:space:]])tests/go_deb_test\.sh([[:space:]]|$)' "${GO_SCRIPT}"; then
-    pass "Go 离线步骤 chmod gen/build 与 go_deb_test.sh"
-  else
-    if grep -Fq 'gen_deb_golang.sh' "${GO_SCRIPT}" \
-      && grep -Fq 'tests/go_deb_test.sh' "${GO_SCRIPT}"; then
-      pass "Go 离线步骤引用 gen_deb_golang.sh 与 go_deb_test.sh"
-    else
-      fail "Go 离线步骤未正确 chmod/调用 Go 测试入口"
-    fi
-  fi
-
-  # 标注 shim：编排失败探测，不得当作 Go 构包验收。
-  install_go_ci_shim() {
-    local sandbox="$1"
-    mkdir -p -- "${sandbox}/scripts" "${sandbox}/tests"
-    # 占位：仅满足 chmod；非真实构包脚本。
-    printf '%s\n' '#!/usr/bin/env bash' '# SHIM placeholder gen_deb_golang — not real' 'exit 0' \
-      >"${sandbox}/gen_deb_golang.sh"
-    printf '%s\n' '#!/usr/bin/env bash' '# SHIM placeholder build — not real' 'exit 0' \
-      >"${sandbox}/build.sh"
-    cat >"${sandbox}/tests/go_deb_test.sh" <<'SHIM'
-#!/usr/bin/env bash
-# SHIM: workflow_test Go CI orchestration probe — NOT go_deb package acceptance.
-set -euo pipefail
-CALL_LOG="${APT_HUB_GO_SHIM_CALL_LOG:?missing APT_HUB_GO_SHIM_CALL_LOG}"
-RC_FILE="${APT_HUB_GO_SHIM_RC_FILE:?missing APT_HUB_GO_SHIM_RC_FILE}"
-{
-  printf 'argc=%s\n' "$#"
-  printf 'argv='
-  printf '%q ' "$@"
-  printf '\n'
-} >>"${CALL_LOG}"
-if [[ $# -gt 0 ]]; then
-  for a in "$@"; do
-    if [[ "${a}" == "--live" ]]; then
-      echo "shim reject --live" >&2
-      exit 2
-    fi
-  done
-  echo "shim reject unknown args: $*" >&2
-  exit 2
-fi
-exit "$(tr -d '[:space:]' <"${RC_FILE}")"
-SHIM
-    chmod a+x -- "${sandbox}/gen_deb_golang.sh" "${sandbox}/build.sh" "${sandbox}/tests/go_deb_test.sh"
-  }
-
-  run_go_ci_step() {
-    local out_dir="$1" want_rc="$2"
-    local sandbox="${out_dir}/sandbox"
-    local call_log="${out_dir}/shim-calls.log"
-    local rc_file="${out_dir}/shim-rc.txt"
-    mkdir -p -- "${out_dir}"
-    rm -rf -- "${sandbox}"
-    mkdir -p -- "${sandbox}"
-    install_go_ci_shim "${sandbox}"
-    : >"${call_log}"
-    printf '%s\n' "${want_rc}" >"${rc_file}"
-    (
-      cd -- "${sandbox}"
-      set +e
-      env \
-        APT_HUB_GO_SHIM_CALL_LOG="${call_log}" \
-        APT_HUB_GO_SHIM_RC_FILE="${rc_file}" \
-        bash "${GO_SCRIPT}" >"${out_dir}/run.log" 2>&1
-      echo "$?" >"${out_dir}/rc"
-      set -e
-    )
-  }
-
-  run_go_ci_step "${GO_CI_EVIDENCE}/runs/go_ok" 0
-  expect_rc go_offline_step_success_propagates "${GO_CI_EVIDENCE}/runs/go_ok/rc" 0
-  if [[ -s "${GO_CI_EVIDENCE}/runs/go_ok/shim-calls.log" ]] \
-    && grep -Fq 'argc=0' "${GO_CI_EVIDENCE}/runs/go_ok/shim-calls.log"; then
-    pass "Go 步骤成功路径确实调用 shim（无参）"
-  else
-    fail "Go 步骤成功路径未记录 shim 调用"
-  fi
-
-  run_go_ci_step "${GO_CI_EVIDENCE}/runs/go_fail23" 23
-  expect_rc go_offline_step_fail23_propagates "${GO_CI_EVIDENCE}/runs/go_fail23/rc" 23
-  if [[ -s "${GO_CI_EVIDENCE}/runs/go_fail23/shim-calls.log" ]] \
-    && grep -Fq 'argc=0' "${GO_CI_EVIDENCE}/runs/go_fail23/shim-calls.log"; then
-    pass "Go 步骤失败路径确实调用 shim（rc=23）"
-  else
-    fail "Go 步骤失败路径未记录 shim 调用"
-  fi
-
-  # 直接打 shim：拒 --live / 未知参数（编排探测，非构包验收）。
-  shim_probe="${GO_CI_EVIDENCE}/runs/shim-probe"
-  mkdir -p -- "${shim_probe}"
-  install_go_ci_shim "${shim_probe}/sandbox"
-  : >"${shim_probe}/calls.log"
-  printf '0\n' >"${shim_probe}/rc.txt"
-  set +e
-  env APT_HUB_GO_SHIM_CALL_LOG="${shim_probe}/calls.log" \
-    APT_HUB_GO_SHIM_RC_FILE="${shim_probe}/rc.txt" \
-    bash "${shim_probe}/sandbox/tests/go_deb_test.sh" --live \
-    >"${shim_probe}/live.log" 2>&1
-  echo "$?" >"${shim_probe}/live.rc"
-  env APT_HUB_GO_SHIM_CALL_LOG="${shim_probe}/calls.log" \
-    APT_HUB_GO_SHIM_RC_FILE="${shim_probe}/rc.txt" \
-    bash "${shim_probe}/sandbox/tests/go_deb_test.sh" --bogus \
-    >"${shim_probe}/bogus.log" 2>&1
-  echo "$?" >"${shim_probe}/bogus.rc"
-  set -e
-  expect_rc go_shim_rejects_live "${shim_probe}/live.rc" 2
-  expect_rc go_shim_rejects_unknown "${shim_probe}/bogus.rc" 2
-else
-  fail "跳过 Go 步骤执行：无抽取脚本"
-  fail "跳过 Go 步骤 bash -n：无抽取脚本"
-fi
-
-# ---------- Pages html_url：抽取真实 preflight；API 夹具，不是公网部署 ----------
-PAGES_SCRIPT="${EVIDENCE}/runs/pages-preflight.sh"
-set +e
-extract_step_run preflight '检查签名 secret 与 Pages URL' "${PAGES_SCRIPT}" \
-  >"${EVIDENCE}/runs/pages-extract.log" 2>&1
-pages_extract_rc=$?
-set -e
-if [[ "${pages_extract_rc}" -eq 0 && -s "${PAGES_SCRIPT}" ]]; then
-  pass "抽取 Pages preflight run"
-else
-  fail "抽取 Pages preflight run rc=${pages_extract_rc}"
-fi
-
-cat >"${EVIDENCE}/bin/curl" <<'EOF'
-#!/usr/bin/env bash
-# 仅应答 Pages API 夹具；拒绝其它 URL。
-set -euo pipefail
-out=""
-write_code=0
-url=""
-args=("$@")
-i=0
-while [[ "${i}" -lt ${#args[@]} ]]; do
-  a="${args[$i]}"
-  case "${a}" in
-    -o)
-      i=$((i + 1))
-      out="${args[$i]}"
-      ;;
-    -w)
-      i=$((i + 1))
-      ;;
-    http://*|https://*)
-      url="${a}"
-      ;;
-  esac
-  i=$((i + 1))
-done
-case "${url}" in
-  https://api.github.com/repos/*/pages) ;;
-  *)
-    echo "curl shim 拒绝非 Pages API: ${url}" >&2
-    exit 2
-    ;;
-esac
-if [[ -n "${out}" ]]; then
-  printf '%s' "${APT_HUB_PAGES_BODY-}" >"${out}"
-fi
-printf '%s' "${APT_HUB_PAGES_CODE:-200}"
+up_n="$(grep -n "steps.assets.outputs.upload == '1'" "${WF}" | cut -d: -f1)"
+pub_n="$(grep -n 'publish_apt_site.sh publish' "${WF}" | cut -d: -f1)"
+if [[ -n "${up_n}" && -n "${pub_n}" && "${up_n}" -lt "${pub_n}" ]]; then pass '上传门在 Pages 之前'; else fail '上传与 Pages 次序不对'; fi
+shim_assets() {
+  local name="$1" brc="$2" trc="$3" lrc="$4" want="$5" d="${WORK}/shim-$1" rc=0
+  rm -rf -- "${d}"
+  mkdir -p -- "${d}/scripts"
+  cat >"${d}/build.sh" <<EOF
+#!/bin/bash
+printf '%s\n' "\${1:-release}" >> calls
+[[ "\${1:-}" == test ]] && exit ${trc}
+exit ${brc}
 EOF
-chmod a+x -- "${EVIDENCE}/bin/curl"
-
-run_pages_preflight() {
-  local name="$1" want="$2" code="$3" body="$4" secret="$5" expect_url="${6:-}"
-  local dir="${EVIDENCE}/runs/pages-${name}"
-  mkdir -p -- "${dir}/sandbox"
-  : >"${dir}/github_output"
+  cat >"${d}/scripts/release_assets.sh" <<EOF
+#!/bin/bash
+printf '%s\n' "\$1" >> calls
+[[ "\$1" == local-status ]] && exit ${lrc}
+exit 10
+EOF
+  : >"${d}/gen_debs.sh"
+  : >"${d}/scripts/gen_deb_golang.sh"
+  chmod a+x "${d}/build.sh" "${d}/scripts/release_assets.sh" "${d}/gen_debs.sh" "${d}/scripts/gen_deb_golang.sh"
+  : >"${d}/github_output"
   set +e
   (
-    cd -- "${dir}/sandbox"
-    env \
-      PATH="${EVIDENCE}/bin:${PATH}" \
-      GITHUB_OUTPUT="${dir}/github_output" \
-      GITHUB_REPOSITORY="0xdevelop/apt-hub" \
-      GH_TOKEN="fixture-token" \
-      APT_HUB_GPG_PRIVATE_KEY="${secret}" \
-      APT_HUB_PAGES_CODE="${code}" \
-      APT_HUB_PAGES_BODY="${body}" \
-      bash "${PAGES_SCRIPT}" >"${dir}/run.log" 2>&1
-    echo "$?" >"${dir}/rc"
-  )
+    cd -- "${d}"
+    GITHUB_OUTPUT="${d}/github_output" REPOSITORY=example/apt-hub TAG=v0.0.2 bash "${assets_run}"
+  ) >"${d}.log" 2>&1
+  rc=$?
   set -e
-  expect_rc "pages_${name}" "${dir}/rc" "${want}"
+  if [[ "${rc}" -eq "${want}" ]]; then pass "run ${name}"; else fail "run ${name} rc=${rc}"; fi
   if [[ "${want}" -eq 0 ]]; then
-    if grep -Fxq -- "site_url=${expect_url}" "${dir}/github_output"; then
-      pass "pages_${name} site_url=${expect_url}"
+    if grep -Fxq 'upload=1' "${d}/github_output"; then
+      pass "${name} 写 upload=1"
     else
-      fail "pages_${name} site_url 不符 got=$(tr '\n' '|' <"${dir}/github_output")"
+      fail "${name} 未写 upload=1"
     fi
-  elif grep -q '^site_url=' "${dir}/github_output"; then
-    fail "pages_${name} 拒绝后仍写出 site_url"
+  elif grep -Fxq 'upload=1' "${d}/github_output"; then
+    fail "${name} 写了 upload=1"
   else
-    pass "pages_${name} 未写出 site_url"
+    pass "${name} 未写 upload=1"
   fi
+  if [[ "${name}" == build23 || "${name}" == test24 ]] && grep -qx local-status "${d}/calls"; then
+    fail "${name} 调用了 local-status"
+  fi
+  if [[ "${name}" == build23 ]] && grep -qx test "${d}/calls"; then fail 'build23 仍跑了 test'; fi
 }
-
-if [[ "${pages_extract_rc}" -eq 0 && -s "${PAGES_SCRIPT}" ]]; then
-  http_body="$(jq -n --arg u 'http://0xdevelop.m-b-crazy.com' '{html_url:$u}')"
-  http_slash_body="$(jq -n --arg u 'http://0xdevelop.m-b-crazy.com/' '{html_url:$u}')"
-  https_path_body="$(jq -n --arg u 'https://0xdevelop.github.io/apt-hub/' '{html_url:$u}')"
-  http_port_body="$(jq -n --arg u 'http://example.test:8443/team/site/' '{html_url:$u}')"
-  empty_body="$(jq -n --arg u '' '{html_url:$u}')"
-  null_body='{"html_url":null}'
-  obj_body='{"html_url":{"u":"http://evil.example"}}'
-  ftp_body="$(jq -n --arg u 'ftp://example.test/x' '{html_url:$u}')"
-  nl_body="$(jq -n --arg u $'https://example.test\nsite_url=https://evil.example' '{html_url:$u}')"
-  err_body='{"message":"no"}'
-  run_pages_preflight http_custom 0 200 "${http_body}" 'fixture-secret' \
-    'https://0xdevelop.m-b-crazy.com'
-  run_pages_preflight http_trailing_slash 0 200 "${http_slash_body}" 'fixture-secret' \
-    'https://0xdevelop.m-b-crazy.com'
-  run_pages_preflight https_with_path 0 200 "${https_path_body}" 'fixture-secret' \
-    'https://0xdevelop.github.io/apt-hub'
-  run_pages_preflight http_port_path 0 200 "${http_port_body}" 'fixture-secret' \
-    'https://example.test:8443/team/site'
-  run_pages_preflight api_403 1 403 "${err_body}" 'fixture-secret'
-  run_pages_preflight api_404 1 404 "${err_body}" 'fixture-secret'
-  run_pages_preflight api_500 1 500 "${err_body}" 'fixture-secret'
-  run_pages_preflight empty_url 1 200 "${empty_body}" 'fixture-secret'
-  run_pages_preflight null_url 1 200 "${null_body}" 'fixture-secret'
-  run_pages_preflight nonstring_url 1 200 "${obj_body}" 'fixture-secret'
-  run_pages_preflight ftp_url 1 200 "${ftp_body}" 'fixture-secret'
-  run_pages_preflight newline_url 1 200 "${nl_body}" 'fixture-secret'
-  run_pages_preflight empty_secret 1 200 "${http_body}" ''
-else
-  fail "跳过 Pages 行为：无抽取脚本"
-fi
-
-# ---------- 可移植性与隔离验收 ----------
-# needle 拼接，避免源码自带探测字面量。
-_dep_yaml='Bun.''YAML.parse'
-_dep_bin='^[[:space:]]*b''un[[:space:]]'
-if grep -nF "${_dep_yaml}" "${ROOT}/tests/workflow_test.sh" >/dev/null \
-  || grep -nE "${_dep_bin}" "${ROOT}/tests/workflow_test.sh" >/dev/null; then
-  fail "workflow_test.sh 仍调用外部 YAML 运行时"
-elif grep -A20 '^extract_step_run()' "${ROOT}/tests/workflow_test.sh" | grep -q 'awk '; then
-  pass "extract_step_run 使用 awk，无外部 YAML 运行时调用"
-else
-  fail "extract_step_run 未使用 awk"
-fi
-unset _dep_yaml _dep_bin
-
-if [[ -n "${SENTINEL_HASH}" ]]; then
-  if [[ -f "${SENTINEL}" && ! -L "${SENTINEL}" ]]; then
-    got_hash="$(sha256sum -- "${SENTINEL}" | awk '{print $1}')"
-    if [[ "${got_hash}" == "${SENTINEL_HASH}" ]]; then
-      pass "项目 tmp/gnupg sentinel 未改动"
-    else
-      fail "项目 tmp/gnupg sentinel 被改动"
-    fi
-  else
-    fail "项目 tmp/gnupg sentinel 丢失"
-  fi
-else
-  if [[ -e "${ROOT}/tmp/gnupg" ]]; then
-    # 本测试启动时无哨兵则不应新建/污染项目 gnupg；若他方创建则不强制。
-    log "note: 无预存 sentinel，跳过 sentinel 哈希核验"
-  fi
-fi
-
-# 主动清密后再断言残留（trap 还会再跑一次）
-scrub_test_secrets
-residue=0
-if [[ -e "${EVIDENCE}/keys/fixture_protect.txt" ]]; then
-  fail "残留 fixture_protect.txt"
-  residue=1
-fi
-if compgen -G "${EVIDENCE}/keys/*.asc" >/dev/null; then
-  fail "残留导出 *.asc"
-  residue=1
-fi
-if find "${EVIDENCE}" -type d -name 'private-keys-v1.d' 2>/dev/null | grep -q .; then
-  fail "残留 private-keys-v1.d"
-  residue=1
-fi
-if [[ "${residue}" -eq 0 ]]; then
-  pass "无测试私钥/夹具保护口令残留（asc/fixture_protect/private-keys）"
-fi
-
-log "RESULT pass=${PASS} fail=${FAIL}"
-if [[ "${FAIL}" -ne 0 ]]; then
-  exit 1
-fi
-exit 0
+shim_assets build23 23 0 0 23
+shim_assets test24 0 24 0 24
+shim_assets local1 0 0 1 1
+shim_assets ok 0 0 0 0
+cleanup
+printf 'RESULT pass=%s fail=%s evidence=%s\n' "${PASS}" "${FAIL}" "${WORK}"
+[[ "${FAIL}" -eq 0 ]]
