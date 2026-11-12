@@ -653,25 +653,23 @@ else
 fi
 assert_no_workdir "dangling index 无 work 目录" "$dangle_site"
 
-# git_tag.sh：--version 仅在隔离 tmp 仓本地打标签；auto/push 见 release_test。
+# git_tag.sh：手动入口一律拒绝；auto/push 见 release_test。
 tag_repo="$EVIDENCE/tag-repo"
 mkdir -p -- "$tag_repo"
 git init --quiet "$tag_repo"
 printf '0.1.0\n' >"$tag_repo/VERSION"
 git -C "$tag_repo" add VERSION
 git -C "$tag_repo" -c user.name='apt-hub-render-test' -c user.email='apt-hub-render-test@invalid' commit --quiet -m 'test version'
-# 无 remote：--version 只建本地标签，不改 VERSION，不碰本仓。
-run_expect "git_tag_ok" 0 bash -c "cd \"$tag_repo\" && \"$GIT_TAG\" --version 0.1.0"
+run_expect "git_tag_version_refuse" 1 bash -c "cd \"$tag_repo\" && \"$GIT_TAG\" --version 0.1.0"
+run_expect "git_tag_custom_refuse" 1 bash -c "cd \"$tag_repo\" && \"$GIT_TAG\" custom"
+assert_eq "git_tag 拒绝后 VERSION 未改" "$(tr -d '[:space:]' <"$tag_repo/VERSION")" "0.1.0"
 if git -C "$tag_repo" rev-parse -q --verify refs/tags/v0.1.0 >/dev/null; then
-  pass "tmp 仓库存在 v0.1.0"
+  fail "手动入口仍创建了标签"
 else
-  fail "tmp 仓库未创建 v0.1.0"
+  pass "手动入口未创建标签"
 fi
-assert_eq "git_tag 不改 VERSION" "$(cat "$tag_repo/VERSION")" "0.1.0"
-run_expect "git_tag_duplicate" 1 bash -c "cd \"$tag_repo\" && \"$GIT_TAG\" --version 0.1.0"
-run_expect "git_tag_mismatch" 1 bash -c "cd \"$tag_repo\" && \"$GIT_TAG\" --version 0.1.1"
 printf 'dirty\n' >"$tag_repo/dirty.txt"
-run_expect "git_tag_dirty" 1 bash -c "cd \"$tag_repo\" && \"$GIT_TAG\" --version 0.1.0"
+run_expect "git_tag_dirty" 1 bash -c "cd \"$tag_repo\" && \"$GIT_TAG\" auto"
 rm -f -- "$tag_repo/dirty.txt"
 run_expect "git_tag_force_flag" 1 bash -c "cd \"$tag_repo\" && \"$GIT_TAG\" --version 0.1.0 --force"
 run_expect "git_tag_unknown" 1 bash -c "cd \"$tag_repo\" && \"$GIT_TAG\" bogus-mode"

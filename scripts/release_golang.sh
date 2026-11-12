@@ -453,12 +453,22 @@ verify_local_asset_set() {
 }
 
 assert_release_identity() {
+  # published：html_url 必须精确指向 /releases/tag/<tag>。
+  # draft：官方可能给 untagged-* 页；只校验 tag_name + 数字 id + html_url 落在本仓 releases。
   local rel_json="$1" repository="$2" tag="$3"
-  local got_tag html expect
+  local got_tag html rid draft expect
   got_tag="$(jq -r '.tag_name // empty' "${rel_json}")"
   html="$(jq -r '.html_url // empty' "${rel_json}")"
+  rid="$(jq -r '.id // empty' "${rel_json}")"
+  draft="$(jq -r 'if .draft==true then "1" else "0" end' "${rel_json}")"
   [[ "${got_tag}" == "${tag}" ]] || die "release.tag_name 与请求 tag 不一致"
+  [[ "${rid}" =~ ^[1-9][0-9]*$ ]] || die "release.id 非法"
   [[ -n "${html}" ]] || die "release.html_url 缺失"
+  if [[ "${draft}" == "1" ]]; then
+    [[ "${html}" == "https://github.com/${repository}/releases/"* ]] \
+      || die "draft html_url 不在本仓 releases"
+    return 0
+  fi
   expect="https://github.com/${repository}/releases/tag/${tag}"
   [[ "${html}" == "${expect}" ]] || die "release.html_url 与仓库/tag 不匹配"
 }
@@ -501,15 +511,12 @@ cmd_status() {
   # shellcheck disable=SC2064
   trap 'cleanup_owned_dir "'"${work}"'"' RETURN
   local rel_json="${work}/release.json"
-  local code
-  code="$(gh_api_code GET "/repos/${repository}/releases/tags/${tag}" "${rel_json}")"
-  if [[ "${code}" == "404" ]]; then
+  if ! fetch_release_by_tag "${repository}" "${tag}" "${rel_json}"; then
     printf 'release_state=missing\n'
     printf 'assets_complete=0\n'
     printf 'go_release_tag=%s\n' "${tag}"
     return 0
   fi
-  [[ "${code}" == "200" ]] || die "查询 release 失败 HTTP ${code}"
   assert_release_identity "${rel_json}" "${repository}" "${tag}"
   local state
   state="$(jq -r 'if .draft then "draft" elif .prerelease then "prerelease" else "published" end' "${rel_json}")"
@@ -583,17 +590,13 @@ cmd_upload() {
   # shellcheck disable=SC2064
   trap 'cleanup_owned_dir "'"${work}"'"' RETURN
   local rel_json="${work}/release.json"
-  local code
-  code="$(gh_api_code GET "/repos/${repository}/releases/tags/${tag}" "${rel_json}")"
-  local state="" release_id=""
-  if [[ "${code}" == "200" ]]; then
+  local code state="" release_id=""
+  if fetch_release_by_tag "${repository}" "${tag}" "${rel_json}"; then
     assert_release_identity "${rel_json}" "${repository}" "${tag}"
     state="$(jq -r 'if .draft then "draft" elif .prerelease then "prerelease" else "published" end' "${rel_json}")"
     release_id="$(jq -r '.id|tostring' "${rel_json}")"
-  elif [[ "${code}" == "404" ]]; then
-    state="missing"
   else
-    die "查询 release 失败 HTTP ${code}"
+    state="missing"
   fi
 
   if [[ "${state}" == "published" ]]; then
@@ -652,8 +655,8 @@ cmd_upload() {
       --title "${tag}" \
       --notes-file "${body_file}" \
       || die "创建 draft release 失败"
-    code="$(gh_api_code GET "/repos/${repository}/releases/tags/${tag}" "${rel_json}")"
-    [[ "${code}" == "200" ]] || die "创建后无法读取 draft HTTP ${code}"
+    fetch_release_by_tag "${repository}" "${tag}" "${rel_json}" \
+      || die "创建后无法读取 draft"
     assert_release_identity "${rel_json}" "${repository}" "${tag}"
     release_id="$(jq -r '.id|tostring' "${rel_json}")"
     state="draft"
@@ -682,8 +685,11 @@ cmd_upload() {
       GH_REPO="${repository}" gh release upload "${tag}" "${f}" --clobber=false \
         || die "上传失败: ${bn}"
     done
-    # 重新读取并逐文件核 size（及 digest 若有）
-    code="$(gh_api_code GET "/repos/${repository}/releases/tags/${tag}" "${rel_json}")"
+    # 按真实 id 读回并逐文件核 size（及 digest 若有）
+    code="$(gh_api_code GET "/repos/${repository}/releases/${release_id}" "${rel_json}")"
+    if [[ -z "${code}" || "${code}" == "000" ]]; then
+      die "上传后读取 release 网络失败"
+    fi
     [[ "${code}" == "200" ]] || die "上传后读取 release 失败 HTTP ${code}"
     assert_release_identity "${rel_json}" "${repository}" "${tag}"
     for f in "${debs[@]}" "${asset_dir}/provenance.json" "${asset_dir}/SHA256SUMS"; do
@@ -786,14 +792,50 @@ list_all_releases_json() {
     page=$((page + 1))
   done
   [[ "${page}" -le 50 ]] || die "releases 分页超过上限，拒绝清理"
-  # 归一为 prune 使用的字段
+  # 归一：prune 用 tagName/isDraft；draft 查 id 复用同一份列表，禁止第二套分页。
   jq '[.[] | {
+    id: .id,
     tagName: .tag_name,
     isDraft: .draft,
     isLatest: (.make_latest=="true" or .make_latest==true),
     createdAt: .created_at
   }]' "${acc}" >"${out}" || die "归一 releases 列表失败"
   rm -f -- "${chunk}" "${acc}"
+}
+
+# 官方 GET /releases/tags/:tag 只返回 published。
+# draft：复用 list_all_releases_json 取 id，再 GET /releases/:id。真正 missing 返回 1；分页触顶/网络失败 die。
+fetch_release_by_tag() {
+  local repository="$1" tag="$2" out="$3"
+  local code listf rid
+  code="$(gh_api_code GET "/repos/${repository}/releases/tags/${tag}" "${out}")"
+  if [[ -z "${code}" || "${code}" == "000" ]]; then
+    die "查询 published release 网络失败"
+  fi
+  if [[ "${code}" == "200" ]]; then
+    return 0
+  fi
+  if [[ "${code}" != "404" ]]; then
+    die "查询 published release 失败 HTTP ${code}"
+  fi
+  listf="${out}.all-releases"
+  list_all_releases_json "${repository}" "${listf}"
+  rid="$(jq -r --arg t "${tag}" \
+    '[.[]|select(.tagName==$t)|.id|tostring]|first // empty' "${listf}")" || {
+    rm -f -- "${listf}"
+    die "从 releases 列表解析 id 失败"
+  }
+  rm -f -- "${listf}"
+  if [[ -z "${rid}" ]]; then
+    return 1
+  fi
+  [[ "${rid}" =~ ^[1-9][0-9]*$ ]] || die "release id 非法: ${rid}"
+  code="$(gh_api_code GET "/repos/${repository}/releases/${rid}" "${out}")"
+  if [[ -z "${code}" || "${code}" == "000" ]]; then
+    die "按 id 读取 release 网络失败"
+  fi
+  [[ "${code}" == "200" ]] || die "按 id 读取 release 失败 HTTP ${code}"
+  return 0
 }
 
 cmd_prune() {
@@ -914,13 +956,35 @@ cmd_prune() {
     return 0
   fi
 
-  local t
+  local t remote_url tag_refs tag_rc
+  remote_url="https://x-access-token:${GH_TOKEN}@github.com/${repository}.git"
   while IFS= read -r t; do
     [[ -n "${t}" ]] || continue
+    # 先精确删旧 tag：已不存在视为完成；网络/权限失败拒绝（不继续删 Release，下轮可恢复）
+    set +e
+    tag_refs="$(git ls-remote --tags --refs "${remote_url}" "refs/tags/${t}" 2>"${work}/tag-ls.err")"
+    tag_rc=$?
+    set -e
+    if [[ "${tag_rc}" -ne 0 ]]; then
+      die "查询旧 tag 失败: ${t}"
+    fi
+    if [[ -n "${tag_refs}" ]]; then
+      git push "${remote_url}" ":refs/tags/${t}" \
+        || die "删除旧 tag 失败: ${t}"
+      set +e
+      tag_refs="$(git ls-remote --tags --refs "${remote_url}" "refs/tags/${t}" 2>"${work}/tag-ls.err")"
+      tag_rc=$?
+      set -e
+      if [[ "${tag_rc}" -ne 0 ]]; then
+        die "读回旧 tag 失败: ${t}"
+      fi
+      [[ -z "${tag_refs}" ]] || die "删除后 tag 仍存在: ${t}"
+    fi
     GH_REPO="${repository}" gh release delete "${t}" -y \
       || die "删除 release 失败: ${t}"
-    git push "https://x-access-token:${GH_TOKEN}@github.com/${repository}.git" ":refs/tags/${t}" \
-      >/dev/null 2>&1 || true
+    if GH_REPO="${repository}" gh release view "${t}" >/dev/null 2>&1; then
+      die "删除后 release 仍存在: ${t}"
+    fi
     printf 'prune_deleted_tag=%s\n' "${t}"
   done <"${del_list}"
 

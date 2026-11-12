@@ -22,11 +22,11 @@ concurrency:
 
 jobs:
   prepare:
-    name: prepare
+    name: Release
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
-      contents: read
+      contents: write
     outputs:
       go_release_tag: ${{ steps.prep.outputs.go_release_tag }}
       go_version: ${{ steps.prep.outputs.go_version }}
@@ -41,6 +41,34 @@ jobs:
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ca-certificates curl jq
+
+      # 母版 ncipollo：仅严格 vX.Y.Z push 创建本仓脚本 Release；workflow_call/手动不创建。
+      - name: 解析脚本 tag
+        id: script_tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          echo "ok=0" >>"$GITHUB_OUTPUT"
+          echo "tag=" >>"$GITHUB_OUTPUT"
+          if [[ "${EVENT_NAME}" != "push" ]]; then
+            exit 0
+          fi
+          if [[ "${REF}" =~ ^refs/tags/(v[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "ok=1" >>"$GITHUB_OUTPUT"
+            echo "tag=${BASH_REMATCH[1]}" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: 本仓脚本 Release
+        if: steps.script_tag.outputs.ok == '1'
+        uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1
+        with:
+          skipIfReleaseExists: true
+          tag: ${{ steps.script_tag.outputs.tag }}
+          name: ${{ steps.script_tag.outputs.tag }}
+          bodyFile: changelog/${{ steps.script_tag.outputs.tag }}.md
+          makeLatest: false
 
       - name: prepare
         id: prep
@@ -171,7 +199,6 @@ jobs:
           [[ -f tmp/go-release-assets/SHA256SUMS ]]
           test -n "$(find tmp/go-release-assets -maxdepth 1 -name 'golang_*.deb' -print -quit)"
           test -n "$(find tmp/go-release-assets -maxdepth 1 -name 'golang-go_*.deb' -print -quit)"
-          # 直接上传 deb+manifest+摘要，不打包 zip
           upf=$(mktemp tmp/upload-out.XXXXXX)
           set +e
           scripts/release_golang.sh upload \
@@ -198,8 +225,8 @@ jobs:
           [[ -n "${go_release_tag}" ]] || { echo "upload 未输出 go_release_tag" >&2; exit 1; }
           echo "go_release_tag=${go_release_tag}" >>"$GITHUB_OUTPUT"
 
-  RemoveOld:
-    name: RemoveOld
+  RemoveOldRelease:
+    name: RemoveOldRelease
     needs:
       - prepare
       - Build
@@ -231,3 +258,80 @@ jobs:
             --current-tag "${TAG}" \
             --apt-data-ref apt-data \
             --keep-recent 2
+
+      # 母版两代前清理：仅严格 vtag push 且 Build 成功后；不存在则无操作。
+      - name: 清理旧脚本 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" != "push" ]]; then
+            echo "非 tag push，跳过脚本两代清理"
+            exit 0
+          fi
+          if [[ ! "${REF}" =~ ^refs/tags/(v[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "非严格 vX.Y.Z，跳过脚本两代清理"
+            exit 0
+          fi
+          APP_VERSION="${BASH_REMATCH[1]}"
+          get_pre_del_tag() {
+            local v_str="$1"
+            local baseStr base major minor
+            baseStr=$(echo "$v_str" | cut -d'.' -f1)
+            base=${baseStr//v/}
+            major=$(echo "$v_str" | cut -d'.' -f2)
+            minor=$(echo "$v_str" | cut -d'.' -f3)
+            if ((minor>0)); then
+              minor=$((minor-1))
+            else
+              minor=999
+              if ((major>0)); then
+                major=$((major-1))
+              else
+                major=999
+                if ((base>0)); then
+                  base=$((base-1))
+                else
+                  # 初期下溢：无更低版本，返回地板供后续 view 不存在则无操作（不因首版失败）
+                  echo "v0.0.0"
+                  return 0
+                fi
+              fi
+            fi
+            echo "v${base}.${major}.${minor}"
+          }
+          APP_OLD_VERSION=$(get_pre_del_tag "$(get_pre_del_tag "${APP_VERSION}")")
+          echo "Old version to remove: ${APP_OLD_VERSION}"
+          case "${APP_OLD_VERSION}" in
+            golang-*|latest)
+              echo "拒绝删除受保护引用: ${APP_OLD_VERSION}" >&2
+              exit 1
+              ;;
+          esac
+          [[ "${APP_OLD_VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "旧版本非严格 vX.Y.Z: ${APP_OLD_VERSION}" >&2
+            exit 1
+          }
+          mkdir -p tmp
+          errf="$(mktemp tmp/script-old-view.XXXXXX)"
+          set +e
+          gh release view "${APP_OLD_VERSION}" >/dev/null 2>"${errf}"
+          view_rc=$?
+          set -e
+          if [[ "${view_rc}" -ne 0 ]]; then
+            # 仅明确不存在才无操作；权限/网络等通用 exit1 不得吞掉
+            if grep -Eiq 'release not found|HTTP 404|Not Found' "${errf}"; then
+              rm -f -- "${errf}"
+              echo "旧脚本 Release ${APP_OLD_VERSION} 不存在，无操作"
+              exit 0
+            fi
+            echo "查询旧脚本 Release 失败 rc=${view_rc}" >&2
+            cat -- "${errf}" >&2 || true
+            rm -f -- "${errf}"
+            exit "${view_rc}"
+          fi
+          rm -f -- "${errf}"
+          gh release delete "${APP_OLD_VERSION}" -y
+          git push origin --delete "${APP_OLD_VERSION}"

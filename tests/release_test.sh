@@ -106,11 +106,17 @@ fi
 if grep -Fq 'workflow_call' "${WF_REL}" \
   && grep -Eq '^  prepare:' "${WF_REL}" \
   && grep -Eq '^  Build:' "${WF_REL}" \
-  && grep -Eq '^  RemoveOld:' "${WF_REL}" \
-  && grep -Fq 'go_release_tag' "${WF_REL}"; then
-  pass "release.yml prepare→Build→RemoveOld + go_release_tag"
+  && grep -Eq '^  RemoveOldRelease:' "${WF_REL}" \
+  && grep -Fq 'go_release_tag' "${WF_REL}" \
+  && grep -Fq 'ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd' "${WF_REL}" \
+  && grep -Fq 'skipIfReleaseExists: true' "${WF_REL}" \
+  && grep -Fq 'get_pre_del_tag' "${WF_REL}" \
+  && grep -Fq '清理旧脚本 Release' "${WF_REL}" \
+  && ! grep -Fq '创建脚本 Release draft' "${WF_REL}" \
+  && ! grep -Fq '发布脚本 Release' "${WF_REL}"; then
+  pass "release.yml 母版 ncipollo + 两代清理 + Go 三段"
 else
-  fail "release.yml 三段结构不完整"
+  fail "release.yml 母版收口不完整"
 fi
 if grep -Fq 'uses: ./.github/workflows/release.yml' "${WF_PUB}" \
   && grep -Fq 'rotate_from' "${WF_PUB}" \
@@ -249,14 +255,27 @@ case "${cmd}" in
         exit 0
       fi
       # ≥4 已发布同族 + draft；旧版 7.7.4 仅靠 by-hash 全文 tag 保护（非 keep-recent）
-      cat <<'JSON'
-[{"tag_name":"golang-7.7.8-1","draft":false,"make_latest":"false","created_at":"2026-01-05T00:00:00Z"},
- {"tag_name":"golang-7.7.7-1","draft":false,"make_latest":"false","created_at":"2026-01-04T00:00:00Z"},
- {"tag_name":"golang-7.7.6-1","draft":false,"make_latest":"false","created_at":"2026-01-03T00:00:00Z"},
- {"tag_name":"golang-7.7.5-1","draft":false,"make_latest":"false","created_at":"2026-01-02T00:00:00Z"},
- {"tag_name":"golang-7.7.4-1","draft":false,"make_latest":"false","created_at":"2026-01-01T00:00:00Z"},
- {"tag_name":"golang-9.9.9-1","draft":true,"make_latest":"false","created_at":"2026-01-06T00:00:00Z"}]
+      # draft/draft_full：tag 端点 404 后靠本列表 id 再 GET /releases/:id
+      st="${APT_HUB_REL_STATE:-}"
+      if [[ "${st}" == "draft" || "${st}" == "draft_full" ]]; then
+        cat <<'JSON'
+[{"id":88,"tag_name":"golang-7.7.8-1","draft":false,"make_latest":"false","created_at":"2026-01-05T00:00:00Z"},
+ {"id":42,"tag_name":"golang-7.7.7-1","draft":true,"make_latest":"false","created_at":"2026-01-04T00:00:00Z"},
+ {"id":86,"tag_name":"golang-7.7.6-1","draft":false,"make_latest":"false","created_at":"2026-01-03T00:00:00Z"},
+ {"id":85,"tag_name":"golang-7.7.5-1","draft":false,"make_latest":"false","created_at":"2026-01-02T00:00:00Z"},
+ {"id":84,"tag_name":"golang-7.7.4-1","draft":false,"make_latest":"false","created_at":"2026-01-01T00:00:00Z"},
+ {"id":99,"tag_name":"golang-9.9.9-1","draft":true,"make_latest":"false","created_at":"2026-01-06T00:00:00Z"}]
 JSON
+      else
+        cat <<'JSON'
+[{"id":88,"tag_name":"golang-7.7.8-1","draft":false,"make_latest":"false","created_at":"2026-01-05T00:00:00Z"},
+ {"id":87,"tag_name":"golang-7.7.7-1","draft":false,"make_latest":"false","created_at":"2026-01-04T00:00:00Z"},
+ {"id":86,"tag_name":"golang-7.7.6-1","draft":false,"make_latest":"false","created_at":"2026-01-03T00:00:00Z"},
+ {"id":85,"tag_name":"golang-7.7.5-1","draft":false,"make_latest":"false","created_at":"2026-01-02T00:00:00Z"},
+ {"id":84,"tag_name":"golang-7.7.4-1","draft":false,"make_latest":"false","created_at":"2026-01-01T00:00:00Z"},
+ {"id":99,"tag_name":"golang-9.9.9-1","draft":true,"make_latest":"false","created_at":"2026-01-06T00:00:00Z"}]
+JSON
+      fi
       exit 0
     fi
     echo "gh api unknown path: ${path}" >&2
@@ -277,6 +296,12 @@ JSON
         ;;
       view)
         tag="${3:-}"
+        if [[ -n "${APT_HUB_GH_DELETED_RELEASES:-}" ]] \
+          && [[ -f "${APT_HUB_GH_DELETED_RELEASES}" ]] \
+          && grep -Fxq -- "${tag}" "${APT_HUB_GH_DELETED_RELEASES}"; then
+          echo "not found" >&2
+          exit 1
+        fi
         case "${tag}" in
           golang-7.7.5-1|golang-7.7.6-1|golang-9.9.9-1) exit 0 ;;
           *) echo "not found" >&2; exit 1 ;;
@@ -296,7 +321,13 @@ JSON
         cp -a -- "${APT_HUB_DL_SRC:?}/${pat}" "${dest}/${pat}"
         ;;
       edit) echo edited ;;
-      delete) echo "deleted $*" ;;
+      delete)
+        tag="${3:-}"
+        if [[ -n "${APT_HUB_GH_DELETED_RELEASES:-}" ]]; then
+          printf '%s\n' "${tag}" >>"${APT_HUB_GH_DELETED_RELEASES}"
+        fi
+        echo "deleted $*"
+        ;;
       *) echo "gh release unknown ${sub}" >&2; exit 2 ;;
     esac
     ;;
@@ -304,6 +335,8 @@ JSON
 esac
 EOF
 chmod a+x -- "${STUB_BIN}/gh"
+: >"${EVIDENCE}/runs/gh-deleted-releases.txt"
+
 
 pub_assets_json() {
   local draft="$1"
@@ -432,17 +465,23 @@ respond() {
 }
 make_full() {
   local draft="$1"
-  local gga ggb ga gb prov sums
+  local gga ggb ga gb prov sums html
   gga="${APT_HUB_ASSET_DIR}/golang-go_7.7.7-1_amd64.deb"
   ggb="${APT_HUB_ASSET_DIR}/golang-go_7.7.7-1_arm64.deb"
   ga="${APT_HUB_ASSET_DIR}/golang_7.7.7-1_amd64.deb"
   gb="${APT_HUB_ASSET_DIR}/golang_7.7.7-1_arm64.deb"
   prov="${APT_HUB_ASSET_DIR}/provenance.json"
   sums="${APT_HUB_ASSET_DIR}/SHA256SUMS"
+  # draft 官方可能给 untagged-*；published 必须精确 tag URL
+  if [[ "${draft}" == "true" ]]; then
+    html="https://github.com/example/apt-hub/releases/tag/untagged-abcdef0123456789"
+  else
+    html="https://github.com/example/apt-hub/releases/tag/golang-7.7.7-1"
+  fi
   jq -n \
     --argjson draft "${draft}" \
     --arg tag "golang-7.7.7-1" \
-    --arg html "https://github.com/example/apt-hub/releases/tag/golang-7.7.7-1" \
+    --arg html "${html}" \
     --argjson gas "$(stat -c '%s' -- "$gga")" --arg gad "sha256:$(sha256sum -- "$gga" | awk '{print $1}')" \
     --argjson gbs "$(stat -c '%s' -- "$ggb")" --arg gbd "sha256:$(sha256sum -- "$ggb" | awk '{print $1}')" \
     --argjson as "$(stat -c '%s' -- "$ga")" --arg ad "sha256:$(sha256sum -- "$ga" | awk '{print $1}')" \
@@ -462,12 +501,14 @@ case "${url}" in
   https://api.github.com/repos/*/releases/tags/*)
     tag="${url##*/}"
     st="${APT_HUB_REL_STATE:-missing}"
+    # 官方：draft 不出现在 tags 端点 → 404，再走 list+id
     if [[ "${tag}" != "golang-7.7.7-1" ]]; then
+      respond '{"message":"Not Found"}' 404
+    elif [[ "${st}" == "draft" || "${st}" == "draft_full" ]]; then
       respond '{"message":"Not Found"}' 404
     elif [[ "${st}" == "published" ]]; then
       respond "$(make_full false)" 200
     elif [[ "${st}" == "published_no_identity" ]]; then
-      # 缺 tag_name/html_url：不得视为可复用
       body="$(make_full false | jq 'del(.tag_name,.html_url)')"
       respond "${body}" 200
     elif [[ "${st}" == "published_bad_tag" ]]; then
@@ -475,10 +516,19 @@ case "${url}" in
       respond "${body}" 200
     elif [[ "${st}" == "published_bad" ]]; then
       respond '{"id":1,"tag_name":"golang-7.7.7-1","html_url":"https://github.com/example/apt-hub/releases/tag/golang-7.7.7-1","draft":false,"prerelease":false,"assets":[{"name":"golang-go_7.7.7-1_amd64.deb","size":1,"digest":"sha256:dead","id":11}]}' 200
-    elif [[ "${st}" == "draft" ]]; then
-      respond '{"id":42,"tag_name":"golang-7.7.7-1","html_url":"https://github.com/example/apt-hub/releases/tag/golang-7.7.7-1","draft":true,"prerelease":false,"assets":[{"name":"SHA256SUMS","size":10,"id":1}]}' 200
-    elif [[ "${st}" == "draft_full" ]]; then
+    else
+      respond '{"message":"Not Found"}' 404
+    fi
+    ;;
+  https://api.github.com/repos/*/releases/[0-9]*)
+    rid="${url##*/}"
+    st="${APT_HUB_REL_STATE:-missing}"
+    if [[ "${rid}" == "42" && "${st}" == "draft" ]]; then
+      respond '{"id":42,"tag_name":"golang-7.7.7-1","html_url":"https://github.com/example/apt-hub/releases/tag/untagged-abcdef0123456789","draft":true,"prerelease":false,"assets":[{"name":"SHA256SUMS","size":10,"id":1}]}' 200
+    elif [[ "${rid}" == "42" && "${st}" == "draft_full" ]]; then
       respond "$(make_full true)" 200
+    elif [[ "${rid}" == "1" ]]; then
+      respond "$(make_full false)" 200
     else
       respond '{"message":"Not Found"}' 404
     fi
@@ -507,17 +557,50 @@ cat >"${STUB_BIN}/git" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 LOG="${APT_HUB_GIT_LOG:-/dev/null}"
+DEL="${APT_HUB_GIT_DELETED_TAGS:-/dev/null}"
 printf 'git %s\n' "$*" >>"${LOG}"
 if [[ "${1:-}" == "ls-remote" ]]; then
-  if [[ "${APT_HUB_APT_DATA:-present}" == "absent" ]]; then exit 0; fi
-  if [[ "${APT_HUB_APT_DATA:-present}" == "error" ]]; then echo "network fail" >&2; exit 1; fi
-  echo "0123456789abcdef0123456789abcdef01234567	refs/heads/apt-data"
+  # heads apt-data
+  if [[ "$*" == *"--heads"* ]]; then
+    if [[ "${APT_HUB_APT_DATA:-present}" == "absent" ]]; then exit 0; fi
+    if [[ "${APT_HUB_APT_DATA:-present}" == "error" ]]; then echo "network fail" >&2; exit 1; fi
+    echo "0123456789abcdef0123456789abcdef01234567	refs/heads/apt-data"
+    exit 0
+  fi
+  # tags：删除后须空；未删除返回精确 ref
+  if [[ "$*" == *"--tags"* ]]; then
+    ref=""
+    for a in "$@"; do
+      case "$a" in refs/tags/*) ref="$a" ;; esac
+    done
+    tag="${ref#refs/tags/}"
+    [[ -n "${tag}" ]] || exit 0
+    if [[ -f "${DEL}" ]] && grep -Fxq -- "${tag}" "${DEL}" 2>/dev/null; then
+      exit 0
+    fi
+    echo "0123456789abcdef0123456789abcdef01234567	refs/tags/${tag}"
+    exit 0
+  fi
   exit 0
 fi
-if [[ "${1:-}" == "push" ]]; then exit 0; fi
+if [[ "${1:-}" == "push" ]]; then
+  # :refs/tags/<tag> 记入已删集合
+  for a in "$@"; do
+    case "$a" in
+      :refs/tags/*)
+        if [[ -n "${APT_HUB_GIT_DELETED_TAGS:-}" ]]; then
+          printf '%s\n' "${a#:refs/tags/}" >>"${APT_HUB_GIT_DELETED_TAGS}"
+        fi
+        ;;
+    esac
+  done
+  exit 0
+fi
 exec /usr/bin/git "$@"
 EOF
 chmod a+x -- "${STUB_BIN}/git"
+: >"${EVIDENCE}/runs/git-deleted-tags.txt"
+
 
 PREP_DIR="${ROOT}/tmp/delivery-v16/release/prepare"
 rm -rf -- "${PREP_DIR}"
@@ -815,11 +898,15 @@ record "upload_reject_latest_sha" "${RC}" 1
 
 # prune：≥4 成功版本；keep-recent=2 保护 7.7.8/7.7.7；by-hash gzip 全文保护 7.7.4
 : >"${EVIDENCE}/runs/gh-prune.log"
+: >"${EVIDENCE}/runs/git-deleted-tags.txt"
+: >"${EVIDENCE}/runs/gh-deleted-releases.txt"
 set +e
 env PATH="${STUB_BIN}:${PATH}" GH_TOKEN=t \
   APT_HUB_GH_LOG="${EVIDENCE}/runs/gh-prune.log" \
   APT_HUB_CURL_LOG="${EVIDENCE}/runs/curl-prune.log" \
   APT_HUB_GIT_LOG="${EVIDENCE}/runs/git-prune.log" \
+  APT_HUB_GIT_DELETED_TAGS="${EVIDENCE}/runs/git-deleted-tags.txt" \
+  APT_HUB_GH_DELETED_RELEASES="${EVIDENCE}/runs/gh-deleted-releases.txt" \
   APT_HUB_APT_DATA=present \
   bash "${REL}" prune \
     --repository example/apt-hub \
@@ -851,6 +938,7 @@ env PATH="${STUB_BIN}:${PATH}" GH_TOKEN=t \
   APT_HUB_GH_LOG="${EVIDENCE}/runs/gh-prune-err.log" \
   APT_HUB_CURL_LOG="${EVIDENCE}/runs/curl-prune-err.log" \
   APT_HUB_GIT_LOG="${EVIDENCE}/runs/git-prune-err.log" \
+  APT_HUB_GIT_DELETED_TAGS="${EVIDENCE}/runs/git-deleted-tags-err.txt" \
   APT_HUB_APT_DATA=error \
   bash "${REL}" prune --repository example/apt-hub --current-tag golang-7.7.8-1 \
   >"${EVIDENCE}/runs/prune-err.out" 2>"${EVIDENCE}/runs/prune-err.err"
@@ -860,11 +948,13 @@ record "prune_refuse_on_aptdata_error" "${RC}" 1
 
 # 第二页失败 → 零 delete
 : >"${EVIDENCE}/runs/gh-prune-page2.log"
+: >"${EVIDENCE}/runs/git-deleted-tags-page2.txt"
 set +e
 env PATH="${STUB_BIN}:${PATH}" GH_TOKEN=t \
   APT_HUB_GH_LOG="${EVIDENCE}/runs/gh-prune-page2.log" \
   APT_HUB_CURL_LOG="${EVIDENCE}/runs/curl-prune-page2.log" \
   APT_HUB_GIT_LOG="${EVIDENCE}/runs/git-prune-page2.log" \
+  APT_HUB_GIT_DELETED_TAGS="${EVIDENCE}/runs/git-deleted-tags-page2.txt" \
   APT_HUB_APT_DATA=present \
   APT_HUB_GH_PAGE2=fail \
   bash "${REL}" prune --repository example/apt-hub --current-tag golang-7.7.8-1 \
@@ -1190,6 +1280,292 @@ RC=$?
 set -e
 record "preflight_rejects_empty_secret" "${RC}" 1
 
+# ---------- 母版脚本 Release：ncipollo 静态 + 两代前 get_pre_del 真 run ----------
+if grep -Fq 'bodyFile: changelog/' "${WF_REL}" \
+  && grep -Fq 'steps.script_tag.outputs.tag' "${WF_REL}" \
+  && grep -Fq "if: steps.script_tag.outputs.ok == '1'" "${WF_REL}" \
+  && grep -Fq 'makeLatest: false' "${WF_REL}"; then
+  pass "ncipollo 仅严格 vtag + 精确 tag/bodyFile"
+else
+  fail "ncipollo 参数未按母版收口"
+fi
+
+SCRIPT_TAG_STEP="${EVIDENCE}/runs/wf-script-tag-step.sh"
+SCRIPT_PRUNE_STEP="${EVIDENCE}/runs/wf-script-prune-step.sh"
+set +e
+extract_step_run prepare '解析脚本 tag' "${SCRIPT_TAG_STEP}" "${WF_REL}" \
+  >"${EVIDENCE}/runs/wf-script-tag-extract.log" 2>&1
+ex_tag=$?
+extract_step_run RemoveOldRelease '清理旧脚本 Release' "${SCRIPT_PRUNE_STEP}" "${WF_REL}" \
+  >"${EVIDENCE}/runs/wf-script-prune-extract.log" 2>&1
+ex_prune=$?
+set -e
+record "extract_script_tag_step" "${ex_tag}" 0
+record "extract_script_prune_step" "${ex_prune}" 0
+
+: >"${EVIDENCE}/runs/script-tag-nontag.github_output"
+set +e
+env EVENT_NAME=workflow_dispatch REF=refs/heads/main \
+  GITHUB_OUTPUT="${EVIDENCE}/runs/script-tag-nontag.github_output" \
+  bash "${SCRIPT_TAG_STEP}" \
+  >"${EVIDENCE}/runs/script-tag-nontag.out" 2>"${EVIDENCE}/runs/script-tag-nontag.err"
+RC=$?
+set -e
+record "script_tag_skip_nontag" "${RC}" 0
+if grep -Fq 'ok=0' "${EVIDENCE}/runs/script-tag-nontag.github_output"; then
+  pass "非 push 不启用 ncipollo"
+else
+  fail "非 push 仍 ok=1"
+fi
+
+: >"${EVIDENCE}/runs/script-tag-ok.github_output"
+set +e
+env EVENT_NAME=push REF=refs/tags/v0.0.5 \
+  GITHUB_OUTPUT="${EVIDENCE}/runs/script-tag-ok.github_output" \
+  bash "${SCRIPT_TAG_STEP}" \
+  >"${EVIDENCE}/runs/script-tag-ok.out" 2>"${EVIDENCE}/runs/script-tag-ok.err"
+RC=$?
+set -e
+record "script_tag_strict_ok" "${RC}" 0
+if grep -Fq 'ok=1' "${EVIDENCE}/runs/script-tag-ok.github_output" \
+  && grep -Fq 'tag=v0.0.5' "${EVIDENCE}/runs/script-tag-ok.github_output"; then
+  pass "严格 vtag 解析"
+else
+  fail "严格 vtag 未解析"
+fi
+
+: >"${EVIDENCE}/runs/script-tag-beta.github_output"
+set +e
+env EVENT_NAME=push REF=refs/tags/v0.0.5-beta \
+  GITHUB_OUTPUT="${EVIDENCE}/runs/script-tag-beta.github_output" \
+  bash "${SCRIPT_TAG_STEP}" \
+  >"${EVIDENCE}/runs/script-tag-beta.out" 2>"${EVIDENCE}/runs/script-tag-beta.err"
+RC=$?
+set -e
+record "script_tag_reject_nonstrict" "${RC}" 0
+if grep -Fq 'ok=0' "${EVIDENCE}/runs/script-tag-beta.github_output"; then
+  pass "非严格 v* 不启用 ncipollo"
+else
+  fail "非严格仍 ok=1"
+fi
+
+SCRIPT_STUB="${EVIDENCE}/bin-script"
+rm -rf -- "${SCRIPT_STUB}"
+mkdir -p -- "${SCRIPT_STUB}" "${EVIDENCE}/runs/script-state"
+cat >"${SCRIPT_STUB}/gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+LOG="${APT_HUB_GH_LOG:?}"
+STATE="${APT_HUB_SCRIPT_STATE:?}"
+printf 'gh %s\n' "$*" >>"${LOG}"
+cmd="${1:-}"
+case "${cmd}" in
+  release)
+    sub="${2:-}"
+    case "${sub}" in
+      view)
+        tag="${3:-}"
+        mode="${APT_HUB_SCRIPT_VIEW_MODE:-}"
+        if [[ "${mode}" == "http503" ]]; then
+          echo "HTTP 503: Service Unavailable" >&2
+          exit 1
+        fi
+        if [[ "${mode}" == "http404" ]]; then
+          echo "HTTP 404: Not Found" >&2
+          exit 1
+        fi
+        if [[ ! -f "${STATE}/${tag}.present" ]]; then
+          echo "release not found" >&2
+          exit 1
+        fi
+        exit 0
+        ;;
+      delete)
+        tag="${3:-}"
+        [[ -f "${STATE}/${tag}.present" ]] || { echo "missing ${tag}" >&2; exit 1; }
+        rm -f -- "${STATE}/${tag}.present"
+        printf 'deleted %s\n' "${tag}" >>"${STATE}/deleted.log"
+        echo "deleted ${tag}"
+        ;;
+      *) echo "release sub unknown: ${sub}" >&2; exit 2 ;;
+    esac
+    ;;
+  *) echo "gh unknown: $*" >&2; exit 2 ;;
+esac
+EOF
+chmod a+x -- "${SCRIPT_STUB}/gh"
+cat >"${SCRIPT_STUB}/git" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+LOG="${APT_HUB_GH_LOG:?}"
+STATE="${APT_HUB_SCRIPT_STATE:?}"
+printf 'git %s\n' "$*" >>"${LOG}"
+if [[ "${1:-}" == "push" && "${2:-}" == "origin" && "${3:-}" == "--delete" ]]; then
+  printf 'git-delete-tag %s\n' "${4:-}" >>"${STATE}/deleted.log"
+  exit 0
+fi
+echo "git unexpected: $*" >&2
+exit 2
+EOF
+chmod a+x -- "${SCRIPT_STUB}/git"
+
+# v0.0.5 两代前 = v0.0.3；明确不存在 → 无删除
+SCRIPT_CW="${EVIDENCE}/runs/script-prune-cwd"
+rm -rf -- "${SCRIPT_CW}"
+mkdir -p -- "${SCRIPT_CW}/tmp"
+: >"${EVIDENCE}/runs/gh-script-prune-miss.log"
+: >"${EVIDENCE}/runs/script-state/deleted.log"
+rm -f -- "${EVIDENCE}/runs/script-state/"*.present
+set +e
+env -C "${SCRIPT_CW}" PATH="${SCRIPT_STUB}:${PATH}" GH_TOKEN=t \
+  APT_HUB_GH_LOG="${EVIDENCE}/runs/gh-script-prune-miss.log" \
+  APT_HUB_SCRIPT_STATE="${EVIDENCE}/runs/script-state" \
+  EVENT_NAME=push REF=refs/tags/v0.0.5 \
+  bash "${SCRIPT_PRUNE_STEP}" \
+  >"${EVIDENCE}/runs/script-prune-miss.out" 2>"${EVIDENCE}/runs/script-prune-miss.err"
+RC=$?
+set -e
+record "script_prune_missing_noop" "${RC}" 0
+if [[ -s "${EVIDENCE}/runs/script-state/deleted.log" ]]; then
+  fail "旧 Release 不存在仍删除"
+else
+  pass "两代前不存在无操作"
+fi
+if grep -Fq 'Old version to remove: v0.0.3' "${EVIDENCE}/runs/script-prune-miss.out"; then
+  pass "get_pre_del_tag×2 → v0.0.3"
+else
+  fail "两代前公式不符"
+fi
+
+# 明确 HTTP 404 → 无操作
+: >"${EVIDENCE}/runs/gh-script-prune-404.log"
+: >"${EVIDENCE}/runs/script-state/deleted.log"
+set +e
+env -C "${SCRIPT_CW}" PATH="${SCRIPT_STUB}:${PATH}" GH_TOKEN=t \
+  APT_HUB_GH_LOG="${EVIDENCE}/runs/gh-script-prune-404.log" \
+  APT_HUB_SCRIPT_STATE="${EVIDENCE}/runs/script-state" \
+  APT_HUB_SCRIPT_VIEW_MODE=http404 \
+  EVENT_NAME=push REF=refs/tags/v0.0.5 \
+  bash "${SCRIPT_PRUNE_STEP}" \
+  >"${EVIDENCE}/runs/script-prune-404.out" 2>"${EVIDENCE}/runs/script-prune-404.err"
+RC=$?
+set -e
+record "script_prune_http404_noop" "${RC}" 0
+if [[ -s "${EVIDENCE}/runs/script-state/deleted.log" ]]; then
+  fail "HTTP 404 仍删除"
+else
+  pass "HTTP 404 无操作"
+fi
+
+# HTTP 503 + exit1 → 非 0，零 delete/push（不得当 missing）
+: >"${EVIDENCE}/runs/gh-script-prune-503.log"
+: >"${EVIDENCE}/runs/script-state/deleted.log"
+set +e
+env -C "${SCRIPT_CW}" PATH="${SCRIPT_STUB}:${PATH}" GH_TOKEN=t \
+  APT_HUB_GH_LOG="${EVIDENCE}/runs/gh-script-prune-503.log" \
+  APT_HUB_SCRIPT_STATE="${EVIDENCE}/runs/script-state" \
+  APT_HUB_SCRIPT_VIEW_MODE=http503 \
+  EVENT_NAME=push REF=refs/tags/v0.0.5 \
+  bash "${SCRIPT_PRUNE_STEP}" \
+  >"${EVIDENCE}/runs/script-prune-503.out" 2>"${EVIDENCE}/runs/script-prune-503.err"
+RC=$?
+set -e
+record "script_prune_http503_fail" "${RC}" 1
+if [[ -s "${EVIDENCE}/runs/script-state/deleted.log" ]]; then
+  fail "HTTP 503 仍有 delete/push"
+else
+  pass "HTTP 503 零删除"
+fi
+if grep -Eiq '不存在，无操作' "${EVIDENCE}/runs/script-prune-503.out"; then
+  fail "HTTP 503 被误判为不存在"
+else
+  pass "HTTP 503 不吞为 missing"
+fi
+
+# 首版 v0.0.1：两代下溢到 v0.0.0 → view 不存在 → 无操作
+: >"${EVIDENCE}/runs/gh-script-prune-v001.log"
+: >"${EVIDENCE}/runs/script-state/deleted.log"
+set +e
+env -C "${SCRIPT_CW}" PATH="${SCRIPT_STUB}:${PATH}" GH_TOKEN=t \
+  APT_HUB_GH_LOG="${EVIDENCE}/runs/gh-script-prune-v001.log" \
+  APT_HUB_SCRIPT_STATE="${EVIDENCE}/runs/script-state" \
+  EVENT_NAME=push REF=refs/tags/v0.0.1 \
+  bash "${SCRIPT_PRUNE_STEP}" \
+  >"${EVIDENCE}/runs/script-prune-v001.out" 2>"${EVIDENCE}/runs/script-prune-v001.err"
+RC=$?
+set -e
+record "script_prune_v001_underflow_noop" "${RC}" 0
+if grep -Fq 'Old version to remove: v0.0.0' "${EVIDENCE}/runs/script-prune-v001.out" \
+  && [[ ! -s "${EVIDENCE}/runs/script-state/deleted.log" ]]; then
+  pass "v0.0.1 无两代前无操作"
+else
+  fail "v0.0.1 下溢处理错误"
+fi
+
+# v0.0.2 → 两代前 v0.0.0 不存在 → 无操作
+: >"${EVIDENCE}/runs/gh-script-prune-v002.log"
+: >"${EVIDENCE}/runs/script-state/deleted.log"
+set +e
+env -C "${SCRIPT_CW}" PATH="${SCRIPT_STUB}:${PATH}" GH_TOKEN=t \
+  APT_HUB_GH_LOG="${EVIDENCE}/runs/gh-script-prune-v002.log" \
+  APT_HUB_SCRIPT_STATE="${EVIDENCE}/runs/script-state" \
+  EVENT_NAME=push REF=refs/tags/v0.0.2 \
+  bash "${SCRIPT_PRUNE_STEP}" \
+  >"${EVIDENCE}/runs/script-prune-v002.out" 2>"${EVIDENCE}/runs/script-prune-v002.err"
+RC=$?
+set -e
+record "script_prune_v002_floor_noop" "${RC}" 0
+if grep -Fq 'Old version to remove: v0.0.0' "${EVIDENCE}/runs/script-prune-v002.out" \
+  && [[ ! -s "${EVIDENCE}/runs/script-state/deleted.log" ]]; then
+  pass "v0.0.2 查 v0.0.0 不存在无操作"
+else
+  fail "v0.0.2 地板查询错误"
+fi
+
+# 存在则删 Release + tag；不碰 golang/latest
+: >"${EVIDENCE}/runs/gh-script-prune-hit.log"
+: >"${EVIDENCE}/runs/script-state/deleted.log"
+printf '1\n' >"${EVIDENCE}/runs/script-state/v0.0.3.present"
+printf '1\n' >"${EVIDENCE}/runs/script-state/golang-7.7.7-1.present"
+printf '1\n' >"${EVIDENCE}/runs/script-state/latest.present"
+set +e
+env -C "${SCRIPT_CW}" PATH="${SCRIPT_STUB}:${PATH}" GH_TOKEN=t \
+  APT_HUB_GH_LOG="${EVIDENCE}/runs/gh-script-prune-hit.log" \
+  APT_HUB_SCRIPT_STATE="${EVIDENCE}/runs/script-state" \
+  EVENT_NAME=push REF=refs/tags/v0.0.5 \
+  bash "${SCRIPT_PRUNE_STEP}" \
+  >"${EVIDENCE}/runs/script-prune-hit.out" 2>"${EVIDENCE}/runs/script-prune-hit.err"
+RC=$?
+set -e
+record "script_prune_two_gen_delete" "${RC}" 0
+if grep -Fq 'deleted v0.0.3' "${EVIDENCE}/runs/script-state/deleted.log" \
+  && grep -Fq 'git-delete-tag v0.0.3' "${EVIDENCE}/runs/script-state/deleted.log" \
+  && [[ -f "${EVIDENCE}/runs/script-state/golang-7.7.7-1.present" ]] \
+  && [[ -f "${EVIDENCE}/runs/script-state/latest.present" ]]; then
+  pass "仅删两代前脚本 Release/tag"
+else
+  fail "两代清理目标错误"
+fi
+
+# 非 vtag push 跳过
+: >"${EVIDENCE}/runs/gh-script-prune-skip.log"
+: >"${EVIDENCE}/runs/script-state/deleted.log"
+set +e
+env -C "${SCRIPT_CW}" PATH="${SCRIPT_STUB}:${PATH}" GH_TOKEN=t \
+  APT_HUB_GH_LOG="${EVIDENCE}/runs/gh-script-prune-skip.log" \
+  APT_HUB_SCRIPT_STATE="${EVIDENCE}/runs/script-state" \
+  EVENT_NAME=workflow_dispatch REF=refs/heads/main \
+  bash "${SCRIPT_PRUNE_STEP}" \
+  >"${EVIDENCE}/runs/script-prune-skip.out" 2>"${EVIDENCE}/runs/script-prune-skip.err"
+RC=$?
+set -e
+record "script_prune_skip_nontag" "${RC}" 0
+if [[ -s "${EVIDENCE}/runs/script-state/deleted.log" ]]; then
+  fail "非 tag 仍清理脚本"
+else
+  pass "非 tag 跳过脚本两代清理"
+fi
+
 # ---------- git_tag 仅隔离 bare；主仓不执行 ----------
 BARE="${EVIDENCE}/git/bare.git"
 WORK="${EVIDENCE}/git/work"
@@ -1228,6 +1604,31 @@ record "git_tag_refuse_no_identity" "${RC}" 1
 git -C "${WORK}" config user.name 'apt-hub-release-test'
 git -C "${WORK}" config user.email 'apt-hub-release-test@invalid'
 
+VER_BEFORE_MANUAL="$(tr -d '[:space:]' <"${WORK}/VERSION")"
+set +e
+bash -c "cd \"${WORK}\" && \"${GIT_TAG}\" custom" \
+  >"${EVIDENCE}/runs/git-custom.out" 2>"${EVIDENCE}/runs/git-custom.err"
+RC=$?
+set -e
+record "git_tag_custom_refuse" "${RC}" 1
+set +e
+bash -c "cd \"${WORK}\" && \"${GIT_TAG}\" --version 0.9.9" \
+  >"${EVIDENCE}/runs/git-version.out" 2>"${EVIDENCE}/runs/git-version.err"
+RC=$?
+set -e
+record "git_tag_version_refuse" "${RC}" 1
+manual_tag_exists=0
+if git -C "${WORK}" rev-parse -q --verify refs/tags/v0.9.9 >/dev/null; then
+  manual_tag_exists=1
+fi
+if [[ "$(tr -d '[:space:]' <"${WORK}/VERSION")" == "${VER_BEFORE_MANUAL}" \
+  && -z "$(git -C "${WORK}" status --porcelain)" \
+  && "${manual_tag_exists}" -eq 0 ]]; then
+  pass "手动入口拒绝且无写入/无 tag"
+else
+  fail "手动入口仍改动仓库"
+fi
+
 set +e
 bash -c "cd \"${WORK}\" && \"${GIT_TAG}\" auto" \
   >"${EVIDENCE}/runs/git-auto.out" 2>"${EVIDENCE}/runs/git-auto.err"
@@ -1246,14 +1647,61 @@ else
   fail "主仓 VERSION 被改"
 fi
 
+# 重复 tag：VERSION 回退到 0.1.0 再 auto → 目标 v0.1.1 已存在
+printf '0.1.0\n' >"${WORK}/VERSION"
+git -C "${WORK}" add VERSION
+git -C "${WORK}" commit --quiet -m 'reset version for dup tag'
+git -C "${WORK}" push --quiet origin HEAD:master 2>/dev/null \
+  || git -C "${WORK}" push --quiet origin HEAD:main
 set +e
-bash -c "cd \"${WORK}\" && \"${GIT_TAG}\" --version 0.1.1" \
+bash -c "cd \"${WORK}\" && \"${GIT_TAG}\" auto" \
   >"${EVIDENCE}/runs/git-dup.out" 2>"${EVIDENCE}/runs/git-dup.err"
 RC=$?
 set -e
 record "git_tag_existing_refuse" "${RC}" 1
 
-# push 失败前先到可提交状态：auto 会 bump 到 0.1.2；失败后不得回滚已提交 VERSION/changelog
+# 进位：0.0.999→0.1.0；0.999.999→1.0.0（各隔离 bare）
+bump_auto_case() {
+  local start="$1" expect="$2" name="$3"
+  local bare work
+  bare="${EVIDENCE}/git/bump-${name}.git"
+  work="${EVIDENCE}/git/bump-${name}-work"
+  rm -rf -- "${bare}" "${work}"
+  mkdir -p -- "${EVIDENCE}/git"
+  git init --bare --quiet "${bare}"
+  git init --quiet "${work}"
+  git -C "${work}" remote add origin "${bare}"
+  git -C "${work}" config user.name 'apt-hub-release-test'
+  git -C "${work}" config user.email 'apt-hub-release-test@invalid'
+  printf '%s\n' "${start}" >"${work}/VERSION"
+  git -C "${work}" add VERSION
+  git -C "${work}" commit --quiet -m 'bump start'
+  git -C "${work}" push --quiet origin HEAD:master 2>/dev/null \
+    || git -C "${work}" push --quiet origin HEAD:main
+  set +e
+  bash -c "cd \"${work}\" && \"${GIT_TAG}\" auto" \
+    >"${EVIDENCE}/runs/git-bump-${name}.out" 2>"${EVIDENCE}/runs/git-bump-${name}.err"
+  RC=$?
+  set -e
+  record "git_tag_bump_${name}" "${RC}" 0
+  if [[ "$(tr -d '[:space:]' <"${work}/VERSION")" == "${expect}" ]] \
+    && git -C "${bare}" rev-parse -q --verify "refs/tags/v${expect}" >/dev/null; then
+    pass "git_tag bump ${start}->${expect}"
+  else
+    fail "git_tag bump ${start}->${expect}"
+  fi
+}
+bump_auto_case "0.0.1" "0.0.2" "patch"
+bump_auto_case "0.0.999" "0.1.0" "minor_carry"
+bump_auto_case "0.999.999" "1.0.0" "major_carry"
+
+# push 失败：从 0.1.1 auto→0.1.2，坏 remote；不得回滚已提交 VERSION/changelog
+git -C "${WORK}" remote set-url origin "${BARE}"
+printf '0.1.1\n' >"${WORK}/VERSION"
+git -C "${WORK}" add VERSION
+git -C "${WORK}" commit --quiet -m 'align 0.1.1 for push-fail'
+git -C "${WORK}" push --quiet origin HEAD:master 2>/dev/null \
+  || git -C "${WORK}" push --quiet origin HEAD:main
 VER_BEFORE_PUSH="$(tr -d '[:space:]' <"${WORK}/VERSION")"
 git -C "${WORK}" remote set-url origin "${EVIDENCE}/git/no-such-bare.git"
 set +e

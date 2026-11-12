@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 读写根 VERSION；auto/custom 生成 changelog 后精确 stage 提交并 tag/push。
-# 不改 git config；不强制 latest；旧同族清理交给 Actions prune。
+# 读写根 VERSION；仅 auto 自动 +1 写 changelog，精确 stage 提交并 tag/push。
+# 拒绝 custom/--version 等手动入口；不改 git config；不强制 latest；旧同族清理交给 Actions。
 set -euo pipefail
 umask 022
 export LC_ALL=C
@@ -19,10 +19,9 @@ die() {
 
 usage() {
   cat >&2 <<'EOF'
-用法: git_tag.sh [auto|custom] | git_tag.sh --version <X.Y.Z>
-  auto（默认）: 自动 patch+1，写 changelog，commit VERSION+changelog，打 v 标签并 push
-  custom: 交互输入版本
-  --version: VERSION 须已等于该号；仅打标签并 push（不改 VERSION）
+用法: git_tag.sh [auto]
+  auto（默认）: patch+1（>999 进位），写 changelog，commit VERSION+changelog，打 v 标签并 push
+拒绝 custom / --version 等手动改版本入口；版本号只允许本脚本 auto 升级。
 不修改 git config；缺少 user.name/user.email 时拒绝。不移动 latest。
 EOF
   exit 2
@@ -75,21 +74,6 @@ bump_patch() {
     base=$((base + 1))
   fi
   NEXT_VERSION="${base}.${major}.${minor}"
-}
-
-prompt_custom() {
-  local inputString
-  echo "============================ apt-hub ============================"
-  echo "  current VERSION [${CURRENT_VERSION}]"
-  echo "================================================================"
-  read -r -p "please input version string [example: 0.0.1 or v0.0.1]: " inputString
-  [[ -n "${inputString}" ]] || die "空版本"
-  if [[ "${inputString}" =~ ^v ]]; then
-    NEXT_VERSION="${inputString#v}"
-  else
-    NEXT_VERSION="${inputString}"
-  fi
-  [[ "${NEXT_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "版本非法: ${NEXT_VERSION}"
 }
 
 find_prev_release_commit() {
@@ -186,49 +170,18 @@ write_version_and_commit_tag_push() {
   echo "Completed v${NEXT_VERSION}"
 }
 
-tag_only_matching_version() {
-  local want="$1"
-  local tag="v${want}"
-  enter_repo
-  git rev-parse --verify HEAD >/dev/null 2>&1 || die "仓库没有 HEAD"
-  [[ -z "$(git status --porcelain)" ]] || die "工作区不干净，拒绝"
-  read_current_version
-  [[ "${CURRENT_VERSION}" == "${want}" ]] || die "VERSION 与 --version 不一致"
-  if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
-    die "标签已存在: ${tag}"
-  fi
-  git tag "${tag}" || die "打标签失败"
-  local remote remotes
-  remotes="$(git remote)"
-  if [[ -n "${remotes}" ]]; then
-    require_git_identity
-    for remote in ${remotes}; do
-      git push "${remote}" "${tag}" || die "push 标签失败: ${remote}"
-    done
-  fi
-  echo "已创建标签 ${tag}"
-}
-
 main() {
   local mode="${1:-auto}"
   case "${mode}" in
     -h|--help) usage ;;
-    --version)
-      [[ $# -ge 2 ]] || usage
-      [[ "$2" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "版本必须为数字.数字.数字"
-      tag_only_matching_version "$2"
-      ;;
     auto|"")
       assert_clean_and_ready
       read_current_version
       bump_patch
       write_version_and_commit_tag_push
       ;;
-    custom)
-      assert_clean_and_ready
-      read_current_version
-      prompt_custom
-      write_version_and_commit_tag_push
+    custom|--version)
+      die "拒绝手动版本入口（${mode}）；只允许 auto 自动升级"
       ;;
     *)
       die "未知参数: ${mode}"
