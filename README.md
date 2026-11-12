@@ -13,7 +13,10 @@
 下面区域只反映成功部署后的状态，不把上游“已发布”或本地“已下载”冒充本源“已生效”。
 
 <!-- APT-HUB:PACKAGES:BEGIN -->
-尚未完成首次发布
+| 软件 | 版本 | Ubuntu | 架构 | 最后更新UTC | 简单说明 | 添加源配置 | 一键加源 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| [golang](https://github.com/0xdevelop/apt-hub/releases/tag/golang-1.27.4-1) | 2:1.27.4-1 | jammy, noble, resolute, stonking | amd64, arm64 | 2026-11-12T08:43:49Z | Go 官方 Linux 归档构建的工具链 | [jammy](https://0xdevelop.m-b-crazy.com/repos/golang/jammy.sources) / [noble](https://0xdevelop.m-b-crazy.com/repos/golang/noble.sources) / [resolute](https://0xdevelop.m-b-crazy.com/repos/golang/resolute.sources) / [stonking](https://0xdevelop.m-b-crazy.com/repos/golang/stonking.sources) | `curl -fsSL --proto '=https' --proto-redir '=https' -o add_source.sh 'https://0xdevelop.m-b-crazy.com/add_source.sh' && chmod a+x ./add_source.sh && sudo ./add_source.sh --site-url 'https://0xdevelop.m-b-crazy.com' --software 'golang'` |
+| [rustdesk](https://github.com/rustdesk/rustdesk/releases/tag/1.5.3) | 1.5.3 | jammy, noble, resolute, stonking | amd64, arm64 | 2026-11-12T08:43:49Z | 开源远程桌面 | [jammy](https://0xdevelop.m-b-crazy.com/repos/rustdesk/jammy.sources) / [noble](https://0xdevelop.m-b-crazy.com/repos/rustdesk/noble.sources) / [resolute](https://0xdevelop.m-b-crazy.com/repos/rustdesk/resolute.sources) / [stonking](https://0xdevelop.m-b-crazy.com/repos/rustdesk/stonking.sources) | `curl -fsSL --proto '=https' --proto-redir '=https' -o add_source.sh 'https://0xdevelop.m-b-crazy.com/add_source.sh' && chmod a+x ./add_source.sh && sudo ./add_source.sh --site-url 'https://0xdevelop.m-b-crazy.com' --software 'rustdesk'` |
 <!-- APT-HUB:PACKAGES:END -->
 
 ## 新增其他软件
