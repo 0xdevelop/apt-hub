@@ -342,6 +342,31 @@ else
     fail "stub_full_ok_touched_main_assets"
   fi
 
+  # 成对仓库/标签原样进入 render；只给仓库时不传半对。
+  : >"${ISO}/tmp/render.sh.args"
+  rm -rf -- "${ISO}/tmp/work-ver"
+  mkdir -p -- "${ISO}/tmp/work-ver"
+  : >"${ORDER_LOG}"
+  rc="$(capture_rc "${BASE}/stub-version-pair.log" run_iso tmp/work-ver --releases tmp/releases-in.json --package-repository example/apt-hub --release-tag v7.7.7)"
+  record_rc "stub_version_pair_rc" "${rc}" 0 || true
+  render_line="$(tail -n 1 "${ISO}/tmp/render.sh.args" 2>/dev/null || true)"
+  if [[ "${render_line}" == *"--repository example/apt-hub"* && "${render_line}" == *"--release-tag v7.7.7"* && "${render_line}" == *"--state "* && "${render_line}" == *"--site "* ]]; then
+    pass "stub_render_receives_version_pair"
+  else
+    fail "stub_render_missing_version_pair got=${render_line}"
+  fi
+  : >"${ISO}/tmp/render.sh.args"
+  rm -rf -- "${ISO}/tmp/work-repo-only"
+  mkdir -p -- "${ISO}/tmp/work-repo-only"
+  rc="$(capture_rc "${BASE}/stub-repo-only.log" run_iso tmp/work-repo-only --releases tmp/releases-in.json --package-repository example/apt-hub)"
+  record_rc "stub_repo_only_rc" "${rc}" 0 || true
+  render_line="$(tail -n 1 "${ISO}/tmp/render.sh.args" 2>/dev/null || true)"
+  if [[ "${render_line}" != *"--repository"* && "${render_line}" != *"--release-tag"* && "${render_line}" == *"--state "* ]]; then
+    pass "stub_render_skips_half_pair"
+  else
+    fail "stub_render_half_pair got=${render_line}"
+  fi
+
   # 拒非空 work（用户文件），拒绝前无副作用
   write_stub sync.sh 0
   write_stub verify_ubuntu.sh 0
@@ -686,7 +711,9 @@ else
       --site-url "${SITE_URL}" \
       --releases "${REAL}/releases.json" \
       --acquire-https-ca "${REAL}/tls/cert.pem" \
-      --github-https-proxy "${HTTPS_PROXY_URL}")"
+      --github-https-proxy "${HTTPS_PROXY_URL}" \
+      --package-repository example/apt-hub \
+      --release-tag v7.7.7)"
   cat "${BASE}/real-chain.log" >>"${EVIDENCE}"
   echo "real_chain_rc=${rc}" | tee -a "${EVIDENCE}"
   record_rc "real_chain_rc" "${rc}" 0 || true
@@ -738,6 +765,14 @@ else
       pass "real_chain_render_mentions_alpha"
     else
       fail "real_chain_render_content"
+    fi
+    if grep -Fq 'https://github.com/example/apt-hub/releases/tag/v7.7.7' "${WORK_REAL}/site/index.html" \
+      && grep -Fq '维护版本' "${WORK_REAL}/site/index.html" \
+      && grep -Fq 'https://github.com/example/apt-hub/blob/v7.7.7/changelog/v7.7.7.md' "${WORK_REAL}/site/index.html" \
+      && ! grep -Fq 'v7.7.7' "${WORK_REAL}/README.md"; then
+      pass "real_chain_site_version_distinct"
+    else
+      fail "real_chain_site_version_distinct"
     fi
     if jq -e 'select(.role=="release-fixture" and .method=="GET" and .status==200)' \
       "${REAL}/https-access.jsonl" >/dev/null; then

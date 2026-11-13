@@ -403,10 +403,15 @@ verify_args=(
 jq -e '.ok==true' "${verify_dir}/summary.json" >/dev/null || die "verify summary ok!=true"
 
 cp -- "${readme_src}" "${readme_copy}"
-"${SCRIPT_DIR}/render.sh" \
-  --state "${site_dir}/state.json" \
-  --readme "${readme_copy}" \
+render_args=(
+  --state "${site_dir}/state.json"
+  --readme "${readme_copy}"
   --site "${site_dir}"
+)
+if [[ -n "${package_repository}" && -n "${package_release_tag}" ]]; then
+  render_args+=(--repository "${package_repository}" --release-tag "${package_release_tag}")
+fi
+"${SCRIPT_DIR}/render.sh" "${render_args[@]}"
 
 [[ -f "${site_dir}/index.html" && ! -L "${site_dir}/index.html" ]] || die "缺少 site/index.html"
 [[ -f "${readme_copy}" && ! -L "${readme_copy}" ]] || die "缺少 work/README.md"

@@ -8,7 +8,7 @@ END_MARK='<!-- APT-HUB:PACKAGES:END -->'
 HTML_PLACEHOLDER='__APT_HUB_PACKAGE_BODY__'
 
 usage() {
-  echo "用法: scripts/render.sh --state <state.json> --readme <README副本> --site <已有候选站点目录>" >&2
+  echo "用法: scripts/render.sh --state <state.json> --readme <README副本> --site <已有候选站点目录> [--repository <owner/repo> --release-tag <vX.Y.Z>]" >&2
   exit 2
 }
 
@@ -20,6 +20,8 @@ die() {
 state_arg=""
 readme_arg=""
 site_arg=""
+repository_arg=""
+release_tag_arg=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --state)
@@ -37,6 +39,16 @@ while [[ $# -gt 0 ]]; do
       site_arg="$2"
       shift 2
       ;;
+    --repository)
+      [[ $# -ge 2 ]] || usage
+      repository_arg="$2"
+      shift 2
+      ;;
+    --release-tag)
+      [[ $# -ge 2 ]] || usage
+      release_tag_arg="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       ;;
@@ -48,6 +60,17 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$state_arg" && -n "$readme_arg" && -n "$site_arg" ]] || usage
+if [[ -n "$repository_arg" || -n "$release_tag_arg" ]]; then
+  if [[ -z "$repository_arg" || -z "$release_tag_arg" ]]; then
+    die "repository 与 release-tag 必须成对给出"
+  fi
+  if [[ ! "$repository_arg" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*\/[A-Za-z0-9_][A-Za-z0-9._-]*$ || "$repository_arg" == *..* ]]; then
+    die "repository 必须是 owner/name"
+  fi
+  if [[ ! "$release_tag_arg" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    die "release-tag 必须是严格 vX.Y.Z"
+  fi
+fi
 command -v jq >/dev/null 2>&1 || die "需要 jq"
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -274,6 +297,21 @@ end
 '
 
 # shellcheck disable=SC2016 # jq 程序字面量，故意单引号不插值
+site_base_jq='
+def site:
+  . as $p
+  | ($p.apt_source_uri | sub("^mirror\\+"; "") | rtrimstr("/repos/" + $p.id + "/mirror.list"));
+if (.packages | length) == 0 then ""
+else
+  ([.packages[] | site] | unique) as $roots
+  | if ($roots | length) != 1 then error("混站根，拒绝渲染")
+    elif ($roots[0] | startswith("https://") | not) then ""
+    else $roots[0]
+    end
+end
+'
+
+# shellcheck disable=SC2016 # jq 程序字面量，故意单引号不插值
 html_jq='
 def html_escape:
   tostring
@@ -284,25 +322,58 @@ def html_escape:
   | gsub("'\''"; "&#39;");
 def support:
   (.ubuntu_series | join(", ")) + " · " + (.architectures | join(", "));
-if (.packages | length) == 0 then
-  "<p>" + ($empty | sub("\n+$";"") | html_escape) + "</p>"
-else
-  (
-    (if $cmd != "" then
-      ["<a id=\"apt-hub-add-source\"></a>", "<pre><code>" + ($cmd | html_escape) + "</code></pre>"]
-    else [] end)
-    + [
-      "<table>",
-      "<thead><tr><th>软件</th><th>版本</th><th>支持环境</th><th>说明</th></tr></thead>",
-      "<tbody>"
-    ]
-    + [
-        .packages[]
-        | "<tr><td><a href=\"\(.release_url | html_escape)\">\(.package | html_escape)</a></td><td>\(.version | html_escape)</td><td>\(support | html_escape)</td><td>\(.description | html_escape)</td></tr>"
+def row:
+  "<tr><td><a href=\"\(.release_url | html_escape)\">\(.package | html_escape)</a></td><td>\(.version | html_escape)</td><td>\(support | html_escape)</td><td>\(.description | html_escape)</td></tr>";
+def legacy:
+  if (.packages | length) == 0 then
+    "<p>" + ($empty | sub("\n+$";"") | html_escape) + "</p>"
+  else
+    (
+      (if $cmd != "" then
+        ["<a id=\"apt-hub-add-source\"></a>", "<pre><code>" + ($cmd | html_escape) + "</code></pre>"]
+      else [] end)
+      + [
+        "<table>",
+        "<thead><tr><th>软件</th><th>版本</th><th>支持环境</th><th>说明</th></tr></thead>",
+        "<tbody>"
       ]
-    + ["</tbody>", "</table>"]
-  ) | join("\n")
-end
+      + [.packages[] | row]
+      + ["</tbody>", "</table>"]
+    ) | join("\n")
+  end;
+def gh($suffix): "https://github.com/" + $repo + $suffix;
+def pkgs: [.packages[].package] | join(" ");
+def versioned:
+  (
+    ["<h2>维护版本</h2>",
+      "<p>站点版本 <a href=\"" + (gh("/releases/tag/" + $tag) | html_escape) + "\">" + ($tag | html_escape) + "</a>，不是下表软件版本。"
+      + (if $base != "" then " 固定站点根 <code>" + ($base | html_escape) + "</code>。" else "" end)
+      + " <a href=\"" + (gh("/releases/latest") | html_escape) + "\">最新发行版</a>"
+      + " <a href=\"" + (gh("/blob/" + $tag + "/changelog/" + $tag + ".md") | html_escape) + "\">变更记录</a>"
+      + " <a href=\"" + (gh("") | html_escape) + "\">源码</a></p>"]
+    + (if $cmd != "" then
+        ["<h2>一键加源</h2>",
+          "<p>成功后脚本自删，不安装软件。</p>",
+          "<a id=\"apt-hub-add-source\"></a>",
+          "<pre><code>" + ($cmd | html_escape) + "</code></pre>",
+          "<h2>安装</h2>",
+          "<pre><code>" + (("sudo apt update && sudo apt install " + pkgs) | html_escape) + "</code></pre>",
+          "<h2>更新</h2>",
+          "<pre><code>" + ("sudo apt update && sudo apt upgrade" | html_escape) + "</code></pre>"]
+      else [] end)
+    + (if (.packages | length) == 0 then
+        ["<p>" + ($empty | sub("\n+$";"") | html_escape) + "</p>"]
+      else
+        ["<div class=\"table-scroll\">",
+          "<table>",
+          "<thead><tr><th>软件</th><th>版本</th><th>支持环境</th><th>说明</th></tr></thead>",
+          "<tbody>"]
+        + [.packages[] | row]
+        + ["</tbody>", "</table>", "</div>"]
+      end)
+    + ["<p>官方 deb 从官方获取；Go 转换包从本仓 Release 获取。</p>"]
+  ) | join("\n");
+if $repo == "" then legacy else versioned end
 '
 
 marker_lines() {
@@ -330,6 +401,15 @@ fi
 if ! repo_cmd=$(jq -r "$site_cmd_jq" "$state"); then
   die "混站根，拒绝渲染"
 fi
+repo_base=""
+if [[ -n "$repository_arg" ]]; then
+  if ! jq -e '[.packages[].package | test("^[a-z0-9][a-z0-9+.-]+$")] | all' "$state" >/dev/null; then
+    die "package 不是 Debian 包名"
+  fi
+  if ! repo_base=$(jq -r "$site_base_jq" "$state"); then
+    die "混站根，拒绝渲染"
+  fi
+fi
 
 work=""
 tmp_html=""
@@ -349,7 +429,7 @@ rows_md="$work/rows.md"
 body_html="$work/body.html"
 
 jq -r "$md_jq" "$state" >"$rows_md"
-jq -r --rawfile empty "$readme_empty" --arg cmd "$repo_cmd" "$html_jq" "$state" >"$body_html"
+jq -r --rawfile empty "$readme_empty" --arg cmd "$repo_cmd" --arg repo "$repository_arg" --arg tag "$release_tag_arg" --arg base "$repo_base" "$html_jq" "$state" >"$body_html"
 
 if [[ ! -s "$rows_md" ]]; then
   cat -- "$readme_empty" >"$section_md"

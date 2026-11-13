@@ -70,8 +70,13 @@ while [[ $# -gt 0 ]]; do
     *) shift ;;
   esac
 done
-[[ "${url}" == 'https://packages.example.test/state.json' && -n "${out}" ]] || exit 90
-cp "${FIXTURE}/public-state.json" "${out}"
+[[ -n "${out}" ]] || exit 90
+case "${url}" in
+  https://packages.example.test/state.json) cp "${FIXTURE}/public-state.json" "${out}" ;;
+  https://packages.example.test/index.html) cp "${FIXTURE}/public-index.html" "${out}" ;;
+  https://packages.example.test/add_source.sh) cp "${FIXTURE}/public-add_source.sh" "${out}" ;;
+  *) exit 90 ;;
+esac
 SH
 printf '#!/usr/bin/env bash\nexit 0\n' >"${WORK}/bin/sleep"
 chmod a+x "${WORK}/bin/"*
@@ -104,7 +109,11 @@ printf '%s\n' '{"html_url":"http://packages.example.test/","build_type":"legacy"
 printf '%s\n' '{"url":"https://api.github.com/repos/example/apt-hub/pages/builds/123"}' >"${WORK}/build-request.json"
 printf '%s\n' '{"status":"built","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' >"${WORK}/build-result.json"
 printf '%s\n' '{"schema_version":"2","packages":[]}' >"${WORK}/tmp/site/state.json"
+printf '%s\n' '<html>candidate</html>' >"${WORK}/tmp/site/index.html"
+printf '%s\n' 'candidate-client' >"${WORK}/tmp/site/add_source.sh"
 cp "${WORK}/tmp/site/state.json" "${WORK}/public-state.json"
+cp "${WORK}/tmp/site/index.html" "${WORK}/public-index.html"
+cp "${WORK}/tmp/site/add_source.sh" "${WORK}/public-add_source.sh"
 run() { (cd "${WORK}" && bash scripts/publish_apt_site.sh "$@"); }
 : >"${GITHUB_OUTPUT}"
 expect preflight_branch 0 run preflight
@@ -179,6 +188,13 @@ git -C "${WORK}" remote set-url origin "${WORK}/origin.git"
 
 expect explicit_pages_build 0 run deploy-pages
 if grep -Fxq 'POST repos/example/apt-hub/pages/builds' "${WORK}/calls.log"; then pass '显式请求分支构建'; else fail '未请求构建'; fi
+if cmp -s "${WORK}/tmp/site/state.json" "${WORK}/tmp/public-state.json" \
+  && cmp -s "${WORK}/tmp/site/index.html" "${WORK}/tmp/public-index.html" \
+  && cmp -s "${WORK}/tmp/site/add_source.sh" "${WORK}/tmp/public-add_source.sh"; then
+  pass '公网三文件与候选一致才成功'
+else
+  fail '公网三文件未全部回读比对'
+fi
 printf '%s\n' '{"status":"built","commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}' >"${WORK}/build-result.json"
 expect pages_other_commit 1 run deploy-pages
 printf '%s\n' '{"status":"errored","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","error":{"message":"fixture build failure"}}' >"${WORK}/build-result.json"
@@ -187,6 +203,37 @@ printf '%s\n' '{"status":"built","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 printf '%s\n' '{"stale":true}' >"${WORK}/public-state.json"
 expect pages_public_state_stale 1 run deploy-pages
 cp "${WORK}/tmp/site/state.json" "${WORK}/public-state.json"
+printf '%s\n' '<html>old-index</html>' >"${WORK}/public-index.html"
+expect pages_public_index_stale 1 run deploy-pages
+if cmp -s "${WORK}/tmp/site/state.json" "${WORK}/tmp/public-state.json" \
+  && cmp -s "${WORK}/public-index.html" "${WORK}/tmp/public-index.html" \
+  && ! cmp -s "${WORK}/tmp/site/index.html" "${WORK}/tmp/public-index.html" \
+  && ! grep -Fq 'Pages 已部署并回读提交' "${WORK}/pages_public_index_stale.log"; then
+  pass 'state 相同但 index 旧则失败'
+else
+  fail 'index 旧仍被当成部署成功'
+fi
+cp "${WORK}/tmp/site/index.html" "${WORK}/public-index.html"
+printf '%s\n' 'old-client' >"${WORK}/public-add_source.sh"
+expect pages_public_client_stale 1 run deploy-pages
+if cmp -s "${WORK}/tmp/site/state.json" "${WORK}/tmp/public-state.json" \
+  && cmp -s "${WORK}/tmp/site/index.html" "${WORK}/tmp/public-index.html" \
+  && cmp -s "${WORK}/public-add_source.sh" "${WORK}/tmp/public-add_source.sh" \
+  && ! cmp -s "${WORK}/tmp/site/add_source.sh" "${WORK}/tmp/public-add_source.sh" \
+  && ! grep -Fq 'Pages 已部署并回读提交' "${WORK}/pages_public_client_stale.log"; then
+  pass 'state 相同但客户端旧则失败'
+else
+  fail '客户端旧仍被当成部署成功'
+fi
+cp "${WORK}/tmp/site/add_source.sh" "${WORK}/public-add_source.sh"
+expect pages_public_three_match 0 run deploy-pages
+if cmp -s "${WORK}/tmp/site/state.json" "${WORK}/tmp/public-state.json" \
+  && cmp -s "${WORK}/tmp/site/index.html" "${WORK}/tmp/public-index.html" \
+  && cmp -s "${WORK}/tmp/site/add_source.sh" "${WORK}/tmp/public-add_source.sh"; then
+  pass '三文件重新对齐后部署成功'
+else
+  fail '三文件对齐后未成功'
+fi
 
 for item in key key-other key-protected; do mkdir -p "${WORK}/${item}"; chmod 700 "${WORK}/${item}"; done
 gpg --homedir "${WORK}/key" --batch --pinentry-mode loopback --passphrase '' --quick-generate-key 'Workflow fixture <workflow@invalid>' ed25519 sign 1d >"${WORK}/keygen.log" 2>&1
@@ -278,6 +325,84 @@ shim_assets build23 23 0 0 23
 shim_assets test24 0 24 0 24
 shim_assets local1 0 0 1 1
 shim_assets ok 0 0 0 0
+
+chain="${WORK}/version-chain"
+rm -rf -- "${chain}"
+mkdir -p -- "${chain}/scripts" "${chain}/data" "${chain}/tmp"
+cat >"${chain}/scripts/render.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >"${CAPTURE:?}"
+repo=""
+tag=""
+site=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repository) repo="$2"; shift 2 ;;
+    --release-tag) tag="$2"; shift 2 ;;
+    --site) site="$2"; shift 2 ;;
+    --state|--readme) shift 2 ;;
+    *) exit 2 ;;
+  esac
+done
+[[ -n "${repo}" && -n "${tag}" && -n "${site}" ]] || exit 3
+mkdir -p -- "${site}"
+printf '%s\n' '<html>capture</html>' >"${site}/index.html"
+exit 0
+EOF
+chmod a+x "${chain}/scripts/render.sh"
+cat >"${chain}/README.md" <<'EOF'
+MAIN_ONLY
+<!-- APT-HUB:PACKAGES:BEGIN -->
+旧列表
+<!-- APT-HUB:PACKAGES:END -->
+EOF
+printf '%s\n' '{"schema_version":"2","packages":[]}' >"${chain}/data/published.json"
+cp -- "${ROOT}/scripts/publish_apt_site.sh" "${chain}/scripts/publish_apt_site.sh"
+git -C "${chain}" init -b main >/dev/null
+git -C "${chain}" add -- README.md data/published.json scripts/publish_apt_site.sh
+git -C "${chain}" -c user.name=fixture-publisher -c user.email=fixture-publisher@invalid commit -m 'main' >/dev/null
+git init --bare "${chain}.git" >/dev/null
+git -C "${chain}" remote add origin "${chain}.git"
+git -C "${chain}" push -q origin main
+git -C "${chain}" checkout -q --orphan apt-data
+git -C "${chain}" rm -rfq . >/dev/null 2>&1 || true
+printf '%s\n' '{"schema_version":"2","packages":[]}' >"${chain}/state.json"
+git -C "${chain}" add -- state.json
+git -C "${chain}" -c user.name=fixture-publisher -c user.email=fixture-publisher@invalid commit -m 'apt-data' >/dev/null
+chain_sha="$(git -C "${chain}" rev-parse HEAD)"
+git -C "${chain}" push -q origin apt-data
+git -C "${chain}" checkout -q --detach main
+export CAPTURE="${chain}/tmp/render.args"
+rm -f -- "${CAPTURE}"
+miss_rc=0
+(
+  cd -- "${chain}"
+  env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    APT_HUB_GIT_NAME=fixture-publisher APT_HUB_GIT_EMAIL=fixture-publisher@invalid \
+    APT_DATA_SHA="${chain_sha}" GITHUB_REPOSITORY=example/apt-hub \
+    bash scripts/publish_apt_site.sh update-readme
+) >"${chain}/miss.log" 2>&1 || miss_rc=$?
+if [[ "${miss_rc}" -ne 0 && ! -e "${CAPTURE}" ]]; then
+  pass '回写缺标签时不调用 render'
+else
+  fail "回写缺标签仍渲染 rc=${miss_rc}"
+fi
+rm -f -- "${CAPTURE}"
+ok_rc=0
+(
+  cd -- "${chain}"
+  env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    APT_HUB_GIT_NAME=fixture-publisher APT_HUB_GIT_EMAIL=fixture-publisher@invalid \
+    APT_DATA_SHA="${chain_sha}" GITHUB_REPOSITORY=example/apt-hub RELEASE_TAG=v7.7.7 \
+    bash scripts/publish_apt_site.sh update-readme
+) >"${chain}/ok.log" 2>&1 || ok_rc=$?
+ok_args="$(cat "${CAPTURE}" 2>/dev/null || true)"
+if [[ "${ok_rc}" -eq 0 && "${ok_args}" == *"--repository example/apt-hub"* && "${ok_args}" == *"--release-tag v7.7.7"* ]]; then
+  pass '回写把仓库和标签传给 render'
+else
+  fail "回写未传版本对 rc=${ok_rc} args=${ok_args} log=$(tr '\n' ' ' <"${chain}/ok.log")"
+fi
 cleanup
 printf 'RESULT pass=%s fail=%s evidence=%s\n' "${PASS}" "${FAIL}" "${WORK}"
 [[ "${FAIL}" -eq 0 ]]

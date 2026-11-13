@@ -402,13 +402,17 @@ deploy_pages() {
   [[ "${status}" == built ]] || die "Pages 构建超时"
   for ((attempt=0; attempt<60; attempt++)); do
     if curl -fsS --proto '=https' --connect-timeout 15 --max-time 30 \
-      "${SITE_URL:?}/state.json" -o tmp/public-state.json && cmp -s tmp/site/state.json tmp/public-state.json; then
+      "${SITE_URL:?}/state.json" -o tmp/public-state.json && cmp -s tmp/site/state.json tmp/public-state.json \
+      && curl -fsS --proto '=https' --connect-timeout 15 --max-time 30 \
+      "${SITE_URL:?}/index.html" -o tmp/public-index.html && cmp -s tmp/site/index.html tmp/public-index.html \
+      && curl -fsS --proto '=https' --connect-timeout 15 --max-time 30 \
+      "${SITE_URL:?}/add_source.sh" -o tmp/public-add_source.sh && cmp -s tmp/site/add_source.sh tmp/public-add_source.sh; then
       printf 'Pages 已部署并回读提交 %s\n' "${sha}"
       return 0
     fi
     sleep 10
   done
-  die "公网站点尚未返回本次 state，未回写列表"
+  die "公网站点尚未同时返回本次 state、index 与 add_source，未回写列表"
 }
 
 publish() {
@@ -431,9 +435,14 @@ publish() {
 }
 
 update_readme() (
-  local name="${APT_HUB_GIT_NAME:-}" email="${APT_HUB_GIT_EMAIL:-}" sha="${APT_DATA_SHA:-}" work saved remote
+  local name="${APT_HUB_GIT_NAME:-}" email="${APT_HUB_GIT_EMAIL:-}" sha="${APT_DATA_SHA:-}" work saved remote repo tag
   [[ -n "${name}" && -n "${email}" ]] || die "缺少已核验发布者身份"
   [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || die "缺少已保存 apt-data SHA"
+  repo="${GITHUB_REPOSITORY:-}"
+  tag="${RELEASE_TAG:-}"
+  [[ "${repo}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*\/[A-Za-z0-9_][A-Za-z0-9._-]*$ && "${repo}" != *..* ]] \
+    || die "GITHUB_REPOSITORY 非法"
+  [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "RELEASE_TAG 非法"
   git fetch origin refs/heads/main:refs/remotes/origin/main || die "读取 main 失败"
   work=$(mktemp -d "${ROOT}/tmp/readme.XXXXXX")
   rmdir "${work}"
@@ -443,7 +452,8 @@ update_readme() (
   git fetch origin refs/heads/apt-data:refs/remotes/origin/apt-data
   git cat-file -e "${sha}^{commit}" || die "已部署 SHA 不在 apt-data 历史中"
   git show "${sha}:state.json" >"${work}/data/published.json"
-  bash scripts/render.sh --state "${work}/data/published.json" --readme "${work}/README.md" --site tmp/readme-site
+  bash scripts/render.sh --state "${work}/data/published.json" --readme "${work}/README.md" --site tmp/readme-site \
+    --repository "${repo}" --release-tag "${tag}"
   export GIT_AUTHOR_NAME="${name}"
   export GIT_AUTHOR_EMAIL="${email}"
   export GIT_COMMITTER_NAME="${name}"

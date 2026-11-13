@@ -1263,6 +1263,8 @@ readme_rc=0
     APT_HUB_GIT_NAME="$GIT_NAME" \
     APT_HUB_GIT_EMAIL="$GIT_EMAIL" \
     APT_DATA_SHA="$apt_sha" \
+    GITHUB_REPOSITORY="example/apt-hub" \
+    RELEASE_TAG="v7.7.7" \
     bash scripts/publish_apt_site.sh update-readme
 ) >"$readme_root/update.log" 2>&1 || readme_rc=$?
 main_readme=$(git --git-dir="$readme_origin" show main:README.md 2>/dev/null || true)
@@ -1275,6 +1277,18 @@ if [[ "$readme_rc" -eq 0 \
   pass "detached tag 回写读当前 main，不推 tag HEAD"
 else
   fail "README 回写未落在 main rc=$readme_rc log=$(cat "$readme_root/update.log" 2>/dev/null || true)"
+fi
+readme_page="$readme_work/tmp/readme-site/index.html"
+if [[ -f "$readme_page" ]] \
+  && grep -Fq 'https://github.com/example/apt-hub/releases/tag/v7.7.7' "$readme_page" \
+  && grep -Fq 'https://github.com/example/apt-hub/blob/v7.7.7/changelog/v7.7.7.md' "$readme_page" \
+  && grep -Fq 'https://github.com/example/apt-hub/releases/latest' "$readme_page" \
+  && grep -Fq '维护版本' "$readme_page" \
+  && grep -Fq '>1.0.0<' "$readme_page" \
+  && [[ "$main_readme" != *v7.7.7* ]]; then
+  pass "回写页面绑定显式维护版本，README 不含该导航"
+else
+  fail "回写页面未绑定显式维护版本 rc=$readme_rc"
 fi
 
 echo "== 证据清单 =="

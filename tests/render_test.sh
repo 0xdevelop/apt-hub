@@ -318,7 +318,8 @@ assert_file_has "two html alpha env" "$site_two/index.html" "jammy, noble · amd
 assert_file_lacks "two html 无 sources" "$site_two/index.html" ".sources"
 assert_file_lacks "two html 无旧添加源列" "$site_two/index.html" "添加源配置"
 assert_file_lacks "two html 无更新列" "$site_two/index.html" "最后更新"
-assert_file_has "two html no js" "$site_two/index.html" "静态展示"
+assert_file_has "two html 用途一句" "$site_two/index.html" "为缺少官方 APT 源的软件提供签名索引，使用标准 APT 安装与更新。"
+assert_file_lacks "two html 不说收包" "$site_two/index.html" "收包"
 assert_file_lacks "two html no script" "$site_two/index.html" "<script"
 assert_file_lacks "two html no form" "$site_two/index.html" "<form"
 assert_file_lacks "two html no button" "$site_two/index.html" "<button"
@@ -709,6 +710,150 @@ else
   pass "dangling index.html 未变成普通文件"
 fi
 assert_no_workdir "dangling index 无 work 目录" "$dangle_site"
+
+# 维护版本必须成对显式传入；缺一、非法或环境变量都不写页面。
+pair_site="$EVIDENCE/site-pair"
+pair_readme="$EVIDENCE/README.pair.md"
+mkdir -p -- "$pair_site"
+make_readme "$pair_readme"
+printf 'OLDHTML\n' >"$pair_site/index.html"
+pair_html_hash=$(hash_file "$pair_site/index.html")
+pair_readme_hash=$(hash_file "$pair_readme")
+pair_state_hash=$(hash_file "$two_state")
+reject_pair() {
+  local name="$1"
+  shift
+  run_expect "$name" 1 "$@"
+  assert_same_hash "$name html" "$pair_site/index.html" "$pair_html_hash"
+  assert_same_hash "$name readme" "$pair_readme" "$pair_readme_hash"
+  assert_same_hash "$name state" "$two_state" "$pair_state_hash"
+  assert_no_workdir "$name work" "$pair_site"
+}
+reject_pair "reject_repository_only" "$RENDER" --state "$two_state" --readme "$pair_readme" --site "$pair_site" --repository example/apt-hub
+reject_pair "reject_tag_only" "$RENDER" --state "$two_state" --readme "$pair_readme" --site "$pair_site" --release-tag v3.2.1
+reject_pair "reject_tag_short" "$RENDER" --state "$two_state" --readme "$pair_readme" --site "$pair_site" --repository example/apt-hub --release-tag v3.2
+reject_pair "reject_tag_latest" "$RENDER" --state "$two_state" --readme "$pair_readme" --site "$pair_site" --repository example/apt-hub --release-tag latest
+reject_pair "reject_tag_prefixless" "$RENDER" --state "$two_state" --readme "$pair_readme" --site "$pair_site" --repository example/apt-hub --release-tag 3.2.1
+reject_pair "reject_tag_prerelease" "$RENDER" --state "$two_state" --readme "$pair_readme" --site "$pair_site" --repository example/apt-hub --release-tag v3.2.1-rc1
+reject_pair "reject_repo_one_segment" "$RENDER" --state "$two_state" --readme "$pair_readme" --site "$pair_site" --repository apt-hub --release-tag v3.2.1
+reject_pair "reject_repo_three_segments" "$RENDER" --state "$two_state" --readme "$pair_readme" --site "$pair_site" --repository example/apt/hub --release-tag v3.2.1
+reject_pair "reject_repo_dotdot" "$RENDER" --state "$two_state" --readme "$pair_readme" --site "$pair_site" --repository example/.. --release-tag v3.2.1
+reject_pair "reject_repo_inject" "$RENDER" --state "$two_state" --readme "$pair_readme" --site "$pair_site" --repository 'example/<script>' --release-tag v3.2.1
+reject_pkg() {
+  local name="$1" pkg="$2" bad
+  bad="$EVIDENCE/state_${name}.json"
+  jq --arg pkg "$pkg" '.packages[0].package=$pkg' "$two_state" >"$bad"
+  run_expect "$name" 1 "$RENDER" --state "$bad" --readme "$pair_readme" --site "$pair_site" --repository example/apt-hub --release-tag v3.2.1
+  assert_same_hash "$name html" "$pair_site/index.html" "$pair_html_hash"
+  assert_same_hash "$name readme" "$pair_readme" "$pair_readme_hash"
+  assert_no_workdir "$name work" "$pair_site"
+}
+reject_pkg reject_pkg_semicolon 'golang;id'
+# shellcheck disable=SC2016 # 夹具必须是字面 $(id)，不能被 shell 展开
+reject_pkg reject_pkg_subst 'golang$(id)'
+reject_pkg reject_pkg_space 'golang rustdesk'
+reject_pkg reject_pkg_option '--assume-yes'
+
+ver_state="$EVIDENCE/state_site_version.json"
+jq '.packages[0].package="golang" | .packages[0].version="1.25.4" | .packages[0].release_url="https://go.dev/dl/go1.25.4.linux-amd64.tar.gz" | .packages[1].package="rustdesk" | .packages[1].version="1.4.2" | .packages[1].release_url="https://github.com/rustdesk/rustdesk/releases/tag/1.4.2"' \
+  "$two_state" >"$ver_state"
+ver_site="$EVIDENCE/site-version"
+ver_readme="$EVIDENCE/README.version.md"
+mkdir -p -- "$ver_site"
+make_readme "$ver_readme"
+run_expect "render_ignore_env_version" 0 env GITHUB_REPOSITORY=evil/injected RELEASE_TAG=v0.0.1 VERSION=9.9.9 \
+  "$RENDER" --state "$ver_state" --readme "$ver_readme" --site "$ver_site"
+assert_file_lacks "无参不读仓库环境" "$ver_site/index.html" "evil/injected"
+assert_file_lacks "无参不读标签环境" "$ver_site/index.html" "v0.0.1"
+assert_file_lacks "无参不读 VERSION" "$ver_site/index.html" "9.9.9"
+assert_file_lacks "无参不展示维护版本" "$ver_site/index.html" "维护版本"
+assert_file_has "无参仍显示软件版本" "$ver_site/index.html" "1.25.4"
+assert_eq "无参版本页恰一代码块" "$(grep -F -o -- '<pre><code>' "$ver_site/index.html" | wc -l)" "1"
+
+ver_site_ok="$EVIDENCE/site-version-ok"
+ver_readme_ok="$EVIDENCE/README.version-ok.md"
+mkdir -p -- "$ver_site_ok"
+make_readme "$ver_readme_ok"
+ver_ok_outside=$(readme_outside_hash "$ver_readme_ok")
+run_expect "render_explicit_version" 0 "$RENDER" --release-tag v3.2.1 --state "$ver_state" --repository example/apt-hub --readme "$ver_readme_ok" --site "$ver_site_ok"
+assert_eq "显式版本 README 标记外字节" "$(readme_outside_hash "$ver_readme_ok")" "$ver_ok_outside"
+assert_file_lacks "README 不塞维护版本" "$ver_readme_ok" "v3.2.1"
+assert_file_lacks "README 不塞维护版本标题" "$ver_readme_ok" "维护版本"
+assert_file_lacks "README 不塞来源说明" "$ver_readme_ok" "Go 转换包"
+assert_file_has "README 仍是软件版本" "$ver_readme_ok" "1.25.4"
+assert_file_has "页面维护版本标题" "$ver_site_ok/index.html" "维护版本"
+assert_file_has "页面站点版本字样" "$ver_site_ok/index.html" "站点版本"
+assert_file_has "页面当前 Release" "$ver_site_ok/index.html" 'href="https://github.com/example/apt-hub/releases/tag/v3.2.1"'
+assert_file_has "页面标签文本" "$ver_site_ok/index.html" ">v3.2.1</a>"
+assert_file_has "页面 latest 外链" "$ver_site_ok/index.html" 'href="https://github.com/example/apt-hub/releases/latest"'
+assert_file_has "页面 changelog" "$ver_site_ok/index.html" 'href="https://github.com/example/apt-hub/blob/v3.2.1/changelog/v3.2.1.md"'
+assert_file_has "页面源码" "$ver_site_ok/index.html" 'href="https://github.com/example/apt-hub"'
+assert_file_lacks "维护版本不改用 Go 版本" "$ver_site_ok/index.html" "releases/tag/1.25.4"
+assert_file_lacks "维护版本不改用 latest 标签路径" "$ver_site_ok/index.html" "releases/tag/latest"
+assert_file_has "软件表保留 Go 版本" "$ver_site_ok/index.html" "1.25.4"
+assert_file_has "软件表保留 RustDesk 版本" "$ver_site_ok/index.html" "1.4.2"
+assert_file_has "固定站点根" "$ver_site_ok/index.html" "<code>https://apt.example.test</code>"
+assert_file_has "加源自删一句" "$ver_site_ok/index.html" "成功后脚本自删，不安装软件。"
+assert_file_lacks "加源命令无 software" "$ver_site_ok/index.html" "--software"
+assert_file_has "安装命令" "$ver_site_ok/index.html" "<pre><code>sudo apt update &amp;&amp; sudo apt install golang rustdesk</code></pre>"
+assert_file_lacks "安装不加引号" "$ver_site_ok/index.html" "install &#39;golang&#39;"
+assert_file_has "更新命令" "$ver_site_ok/index.html" "<pre><code>sudo apt update &amp;&amp; sudo apt upgrade</code></pre>"
+assert_file_lacks "更新不附包名" "$ver_site_ok/index.html" "apt upgrade golang"
+assert_eq "显式版本三条代码" "$(grep -F -o -- '<pre><code>' "$ver_site_ok/index.html" | wc -l)" "3"
+assert_file_has "四列表头" "$ver_site_ok/index.html" "支持环境"
+assert_file_has "来源说明" "$ver_site_ok/index.html" "官方 deb 从官方获取；Go 转换包从本仓 Release 获取。"
+assert_file_has "窄幅居中" "$ver_site_ok/index.html" "max-width:"
+assert_file_has "代码块浅底" "$ver_site_ok/index.html" "#f6f6f6"
+assert_file_has "表格横滚" "$ver_site_ok/index.html" "overflow-x:auto"
+assert_file_has "系统字体" "$ver_site_ok/index.html" "sans-serif"
+assert_file_lacks "无外链字体" "$ver_site_ok/index.html" "fonts.googleapis"
+assert_file_lacks "无 script" "$ver_site_ok/index.html" "<script"
+assert_file_lacks "无生产域名硬编码" "$ver_site_ok/index.html" "m-b-crazy"
+if grep -q '^<html lang="zh-CN">$' "$ver_site_ok/index.html"; then
+  pass "显式版本页仍是多行静态页"
+else
+  fail "显式版本页未按行展开"
+fi
+cp -f -- "$ver_site_ok/index.html" "$EVIDENCE/index.version.first.html"
+run_expect "render_explicit_version_again" 0 "$RENDER" --repository example/apt-hub --release-tag v3.2.1 --state "$ver_state" --readme "$ver_readme_ok" --site "$ver_site_ok"
+if cmp -s -- "$ver_site_ok/index.html" "$EVIDENCE/index.version.first.html"; then
+  pass "显式版本页幂等"
+else
+  fail "显式版本页重跑后字节变化"
+fi
+
+empty_ver_site="$EVIDENCE/site-empty-version"
+empty_ver_readme="$EVIDENCE/README.empty-version.md"
+mkdir -p -- "$empty_ver_site"
+make_readme "$empty_ver_readme"
+run_expect "render_empty_explicit_version" 0 "$RENDER" --state "$EVIDENCE/published.empty.json" --readme "$empty_ver_readme" --site "$empty_ver_site" --repository example/apt-hub --release-tag v3.2.1
+assert_file_has "空态仍说明未发布" "$empty_ver_site/index.html" "尚未完成首次发布"
+assert_file_has "空态仍给维护版本" "$empty_ver_site/index.html" 'href="https://github.com/example/apt-hub/releases/tag/v3.2.1"'
+assert_file_lacks "空态不伪造命令" "$empty_ver_site/index.html" "curl -fsSL"
+assert_file_lacks "空态不伪造提权" "$empty_ver_site/index.html" "sudo"
+assert_file_lacks "空态不伪造代码块" "$empty_ver_site/index.html" "<pre>"
+assert_file_lacks "空态不伪造站根" "$empty_ver_site/index.html" "apt.example.test"
+
+http_ver_site="$EVIDENCE/site-http-version"
+http_ver_readme="$EVIDENCE/README.http-version.md"
+mkdir -p -- "$http_ver_site"
+make_readme "$http_ver_readme"
+run_expect "render_http_explicit_version" 0 "$RENDER" --state "$http_state" --readme "$http_ver_readme" --site "$http_ver_site" --repository example/apt-hub --release-tag v3.2.1
+assert_file_has "HTTP 仍给维护版本" "$http_ver_site/index.html" "维护版本"
+assert_file_lacks "HTTP 不生成命令" "$http_ver_site/index.html" "curl -fsSL"
+assert_file_lacks "HTTP 不提权" "$http_ver_site/index.html" "sudo"
+assert_file_lacks "HTTP 无代码块" "$http_ver_site/index.html" "<pre>"
+assert_file_lacks "HTTP 不展示非安全站根" "$http_ver_site/index.html" "127.0.0.1"
+
+path_ver_site="$EVIDENCE/site-path-version"
+path_ver_readme="$EVIDENCE/README.path-version.md"
+mkdir -p -- "$path_ver_site"
+make_readme "$path_ver_readme"
+run_expect "render_path_explicit_version" 0 "$RENDER" --state "$path_state" --readme "$path_ver_readme" --site "$path_ver_site" --repository example/apt-hub --release-tag v3.2.1
+assert_file_has "子路径站根" "$path_ver_site/index.html" "<code>https://apt.example.test:8443/team/site_v2</code>"
+assert_file_has "子路径命令" "$path_ver_site/index.html" "--site-url &#39;https://apt.example.test:8443/team/site_v2&#39;"
+assert_file_lacks "子路径命令无 software" "$path_ver_site/index.html" "--software"
+assert_file_has "子路径安装命令" "$path_ver_site/index.html" "sudo apt update &amp;&amp; sudo apt install alpha-app"
 
 # git_tag.sh：手动入口一律拒绝。无参数入口由脏工作区用例覆盖。
 tag_repo="$EVIDENCE/tag-repo"
