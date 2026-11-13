@@ -303,6 +303,27 @@ EOF
     "${site_url}" "${id}" >"${site}/repos/${id}/mirror.list"
 }
 
+# 测试夹具显式按 id 序拼接系列聚合，不靠客户端解析器回写。
+write_series_aggregate() {
+  local site="$1" series="$2"
+  local dest="${site}/repos/${series}.sources"
+  local tmp="${site}/repos/.aggregate-${series}.tmp"
+  local id src first=1
+  : >"${tmp}"
+  while IFS= read -r id; do
+    [[ -n "${id}" ]] || continue
+    src="${site}/repos/${id}/${series}.sources"
+    [[ -f "${src}" ]] || continue
+    if [[ "${first}" -eq 0 ]]; then
+      printf '\n' >>"${tmp}"
+    fi
+    cat -- "${src}" >>"${tmp}"
+    first=0
+  done < <(find -- "${site}/repos" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+  [[ -s "${tmp}" ]] || { rm -f -- "${tmp}"; return 1; }
+  mv -- "${tmp}" "${dest}"
+}
+
 build_site() {
   local site="$1" gpghome="$2" series="$3" site_url="$4"
   rm -rf -- "${site}"
@@ -312,6 +333,7 @@ build_site() {
   add_software_to_site "${site}" "${gpghome}" "${series}" \
     "${SOFTWARE_ID2}" "${PKG_NAME2}" "2.0.0" "${site_url}"
   gpg --homedir "${gpghome}" --batch --export --armor >"${site}/apt-hub.gpg"
+  write_series_aggregate "${site}" "${series}"
   printf '<html>add-source fixture</html>\n' >"${site}/index.html"
   assert_no_symlink_in_tree "${site}"
   if find "${site}" -name '*.deb' | grep -q .; then
@@ -421,6 +443,14 @@ run_add() {
   fi
   env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy -u all_proxy \
     "${ADD}" --site-url "${SITE_URL}" --software "${software}" --root "${root}" \
+    --architecture amd64 --cacert "${TLS}/tls.crt" "$@"
+}
+
+run_add_all() {
+  local root="$1"
+  shift
+  env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy -u all_proxy \
+    "${ADD}" --site-url "${SITE_URL}" --root "${root}" \
     --architecture amd64 --cacert "${TLS}/tls.crt" "$@"
 }
 
@@ -1561,6 +1591,326 @@ prepare_isolated_root "${Rkeep}" "jammy" amd64 symlink
 rc="$(cat "${BASE}/keepfail.rc")"
 record_rc "failure_keeps_script_rc" "${rc}" 1
 if [[ -f "${BASE}/copies/add_source.sh" ]]; then pass "failure_keeps_script"; else fail "failure_keeps_script"; fi
+
+log "== 默认一次添加全部适用源 =="
+Rall="${BASE}/roots/all"
+prepare_isolated_root "${Rall}" "${SERIES}" amd64 symlink
+rc="$(capture_rc "${BASE}/all.log" run_add_all "${Rall}")"
+record_rc "all_sources_add" "${rc}" 0
+if [[ -f "${Rall}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" \
+   && -f "${Rall}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID2}.sources" \
+   && ! -e "${Rall}/etc/apt/sources.list.d/${SERIES}.sources" ]]; then
+  pass "all_sources_per_id_files_only"
+else
+  fail "all_sources_per_id_files_only"
+fi
+if grep -q "apt install ${PKG_NAME} ${PKG_NAME2}" "${BASE}/all.log"; then
+  pass "all_sources_install_line"
+else
+  fail "all_sources_install_line"
+fi
+write_apt_conf_for_root "${Rall}" amd64 "${Rall}/etc/apt/apt.conf"
+arc="$(capture_rc "${BASE}/all-apt-update.log" env APT_CONFIG="${Rall}/etc/apt/apt.conf" timeout 90 apt-get update)"
+record_rc "all_sources_apt_update" "${arc}" 0
+if [[ "${arc}" -eq 0 ]] \
+  && grep -R -q "^Package: ${PKG_NAME}$" "${Rall}/var/lib/apt/lists" \
+  && grep -R -q "^Package: ${PKG_NAME2}$" "${Rall}/var/lib/apt/lists"; then
+  pass "all_sources_apt_sees_both_packages"
+else
+  fail "all_sources_apt_sees_both_packages"
+fi
+
+log "== 已有单源后再补其余；重复不改字节 =="
+Rrest="${BASE}/roots/all-rest"
+prepare_isolated_root "${Rrest}"
+run_add "${Rrest}" "${SOFTWARE_ID}" >"${BASE}/all-rest-seed.log" 2>&1
+seed_hash="$(sha256sum -- "${Rrest}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" | awk '{print $1}')"
+rc="$(capture_rc "${BASE}/all-rest.log" run_add_all "${Rrest}")"
+record_rc "all_sources_after_one" "${rc}" 0
+rest_hash="$(sha256sum -- "${Rrest}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" | awk '{print $1}')"
+if [[ "${rest_hash}" == "${seed_hash}" && -f "${Rrest}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID2}.sources" ]]; then
+  pass "all_sources_keeps_existing_file"
+else
+  fail "all_sources_keeps_existing_file"
+fi
+hash1="$(sha256sum -- "${Rrest}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" | awk '{print $1}')"
+hash2="$(sha256sum -- "${Rrest}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID2}.sources" | awk '{print $1}')"
+rc="$(capture_rc "${BASE}/all-rest-again.log" run_add_all "${Rrest}")"
+record_rc "all_sources_repeat" "${rc}" 0
+if grep -q '幂等' "${BASE}/all-rest-again.log" \
+  && [[ "$(sha256sum -- "${Rrest}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" | awk '{print $1}')" == "${hash1}" ]] \
+  && [[ "$(sha256sum -- "${Rrest}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID2}.sources" | awk '{print $1}')" == "${hash2}" ]]; then
+  pass "all_sources_repeat_hash_unchanged"
+else
+  fail "all_sources_repeat_hash_unchanged"
+fi
+
+log "== 后来新增的软件仍由同一入口纳入 =="
+cp -a -- "${SITE}" "${BASE}/site-third"
+add_software_to_site "${BASE}/site-third" "${GNUPG}" "${SERIES}" \
+  "demoapp3" "demo-app-three" "3.0.0" "${SITE_URL}"
+write_series_aggregate "${BASE}/site-third" "${SERIES}"
+start_https "${BASE}/site-third"
+rc="$(capture_rc "${BASE}/all-third.log" run_add_all "${Rrest}")"
+record_rc "all_sources_later_software" "${rc}" 0
+if [[ -f "${Rrest}/etc/apt/sources.list.d/apt-hub-demoapp3.sources" ]] \
+  && [[ "$(sha256sum -- "${Rrest}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" | awk '{print $1}')" == "${hash1}" ]] \
+  && [[ "$(sha256sum -- "${Rrest}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID2}.sources" | awk '{print $1}')" == "${hash2}" ]]; then
+  pass "all_sources_later_software_keeps_old_hashes"
+else
+  fail "all_sources_later_software_keeps_old_hashes"
+fi
+start_https "${SITE}"
+
+log "== 第二条签名损坏：不留下新文件 =="
+Rbad2="${BASE}/roots/all-bad-second"
+prepare_isolated_root "${Rbad2}"
+run_add "${Rbad2}" "${SOFTWARE_ID}" >"${BASE}/all-bad-second-seed.log" 2>&1
+bad_hash="$(sha256sum -- "${Rbad2}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" | awk '{print $1}')"
+bad_key="$(sha256sum -- "${Rbad2}/etc/apt/keyrings/apt-hub.gpg" | awk '{print $1}')"
+cp -a -- "${SITE}" "${BASE}/site-bad-second"
+sig_in2="${BASE}/site-bad-second/repos/${SOFTWARE_ID2}/dists/${SERIES}/InRelease"
+awk 'BEGIN{done=0} /^Origin: / && !done {sub(/apt-hub-add-source-test/,"apt-hub-add-source-tampered"); done=1} {print}' \
+  "${sig_in2}" >"${sig_in2}.bad"
+mv -- "${sig_in2}.bad" "${sig_in2}"
+gpg --homedir "${GNUPG}" --batch --export >"${BASE}/all-bad-second-keyring.gpg"
+gpgv_rc=0
+gpgv --keyring "${BASE}/all-bad-second-keyring.gpg" -- "${sig_in2}" \
+  >"${BASE}/all-bad-second-gpgv.log" 2>&1 || gpgv_rc=$?
+log "CASE all_sources_second_badsig_gpgv: exit=${gpgv_rc}"
+if [[ "${gpgv_rc}" -ne 0 ]]; then
+  pass "all_sources_second_badsig_gpgv_nonzero"
+else
+  fail "all_sources_second_badsig_gpgv_nonzero"
+fi
+start_https "${BASE}/site-bad-second"
+rc="$(capture_rc "${BASE}/all-bad-second.log" run_add_all "${Rbad2}")"
+record_rc "all_sources_second_badsig" "${rc}" 1
+if [[ "$(sha256sum -- "${Rbad2}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" | awk '{print $1}')" == "${bad_hash}" ]] \
+  && [[ "$(sha256sum -- "${Rbad2}/etc/apt/keyrings/apt-hub.gpg" | awk '{print $1}')" == "${bad_key}" ]] \
+  && [[ ! -e "${Rbad2}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID2}.sources" ]]; then
+  pass "all_sources_second_badsig_old_unchanged"
+else
+  fail "all_sources_second_badsig_old_unchanged"
+fi
+start_https "${SITE}"
+
+log "== 第二条冲突：拒绝且不改旧文件 =="
+Rcf2="${BASE}/roots/all-conflict-second"
+prepare_isolated_root "${Rcf2}"
+run_add "${Rcf2}" "${SOFTWARE_ID}" >"${BASE}/all-conflict-seed.log" 2>&1
+cf_hash="$(sha256sum -- "${Rcf2}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" | awk '{print $1}')"
+printf 'conflict\n' >"${Rcf2}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID2}.sources"
+cf2_hash="$(sha256sum -- "${Rcf2}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID2}.sources" | awk '{print $1}')"
+rc="$(capture_rc "${BASE}/all-conflict.log" run_add_all "${Rcf2}")"
+record_rc "all_sources_second_conflict" "${rc}" 1
+if [[ "$(sha256sum -- "${Rcf2}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" | awk '{print $1}')" == "${cf_hash}" ]] \
+  && [[ "$(sha256sum -- "${Rcf2}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID2}.sources" | awk '{print $1}')" == "${cf2_hash}" ]]; then
+  pass "all_sources_second_conflict_unchanged"
+else
+  fail "all_sources_second_conflict_unchanged"
+fi
+
+log "== 第二条写入失败：回滚本批新建文件和钥 =="
+mkdir -p -- "${BASE}/bin-fault-all-second"
+cat >"${BASE}/bin-fault-all-second/mv" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+dest="${!#}"
+case "${dest}" in
+  *apt-hub-demoapp2.sources) exit 1 ;;
+esac
+exec /bin/mv "$@"
+EOF
+chmod 0755 -- "${BASE}/bin-fault-all-second/mv"
+Rmv2="${BASE}/roots/all-mv-second"
+prepare_isolated_root "${Rmv2}"
+rc="$(capture_rc "${BASE}/all-mv-second.log" \
+  env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy -u all_proxy \
+  PATH="${BASE}/bin-fault-all-second:${PATH}" \
+  "${ADD}" --site-url "${SITE_URL}" --root "${Rmv2}" \
+  --architecture amd64 --cacert "${TLS}/tls.crt")"
+record_rc "all_sources_second_mv_fail" "${rc}" 1
+if [[ ! -e "${Rmv2}/etc/apt/keyrings/apt-hub.gpg" \
+   && ! -e "${Rmv2}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" \
+   && ! -e "${Rmv2}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID2}.sources" ]]; then
+  pass "all_sources_second_mv_rolled_back"
+else
+  fail "all_sources_second_mv_rolled_back"
+fi
+
+log "== TERM 落在第二条 rename 成功后，只回滚本批 =="
+mkdir -p -- "${BASE}/bin-fault-all-term"
+cat >"${BASE}/bin-fault-all-term/mv" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+dest="${!#}"
+case "${dest}" in
+  *apt-hub-demoapp2.sources)
+    /bin/mv "$@"
+    kill -TERM "${PPID}" 2>/dev/null || true
+    sleep 2
+    exit 1
+    ;;
+esac
+exec /bin/mv "$@"
+EOF
+chmod 0755 -- "${BASE}/bin-fault-all-term/mv"
+Rterm2="${BASE}/roots/all-term-second"
+prepare_isolated_root "${Rterm2}"
+rc="$(capture_rc "${BASE}/all-term-second.log" \
+  env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy -u all_proxy \
+  PATH="${BASE}/bin-fault-all-term:${PATH}" \
+  "${ADD}" --site-url "${SITE_URL}" --root "${Rterm2}" \
+  --architecture amd64 --cacert "${TLS}/tls.crt")"
+if [[ "${rc}" -ne 0 ]]; then
+  pass "all_sources_term_nonzero"
+else
+  fail "all_sources_term_nonzero"
+fi
+if [[ ! -e "${Rterm2}/etc/apt/keyrings/apt-hub.gpg" \
+   && ! -e "${Rterm2}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" \
+   && ! -e "${Rterm2}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID2}.sources" ]]; then
+  pass "all_sources_term_rolled_back_batch"
+else
+  fail "all_sources_term_rolled_back_batch"
+fi
+
+log "== 锁被占用时全源不改已有文件 =="
+Rhold="${BASE}/roots/all-lock"
+prepare_isolated_root "${Rhold}"
+run_add "${Rhold}" "${SOFTWARE_ID}" >"${BASE}/all-lock-seed.log" 2>&1
+hold_hash="$(sha256sum -- "${Rhold}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" | awk '{print $1}')"
+hold_key="$(sha256sum -- "${Rhold}/etc/apt/keyrings/apt-hub.gpg" | awk '{print $1}')"
+exec 7>>"${Rhold}/etc/apt/keyrings/.apt-hub-add-source.lock"
+flock 7
+rc="$(capture_rc "${BASE}/all-lock.log" timeout 3 env \
+  -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy -u all_proxy \
+  "${ADD}" --site-url "${SITE_URL}" --root "${Rhold}" \
+  --architecture amd64 --cacert "${TLS}/tls.crt")"
+exec 7>&-
+log "CASE all_sources_lock_held: exit=${rc}"
+if [[ "${rc}" -ne 0 ]] \
+  && [[ "$(sha256sum -- "${Rhold}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" | awk '{print $1}')" == "${hold_hash}" ]] \
+  && [[ "$(sha256sum -- "${Rhold}/etc/apt/keyrings/apt-hub.gpg" | awk '{print $1}')" == "${hold_key}" ]] \
+  && [[ ! -e "${Rhold}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID2}.sources" ]]; then
+  pass "all_sources_lock_held_unchanged"
+else
+  fail "all_sources_lock_held_unchanged"
+fi
+
+log "== 换钥仍只下载一次公钥 =="
+Rrot="${BASE}/roots/all-rotate"
+prepare_isolated_root "${Rrot}"
+run_add_all "${Rrot}" >"${BASE}/all-rotate-seed.log" 2>&1
+rot1="$(sha256sum -- "${Rrot}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" | awk '{print $1}')"
+rot2="$(sha256sum -- "${Rrot}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID2}.sources" | awk '{print $1}')"
+start_https "${BASE}/site-newkey"
+rc="$(capture_rc "${BASE}/all-rotate.log" run_add_all "${Rrot}" --replace-key "${NEW_FP}")"
+record_rc "all_sources_replace_key" "${rc}" 0
+gpg_gets="$(grep -c 'apt-hub.gpg' "${BASE}/https-server.log" || true)"
+log "all_sources_key_download_lines=${gpg_gets}"
+if [[ "${gpg_gets}" -eq 1 ]] \
+  && [[ "$(sha256sum -- "${Rrot}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" | awk '{print $1}')" == "${rot1}" ]] \
+  && [[ "$(sha256sum -- "${Rrot}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID2}.sources" | awk '{print $1}')" == "${rot2}" ]]; then
+  pass "all_sources_one_key_download_sources_unchanged"
+else
+  fail "all_sources_one_key_download_sources_unchanged"
+fi
+got_fp="$(gpg --batch --show-keys --with-colons "${Rrot}/etc/apt/keyrings/apt-hub.gpg" | awk -F: '$1=="fpr"{print $10; exit}')"
+got_fp="$(printf '%s' "${got_fp}" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')"
+if [[ "${got_fp}" == "${NEW_FP}" ]]; then
+  pass "all_sources_replace_key_fingerprint"
+else
+  fail "all_sources_replace_key_fingerprint"
+fi
+start_https "${SITE}"
+
+log "== 不适用架构跳过；零适用、重复、套件不符、未知字段拒绝 =="
+cp -a -- "${SITE}" "${BASE}/site-arm"
+cat >>"${BASE}/site-arm/repos/${SERIES}.sources" <<EOF
+
+Types: deb
+URIs: mirror+${SITE_URL}/repos/armonly/mirror.list
+Suites: ${SERIES}
+Components: main
+Signed-By: /etc/apt/keyrings/apt-hub.gpg
+Architectures: arm64
+EOF
+start_https "${BASE}/site-arm"
+Rarm="${BASE}/roots/all-arm"
+prepare_isolated_root "${Rarm}"
+rc="$(capture_rc "${BASE}/all-arm.log" run_add_all "${Rarm}")"
+record_rc "all_sources_skip_foreign_arch" "${rc}" 0
+if grep -q '跳过不适用架构: armonly' "${BASE}/all-arm.log" \
+  && [[ ! -e "${Rarm}/etc/apt/sources.list.d/apt-hub-armonly.sources" ]] \
+  && [[ -f "${Rarm}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" ]]; then
+  pass "all_sources_skip_message"
+else
+  fail "all_sources_skip_message"
+fi
+
+cp -a -- "${SITE}" "${BASE}/site-zero"
+cat >"${BASE}/site-zero/repos/${SERIES}.sources" <<EOF
+Types: deb
+URIs: mirror+${SITE_URL}/repos/armonly/mirror.list
+Suites: ${SERIES}
+Components: main
+Signed-By: /etc/apt/keyrings/apt-hub.gpg
+Architectures: arm64
+EOF
+start_https "${BASE}/site-zero"
+Rzero="${BASE}/roots/all-zero"
+prepare_isolated_root "${Rzero}"
+rc="$(capture_rc "${BASE}/all-zero.log" run_add_all "${Rzero}")"
+record_rc "all_sources_zero_applicable" "${rc}" 1
+if grep -q '没有适用于当前系列/架构的源' "${BASE}/all-zero.log" \
+  && [[ ! -e "${Rzero}/etc/apt/keyrings/apt-hub.gpg" ]]; then
+  pass "all_sources_zero_no_key"
+else
+  fail "all_sources_zero_no_key"
+fi
+
+cp -a -- "${SITE}" "${BASE}/site-dup"
+printf '\n' >>"${BASE}/site-dup/repos/${SERIES}.sources"
+cat -- "${BASE}/site-dup/repos/${SOFTWARE_ID}/${SERIES}.sources" >>"${BASE}/site-dup/repos/${SERIES}.sources"
+start_https "${BASE}/site-dup"
+Rdup="${BASE}/roots/all-dup"
+prepare_isolated_root "${Rdup}"
+rc="$(capture_rc "${BASE}/all-dup.log" run_add_all "${Rdup}")"
+record_rc "all_sources_duplicate_id" "${rc}" 1
+if grep -q '聚合 sources id 重复' "${BASE}/all-dup.log" && [[ ! -e "${Rdup}/etc/apt/keyrings/apt-hub.gpg" ]]; then
+  pass "all_sources_duplicate_no_key"
+else
+  fail "all_sources_duplicate_no_key"
+fi
+
+cp -a -- "${SITE}" "${BASE}/site-suite"
+sed -i "0,/^Suites: ${SERIES}$/s//Suites: jammy/" "${BASE}/site-suite/repos/${SERIES}.sources"
+start_https "${BASE}/site-suite"
+Rsuite="${BASE}/roots/all-suite"
+prepare_isolated_root "${Rsuite}"
+rc="$(capture_rc "${BASE}/all-suite.log" run_add_all "${Rsuite}")"
+record_rc "all_sources_suite_mismatch" "${rc}" 1
+if grep -q 'sources Suites 不匹配' "${BASE}/all-suite.log" && [[ ! -e "${Rsuite}/etc/apt/keyrings/apt-hub.gpg" ]]; then
+  pass "all_sources_suite_no_key"
+else
+  fail "all_sources_suite_no_key"
+fi
+
+cp -a -- "${SITE}" "${BASE}/site-unknown"
+sed -i '1a X-Foo: no' "${BASE}/site-unknown/repos/${SERIES}.sources"
+start_https "${BASE}/site-unknown"
+Runk="${BASE}/roots/all-unknown"
+prepare_isolated_root "${Runk}"
+rc="$(capture_rc "${BASE}/all-unknown.log" run_add_all "${Runk}")"
+record_rc "all_sources_unknown_field" "${rc}" 1
+if grep -q '聚合 sources 格式未知' "${BASE}/all-unknown.log" && [[ ! -e "${Runk}/etc/apt/keyrings/apt-hub.gpg" ]]; then
+  pass "all_sources_unknown_no_key"
+else
+  fail "all_sources_unknown_no_key"
+fi
+start_https "${SITE}"
 
 log "== 非法 site-url =="
 Rurl="${BASE}/roots/badurl"

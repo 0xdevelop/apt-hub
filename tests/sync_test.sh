@@ -352,6 +352,15 @@ grep -q '^Signed-By: /etc/apt/keyrings/apt-hub.gpg$' "${TMP}/site1/repos/alpha/j
 grep -q '^Architectures: amd64 arm64$' "${TMP}/site1/repos/alpha/jammy.sources"
 record_rc repo_layout_sources "$?" 0
 
+assert_file "${TMP}/site1/repos/jammy.sources"
+assert_file "${TMP}/site1/repos/noble.sources"
+alpha_bytes="$(wc -c <"${TMP}/site1/repos/alpha/jammy.sources" | tr -d ' ')"
+rc=0
+head -c "${alpha_bytes}" -- "${TMP}/site1/repos/jammy.sources" | cmp -s -- "${TMP}/site1/repos/alpha/jammy.sources" - || rc=1
+test "$(awk -F/ '/^URIs: /{print $(NF-1)}' "${TMP}/site1/repos/jammy.sources" | paste -sd, -)" = "alpha,beta" || rc=1
+test "$(awk -F/ '/^URIs: /{print $(NF-1)}' "${TMP}/site1/repos/noble.sources" | paste -sd, -)" = "alpha" || rc=1
+record_rc aggregate_series_sources "${rc}" 0
+
 grep -q '^Package: alpha$' "${TMP}/site1/repos/alpha/dists/jammy/main/binary-amd64/Packages"
 grep -q '^Package: alpha$' "${TMP}/site1/repos/alpha/dists/noble/main/binary-amd64/Packages"
 grep -q '^Package: beta$' "${TMP}/site1/repos/beta/dists/jammy/main/binary-amd64/Packages"
@@ -427,6 +436,10 @@ rc=0
 test "${UPDATED1}" = "${UPDATED2}" || rc=1
 test "${UPDATED_BETA1}" = "${UPDATED_BETA2}" || rc=1
 record_rc idempotent_updated_at "${rc}" 0
+rc=0
+test "$(awk -F/ '/^URIs: /{print $(NF-1)}' "${TMP}/site2/repos/jammy.sources" | paste -sd, -)" = "alpha,beta" || rc=1
+test "$(awk -F/ '/^URIs: /{print $(NF-1)}' "${TMP}/site2/repos/noble.sources" | paste -sd, -)" = "alpha" || rc=1
+record_rc aggregate_on_unchanged_rerun "${rc}" 0
 rc=0
 test "${HASH_P}" = "$(sha256sum -- "${TMP}/site2/repos/alpha/dists/jammy/main/binary-amd64/Packages" | awk '{print $1}')" || rc=1
 record_rc idempotent_packages_hash "${rc}" 0
@@ -871,6 +884,10 @@ rc=0
 cmp -s -- "${TMP}/site-base/repos/beta/dists/jammy/Release" \
   "${TMP}/site-retain/repos/beta/dists/jammy/Release" && rc=1
 record_rc retain_release_not_byte_identical "${rc}" 0
+rc=0
+test "$(awk -F/ '/^URIs: /{print $(NF-1)}' "${TMP}/site-retain/repos/jammy.sources" | paste -sd, -)" = "alpha,beta" || rc=1
+test "$(awk -F/ '/^URIs: /{print $(NF-1)}' "${TMP}/site-retain/repos/noble.sources" | paste -sd, -)" = "alpha" || rc=1
+record_rc retain_aggregate_includes_beta "${rc}" 0
 
 # site-url 变更时存量 mirror/sources/state 前缀须跟上，不长期指旧站
 SITE_URL_NEW='https://apt-hub-renewed.example.test'
@@ -890,6 +907,12 @@ jq -e --arg u 'mirror+https://apt-hub-renewed.example.test/repos/beta/mirror.lis
   '.packages[]|select(.id=="beta")|.apt_source_uri==$u' \
   "${TMP}/site-retain-siteurl/state.json" >/dev/null
 record_rc retain_state_apt_uri_siteurl "$?" 0
+rc=0
+grep -Fq 'URIs: mirror+https://apt-hub-renewed.example.test/repos/alpha/mirror.list' \
+  "${TMP}/site-retain-siteurl/repos/jammy.sources" || rc=1
+grep -Fq 'URIs: mirror+https://apt-hub-renewed.example.test/repos/beta/mirror.list' \
+  "${TMP}/site-retain-siteurl/repos/jammy.sources" || rc=1
+record_rc retain_aggregate_siteurl "${rc}" 0
 
 # 未匹配 catalog 的存量被旁路篡改：不得重新发布 / 不得续签
 cp -a -- "${TMP}/site-base" "${TMP}/site-retain-tamper"

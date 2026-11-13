@@ -229,23 +229,25 @@ if type != "object" then fail("state 必须是对象") else . end
 '
 
 # shellcheck disable=SC2016 # jq 程序字面量，故意单引号不插值
-command_jq='
-def one_click_command:
-  . as $pkg
-  | (.apt_source_uri | sub("^mirror\\+"; "")
-      | rtrimstr("/repos/" + $pkg.id + "/mirror.list")) as $site
-  | if ($site | startswith("https://")) then
-      ("curl -fsSL --proto '\''=https'\'' --proto-redir '\''=https'\'' -o add_source.sh '\''"
-        + $site + "/add_source.sh'\'' && chmod a+x ./add_source.sh && sudo ./add_source.sh --site-url '\''"
-        + $site + "'\'' --software '\''" + $pkg.id + "'\''")
-    else null end;
+site_cmd_jq='
+def site:
+  . as $p
+  | ($p.apt_source_uri | sub("^mirror\\+"; "") | rtrimstr("/repos/" + $p.id + "/mirror.list"));
+if (.packages | length) == 0 then ""
+else
+  ([.packages[] | site] | unique) as $roots
+  | if ($roots | length) != 1 then error("混站根，拒绝渲染")
+    elif ($roots[0] | startswith("https://") | not) then ""
+    else
+      "curl -fsSL --proto '\''=https'\'' --proto-redir '\''=https'\'' -o add_source.sh '\''"
+      + $roots[0] + "/add_source.sh'\'' && chmod a+x ./add_source.sh && sudo ./add_source.sh --site-url '\''"
+      + $roots[0] + "'\''"
+    end
+end
 '
 
 # shellcheck disable=SC2016 # jq 程序字面量，故意单引号不插值
-md_jq="$command_jq"'
-def one_click_cell:
-  one_click_command
-  | if . == null then "HTTP 夹具不支持一键加源" else "`" + . + "`" end;
+md_jq='
 def md_cell:
   tostring
   | gsub("\r"; "")
@@ -262,29 +264,17 @@ def md_cell:
   | gsub("`"; "\\`")
   | gsub("\\*"; "\\*")
   | gsub("_"; "\\_");
-def sources_base:
-  .apt_source_uri
-  | sub("^mirror\\+"; "")
-  | sub("/mirror\\.list$"; "");
-def sources_cell:
-  . as $pkg
-  | ($pkg | sources_base) as $base
-  | ($pkg.ubuntu_series
-      | map("[" + (. | md_cell) + "](" + ($base + "/" + . + ".sources") + ")")
-      | join(" / "));
+def support:
+  (.ubuntu_series | join(", ")) + " · " + (.architectures | join(", "));
 if (.packages | length) == 0 then empty
 else
   .packages[]
-  | "| [\(.package | md_cell)](\(.release_url)) | \(.version | md_cell) | \(.ubuntu_series | join(", ") | md_cell) | \(.architectures | join(", ") | md_cell) | \(.updated_at | md_cell) | \(.description | md_cell) | \(sources_cell) | \(one_click_cell) |"
+  | "| [\(.package | md_cell)](\(.release_url)) | \(.version | md_cell) | \(support | md_cell) | \(.description | md_cell) |"
 end
 '
 
 # shellcheck disable=SC2016 # jq 程序字面量，故意单引号不插值
-html_jq="$command_jq"'
-def one_click_cell:
-  one_click_command
-  | if . == null then "HTTP 夹具不支持一键加源"
-    else "<code>" + (. | @html | gsub("&apos;"; "&#39;")) + "</code>" end;
+html_jq='
 def html_escape:
   tostring
   | gsub("&"; "&amp;")
@@ -292,28 +282,23 @@ def html_escape:
   | gsub(">"; "&gt;")
   | gsub("\""; "&quot;")
   | gsub("'\''"; "&#39;");
-def sources_base:
-  .apt_source_uri
-  | sub("^mirror\\+"; "")
-  | sub("/mirror\\.list$"; "");
-def sources_cell:
-  . as $pkg
-  | ($pkg | sources_base) as $base
-  | ($pkg.ubuntu_series
-      | map("<a href=\"" + ($base + "/" + . + ".sources" | html_escape) + "\">" + (. | html_escape) + "</a>")
-      | join(" / "));
+def support:
+  (.ubuntu_series | join(", ")) + " · " + (.architectures | join(", "));
 if (.packages | length) == 0 then
   "<p>" + ($empty | sub("\n+$";"") | html_escape) + "</p>"
 else
   (
-    [
+    (if $cmd != "" then
+      ["<a id=\"apt-hub-add-source\"></a>", "<pre><code>" + ($cmd | html_escape) + "</code></pre>"]
+    else [] end)
+    + [
       "<table>",
-      "<thead><tr><th>软件</th><th>版本</th><th>Ubuntu</th><th>架构</th><th>最后更新UTC</th><th>简单说明</th><th>添加源配置</th><th>一键加源</th></tr></thead>",
+      "<thead><tr><th>软件</th><th>版本</th><th>支持环境</th><th>说明</th></tr></thead>",
       "<tbody>"
     ]
     + [
         .packages[]
-        | "<tr><td><a href=\"\(.release_url | html_escape)\">\(.package | html_escape)</a></td><td>\(.version | html_escape)</td><td>\(.ubuntu_series | join(", ") | html_escape)</td><td>\(.architectures | join(", ") | html_escape)</td><td>\(.updated_at | html_escape)</td><td>\(.description | html_escape)</td><td>\(sources_cell)</td><td>\(one_click_cell)</td></tr>"
+        | "<tr><td><a href=\"\(.release_url | html_escape)\">\(.package | html_escape)</a></td><td>\(.version | html_escape)</td><td>\(support | html_escape)</td><td>\(.description | html_escape)</td></tr>"
       ]
     + ["</tbody>", "</table>"]
   ) | join("\n")
@@ -342,6 +327,9 @@ fi
 if ! jq -e "$validate_jq" "$state" >/dev/null; then
   die "state.json 校验失败"
 fi
+if ! repo_cmd=$(jq -r "$site_cmd_jq" "$state"); then
+  die "混站根，拒绝渲染"
+fi
 
 work=""
 tmp_html=""
@@ -361,12 +349,19 @@ rows_md="$work/rows.md"
 body_html="$work/body.html"
 
 jq -r "$md_jq" "$state" >"$rows_md"
-jq -r --rawfile empty "$readme_empty" "$html_jq" "$state" >"$body_html"
+jq -r --rawfile empty "$readme_empty" --arg cmd "$repo_cmd" "$html_jq" "$state" >"$body_html"
 
 if [[ ! -s "$rows_md" ]]; then
   cat -- "$readme_empty" >"$section_md"
 else
-  cat -- "$readme_header" "$rows_md" >"$section_md"
+  {
+    if [[ -n "$repo_cmd" ]]; then
+      # shellcheck disable=SC2016 # Markdown 围栏字面量反引号
+      printf '<a id="apt-hub-add-source"></a>\n\n```bash\n%s\n```\n\n' "$repo_cmd"
+    fi
+    cat -- "$readme_header"
+    cat -- "$rows_md"
+  } >"$section_md"
   if [[ $(tail -c 1 "$section_md" | wc -l) -eq 0 ]]; then
     printf '\n' >>"$section_md"
   fi

@@ -1212,6 +1212,51 @@ write_state() {
     || die "生成 state.json 失败"
 }
 
+# 按已验证 state 的 id 序，把各软件 stanza 拼成 repos/<series>.sources。
+write_aggregate_series_sources() {
+  local work_dir="$1"
+  local state="${work_dir}/state.json"
+  local repos="${work_dir}/repos"
+  local series_file id_file series id src dest tmp sep
+  [[ -f "${state}" && ! -L "${state}" ]] || die "聚合 sources 缺少 state.json"
+  jq -e '.schema_version=="2" and (.packages|type)=="array"' "${state}" >/dev/null \
+    || die "聚合 sources 的 state 非法"
+  jq -e 'all(.packages[]; (.id|type)=="string" and (.ubuntu_series|type)=="array" and (.ubuntu_series|length)>0)' \
+    "${state}" >/dev/null || die "聚合 sources 的 state 条目缺 id 或 ubuntu_series"
+  series_file="${scratch}/aggregate-series.txt"
+  if ! jq -r '.packages[].ubuntu_series[]' "${state}" | awk 'NF' | sort -u >"${series_file}"; then
+    die "枚举聚合 series 失败"
+  fi
+  while IFS= read -r series || [[ -n "${series}" ]]; do
+    [[ -n "${series}" ]] || continue
+    [[ "${series}" =~ ${SERIES_NAME} ]] || die "聚合 series 非法: ${series}"
+    id_file="${scratch}/aggregate-ids-${series}.txt"
+    if ! jq -r --arg s "${series}" \
+      '.packages[] | select((.ubuntu_series|index($s))!=null) | .id' \
+      "${state}" >"${id_file}"; then
+      die "枚举聚合软件失败: ${series}"
+    fi
+    [[ -s "${id_file}" ]] || die "聚合 series 无软件: ${series}"
+    dest="${repos}/${series}.sources"
+    tmp="${scratch}/aggregate-${series}.sources"
+    : >"${tmp}"
+    sep=0
+    while IFS= read -r id || [[ -n "${id}" ]]; do
+      [[ -n "${id}" ]] || continue
+      assert_safe_package_id "${id}" "聚合 id"
+      src="${repos}/${id}/${series}.sources"
+      [[ -f "${src}" && ! -L "${src}" ]] || die "聚合缺少已生成 sources: ${id}/${series}"
+      if [[ "${sep}" -eq 1 ]]; then
+        printf '\n' >>"${tmp}" || die "写入聚合分隔失败: ${series}"
+      fi
+      cat -- "${src}" >>"${tmp}" || die "读取 sources 失败: ${src}"
+      sep=1
+    done <"${id_file}"
+    [[ -s "${tmp}" ]] || die "聚合 sources 为空: ${series}"
+    mv -- "${tmp}" "${dest}" || die "落盘聚合 sources 失败: ${series}"
+  done <"${series_file}"
+}
+
 copy_retained_repo() {
   local id="$1" prev_row="$2"
   local src="${previous}/repos/${id}"
@@ -1841,6 +1886,7 @@ if [[ ! -s "${state_rows}" ]]; then
 else
   write_state "${work}" "${state_rows}"
 fi
+write_aggregate_series_sources "${work}"
 
 without_xtrace gpg --homedir "${gnupghome}" --batch --export -- "${fingerprint}" >"${work}/apt-hub.gpg"
 [[ -s "${work}/apt-hub.gpg" ]] || die "导出公钥失败"

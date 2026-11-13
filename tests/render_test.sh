@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# 渲染脚本与 git_tag.sh 正反路径。证据只写本项目 tmp/metadata-B；不改主 README。
+# 渲染脚本与 git_tag.sh 正反路径。证据只写本项目 tmp/readme-all-sources/render；不改主 README。
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-EVIDENCE="$ROOT/tmp/metadata-B"
+EVIDENCE="$ROOT/tmp/readme-all-sources/render"
 RENDER="$ROOT/scripts/render.sh"
 GIT_TAG="$ROOT/git_tag.sh"
 BEGIN='<!-- APT-HUB:PACKAGES:BEGIN -->'
@@ -121,8 +121,6 @@ fi
 render_shellcheck=""
 if command -v shellcheck >/dev/null 2>&1; then
   render_shellcheck="$(command -v shellcheck)"
-elif [[ -x "$ROOT/tmp/go-final-parent/bin/shellcheck" ]]; then
-  render_shellcheck="$ROOT/tmp/go-final-parent/bin/shellcheck"
 fi
 if [[ -n "$render_shellcheck" ]]; then
   set +e
@@ -237,11 +235,15 @@ assert_file_lacks "empty readme no fake version" "$empty_readme" "1.5.0"
 assert_file_lacks "empty readme no https" "$empty_readme" "https://"
 assert_file_lacks "empty readme no http" "$empty_readme" "http://"
 assert_file_lacks "empty readme no mirror+" "$empty_readme" "mirror+"
+assert_file_lacks "empty readme no command" "$empty_readme" "curl -fsSL"
+assert_file_lacks "empty readme no software" "$empty_readme" "--software"
 assert_file_has "empty html message" "$empty_site/index.html" "尚未完成首次发布"
 assert_file_lacks "empty html no table row" "$empty_site/index.html" "<tbody>"
 assert_file_lacks "empty html no https" "$empty_site/index.html" "https://"
 assert_file_lacks "empty html no http" "$empty_site/index.html" "http://"
 assert_file_lacks "empty html no mirror+" "$empty_site/index.html" "mirror+"
+assert_file_lacks "empty html no command" "$empty_site/index.html" "curl -fsSL"
+assert_file_lacks "empty html no pre" "$empty_site/index.html" "<pre>"
 assert_file_lacks "empty html no fake version" "$empty_site/index.html" "1.5.0"
 if head -n 1 -- "$empty_site/index.html" | grep -qx '<!DOCTYPE html>'; then
   pass "empty html starts with doctype"
@@ -274,34 +276,48 @@ assert_file_has "two md alpha version" "$readme_two" "1.0.0"
 assert_file_has "two md beta version" "$readme_two" "2.1.3"
 assert_file_has "two md jammy noble" "$readme_two" "jammy, noble"
 assert_file_has "two md amd64 arm64" "$readme_two" "amd64, arm64"
-assert_file_has "two md updated" "$readme_two" "2026-11-02T00:00:00Z"
+assert_file_has "two md alpha env" "$readme_two" "jammy, noble · amd64, arm64"
+assert_file_has "two md beta env" "$readme_two" "noble · amd64"
+assert_file_has "two md support header" "$readme_two" "支持环境"
+assert_file_lacks "two md 不展示更新时间" "$readme_two" "2026-11-02T00:00:00Z"
 assert_file_has "two md desc" "$readme_two" "测试软件甲"
 assert_file_has "two md release link" "$readme_two" "https://github.com/example/alpha-app/releases/tag/1.0.0"
-assert_file_has "two md alpha jammy sources" "$readme_two" "https://apt.example.test/repos/alpha-app/jammy.sources"
-assert_file_has "two md alpha noble sources" "$readme_two" "https://apt.example.test/repos/alpha-app/noble.sources"
-assert_file_has "two md beta noble sources" "$readme_two" "https://apt.example.test/repos/beta-tool/noble.sources"
-assert_file_has "two md sources header" "$readme_two" "添加源配置"
-assert_file_has "two md one-click header" "$readme_two" "一键加源"
-alpha_command="curl -fsSL --proto '=https' --proto-redir '=https' -o add_source.sh 'https://apt.example.test/add_source.sh' && chmod a+x ./add_source.sh && sudo ./add_source.sh --site-url 'https://apt.example.test' --software 'alpha-app'"
-alpha_code="<code>${alpha_command//&/\&amp;}</code>"
-alpha_code=${alpha_code//\'/\&#39;}
-assert_file_has "two md 可复制安全命令" "$readme_two" "\`$alpha_command\`"
-assert_file_has "two html 可复制安全命令" "$site_two/index.html" "$alpha_code"
-# shellcheck disable=SC2016 # Markdown 代码跨度的字面量反引号
-assert_eq "two md 每软件恰一命令" "$(grep -o '`curl -fsSL ' "$readme_two" | wc -l)" "2"
-assert_eq "two html 每软件恰一命令" "$(grep -o '<code>curl -fsSL ' "$site_two/index.html" | wc -l)" "2"
+assert_file_lacks "two md 无 sources" "$readme_two" ".sources"
+assert_file_lacks "two md 无旧添加源列" "$readme_two" "添加源配置"
+assert_file_lacks "two md 无旧一键列" "$readme_two" "一键加源"
+repo_command="curl -fsSL --proto '=https' --proto-redir '=https' -o add_source.sh 'https://apt.example.test/add_source.sh' && chmod a+x ./add_source.sh && sudo ./add_source.sh --site-url 'https://apt.example.test'"
+html_command=${repo_command//&/\&amp;}
+html_command=${html_command//\'/\&#39;}
+assert_file_has "two md 锚点" "$readme_two" '<a id="apt-hub-add-source"></a>'
+assert_file_has "two md 仓库命令" "$readme_two" "$repo_command"
+assert_file_has "two html 仓库命令" "$site_two/index.html" "<pre><code>${html_command}</code></pre>"
+assert_file_has "two html 锚点" "$site_two/index.html" '<a id="apt-hub-add-source"></a>'
+assert_eq "two md 恰一命令" "$(grep -F -o -- 'curl -fsSL ' "$readme_two" | wc -l)" "1"
+assert_eq "two html 恰一代码块" "$(grep -F -o -- '<pre><code>' "$site_two/index.html" | wc -l)" "1"
+assert_file_lacks "two md 无 software" "$readme_two" "--software"
+assert_file_lacks "two html 无 software" "$site_two/index.html" "--software"
+assert_file_lacks "two html 无双编码引号" "$site_two/index.html" "&amp;#39;"
+assert_file_lacks "two html 无 apos" "$site_two/index.html" "&amp;apos;"
+assert_file_lacks "two html 无双编码与号" "$site_two/index.html" "&amp;amp;"
+assert_eq "two html 与号只转一次" "$(grep -F -o -- '&amp;&amp;' "$site_two/index.html" | wc -l)" "2"
 assert_file_lacks "two md 不管道提权" "$readme_two" "| sudo"
 assert_file_lacks "two html 不管道提权" "$site_two/index.html" "| sudo"
+if grep -E '^\|' "$readme_two" | grep -F -q -- 'curl'; then
+  fail "two 表内含命令"
+else
+  pass "two 表内无命令"
+fi
 assert_file_lacks "two md no pool path" "$readme_two" "pool/"
 assert_file_lacks "two md no mirror.list" "$readme_two" "mirror.list"
 assert_file_lacks "two md no fake rustdesk" "$readme_two" "1.5.0"
 assert_file_has "two html alpha" "$site_two/index.html" "alpha-app"
 assert_file_has "two html beta" "$site_two/index.html" "beta-tool"
 assert_file_has "two html arch" "$site_two/index.html" "amd64, arm64"
-assert_file_has "two html sources header" "$site_two/index.html" "添加源配置"
-assert_file_has "two html alpha jammy sources" "$site_two/index.html" "https://apt.example.test/repos/alpha-app/jammy.sources"
-assert_file_has "two html alpha noble sources" "$site_two/index.html" "https://apt.example.test/repos/alpha-app/noble.sources"
-assert_file_has "two html beta noble sources" "$site_two/index.html" "https://apt.example.test/repos/beta-tool/noble.sources"
+assert_file_has "two html support header" "$site_two/index.html" "支持环境"
+assert_file_has "two html alpha env" "$site_two/index.html" "jammy, noble · amd64, arm64"
+assert_file_lacks "two html 无 sources" "$site_two/index.html" ".sources"
+assert_file_lacks "two html 无旧添加源列" "$site_two/index.html" "添加源配置"
+assert_file_lacks "two html 无更新列" "$site_two/index.html" "最后更新"
 assert_file_has "two html no js" "$site_two/index.html" "静态展示"
 assert_file_lacks "two html no script" "$site_two/index.html" "<script"
 assert_file_lacks "two html no form" "$site_two/index.html" "<form"
@@ -353,14 +369,21 @@ http_readme="$EVIDENCE/README.http.md"
 mkdir -p -- "$http_site"
 make_readme "$http_readme"
 run_expect "render_http_mirror" 0 "$RENDER" --state "$http_state" --readme "$http_readme" --site "$http_site"
-assert_file_has "http md jammy sources" "$http_readme" "http://127.0.0.1:9/repos/alpha-app/jammy.sources"
-assert_file_has "http html jammy sources" "$http_site/index.html" "http://127.0.0.1:9/repos/alpha-app/jammy.sources"
+assert_file_has "http md alpha" "$http_readme" "alpha-app"
+assert_file_has "http md version" "$http_readme" "1.0.0"
+assert_file_has "http md env" "$http_readme" "jammy, noble · amd64, arm64"
+assert_file_has "http html alpha" "$http_site/index.html" "alpha-app"
+assert_file_lacks "http md 无 sources" "$http_readme" ".sources"
+assert_file_lacks "http html 无 sources" "$http_site/index.html" ".sources"
 assert_file_lacks "http md 无 mirror+" "$http_readme" "mirror+"
 assert_file_lacks "http html 无 mirror+" "$http_site/index.html" "mirror+"
-assert_file_has "http md 不支持一键" "$http_readme" "HTTP 夹具不支持一键加源"
-assert_file_has "http html 不支持一键" "$http_site/index.html" "HTTP 夹具不支持一键加源"
 assert_file_lacks "http md 不生成命令" "$http_readme" "curl -fsSL"
 assert_file_lacks "http html 不生成命令" "$http_site/index.html" "curl -fsSL"
+assert_file_lacks "http md 无 sudo" "$http_readme" "sudo"
+assert_file_lacks "http html 无 sudo" "$http_site/index.html" "sudo"
+assert_file_lacks "http md 无 software" "$http_readme" "--software"
+assert_file_lacks "http html 无 software" "$http_site/index.html" "--software"
+assert_file_lacks "http html 无代码块" "$http_site/index.html" "<pre>"
 
 path_state="$EVIDENCE/state_site_path.json"
 jq '.packages |= [.[0] | .id="my_app.v1" | .apt_source_uri="mirror+https://apt.example.test:8443/team/site_v2/repos/my_app.v1/mirror.list"]' \
@@ -371,8 +394,29 @@ mkdir -p -- "$path_site"
 make_readme "$path_readme"
 run_expect "render_site_path" 0 "$RENDER" --state "$path_state" --readme "$path_readme" --site "$path_site"
 assert_file_has "path md 精确站点根下载" "$path_readme" "https://apt.example.test:8443/team/site_v2/add_source.sh"
-assert_file_has "path html 安全还原根与 id" "$path_site/index.html" "--site-url &#39;https://apt.example.test:8443/team/site_v2&#39; --software &#39;my_app.v1&#39;"
-assert_file_has "path md 保留手动源链接" "$path_readme" "https://apt.example.test:8443/team/site_v2/repos/my_app.v1/jammy.sources"
+assert_file_has "path html 安全还原根" "$path_site/index.html" "--site-url &#39;https://apt.example.test:8443/team/site_v2&#39;"
+assert_file_lacks "path md 无 software" "$path_readme" "--software"
+assert_file_lacks "path html 无 software" "$path_site/index.html" "--software"
+assert_file_lacks "path md 无 sources" "$path_readme" ".sources"
+assert_file_lacks "path html 无双编码引号" "$path_site/index.html" "&amp;#39;"
+
+mix_state="$EVIDENCE/state_mixed_root.json"
+jq '.packages[1].apt_source_uri="mirror+https://other.example.test/repos/beta-tool/mirror.list"' \
+  "$two_state" >"$mix_state"
+mix_site="$EVIDENCE/site-mix"
+mix_readme="$EVIDENCE/README.mix.md"
+mkdir -p -- "$mix_site"
+make_readme "$mix_readme"
+printf 'OLDHTML\n' >"$mix_site/index.html"
+mix_readme_hash=$(hash_file "$mix_readme")
+mix_html_hash=$(hash_file "$mix_site/index.html")
+mix_state_hash=$(hash_file "$mix_state")
+run_expect "reject_mixed_site_root" 1 "$RENDER" --state "$mix_state" --readme "$mix_readme" --site "$mix_site"
+assert_same_hash "混根未改 README" "$mix_readme" "$mix_readme_hash"
+assert_same_hash "混根未改 html" "$mix_site/index.html" "$mix_html_hash"
+assert_same_hash "混根不改 state" "$mix_state" "$mix_state_hash"
+assert_no_workdir "混根无 work 目录" "$mix_site"
+assert_file_lacks "混根未写第二站" "$mix_readme" "other.example.test"
 
 slash_state="$EVIDENCE/state_slash_filename.json"
 jq '.packages[0].assets[0].filename="/example/alpha-app/releases/download/1.0.0/alpha-app_1.0.0_amd64.deb"' \
@@ -404,7 +448,9 @@ assert_file_has "inject html escaped quote" "$inject_site/index.html" "&quot;quo
 # shellcheck disable=SC2016 # fixture 字面量，故意单引号
 assert_file_has "inject html literal tick" "$inject_site/index.html" '`code`'
 assert_file_has "inject html literal star" "$inject_site/index.html" '*bold*'
-assert_file_has "inject html sources still linked" "$inject_site/index.html" "https://apt.example.test/repos/alpha-app/jammy.sources"
+assert_file_has "inject html 命令引号一次编码" "$inject_site/index.html" "&#39;https://apt.example.test&#39;"
+assert_file_lacks "inject html 命令不双编码" "$inject_site/index.html" "&amp;#39;"
+assert_file_lacks "inject html 命令不用 apos" "$inject_site/index.html" "&amp;apos;"
 assert_file_lacks "inject md raw script" "$inject_readme" "<script"
 assert_file_lacks "inject md raw img" "$inject_readme" "<img"
 assert_file_lacks "inject md raw lt-app" "$inject_readme" "alpha<app>"
@@ -421,7 +467,7 @@ assert_file_has "inject md escaped quote" "$inject_readme" "&quot;quotes&quot;"
 inject_row=$(grep -F 'alpha&lt;app&gt;' "$inject_readme" || true)
 inject_plain=${inject_row//\\|/}
 inject_pipe_chars=${inject_plain//[!|]/}
-assert_eq "inject md 表行列数" "${#inject_pipe_chars}" "9"
+assert_eq "inject md 表行列数" "${#inject_pipe_chars}" "5"
 
 # 失败不得覆盖已有 README/页面；哨兵为原始目标 sha256。
 bad_site="$EVIDENCE/site-bad"
@@ -664,7 +710,7 @@ else
 fi
 assert_no_workdir "dangling index 无 work 目录" "$dangle_site"
 
-# git_tag.sh：手动入口一律拒绝；auto/push 见 release_test。
+# git_tag.sh：手动入口一律拒绝。无参数入口由脏工作区用例覆盖。
 tag_repo="$EVIDENCE/tag-repo"
 mkdir -p -- "$tag_repo"
 git init --quiet "$tag_repo"
@@ -680,12 +726,16 @@ else
   pass "手动入口未创建标签"
 fi
 printf 'dirty\n' >"$tag_repo/dirty.txt"
-run_expect "git_tag_dirty" 1 bash -c "cd \"$tag_repo\" && \"$GIT_TAG\" auto"
+run_expect "git_tag_dirty" 1 bash -c "cd \"$tag_repo\" && \"$GIT_TAG\""
 rm -f -- "$tag_repo/dirty.txt"
 run_expect "git_tag_force_flag" 1 bash -c "cd \"$tag_repo\" && \"$GIT_TAG\" --version 0.1.0 --force"
 run_expect "git_tag_unknown" 1 bash -c "cd \"$tag_repo\" && \"$GIT_TAG\" bogus-mode"
 
-if grep -E -q -- 'tag[[:space:]]+-f[[:space:]]+latest|git[[:space:]]+push[[:space:]].*--delete|[[:space:]]git[[:space:]]+add[[:space:]]+-A'; then
+if awk '
+  /^[[:space:]]*#/ { next }
+  /tag[[:space:]]+-f[[:space:]]+latest/ || /git[[:space:]]+push[[:space:]].*--delete/ || /(^|[[:space:]])git[[:space:]]+add[[:space:]]+-A/ { found = 1 }
+  END { exit !found }
+' "$GIT_TAG"; then
   fail "git_tag.sh 仍含 latest 强移/删远端/add -A"
 else
   pass "git_tag.sh 无 latest 强移与 add -A"

@@ -14,7 +14,29 @@
 - `architectures`：Debian 架构到发布资产名称正则的对应关系；每个架构必须唯一匹配一个真实 `.deb`。首版支持 `amd64`、`arm64`，不代表 Ubuntu 或上游支持的全部架构。
 - `ubuntu_series`：`"supported"` 表示当前标准支持集合；也可填写明确的 Ubuntu 代号数组，但必须是该集合的子集。上游有限制时应收窄，不能因本机能下载就任意扩大。
 
-清单新增后，下一次定时或手动同步会重新纳入全部配置软件。版本、包大小和摘要不手工写进清单；它们从官方发布及实际包元数据获取。官方资产没有 SHA256 digest、匹配歧义、包身份不符或同版本被替换时明确失败，不以自己计算的摘要冒充官方摘要。
+清单新增后，下一次发布会纳入新软件，并从相同的已发布状态生成各 Ubuntu 代号的 `repos/<代号>.sources` 聚合配置；存量使用者重跑同一加源命令即可纳入。版本、包大小和摘要由官方发布及实际包元数据取得，不手填。
+
+### 新增软件
+
+官方已有 `.deb` 时，将下面的对象加入 `config/packages.json` 的 `packages` 数组，保留已有条目，按真实信息替换占位值：
+
+```json
+{
+  "id": "example-app",
+  "repository": "official-owner/example-app",
+  "package": "example-app",
+  "description": "软件用途的简短说明",
+  "source_url": "https://github.com/official-owner/example-app",
+  "license": "MIT",
+  "ubuntu_series": "supported",
+  "architectures": {
+    "amd64": "^example-app_[0-9.]+_amd64\\.deb$",
+    "arm64": "^example-app_[0-9.]+_arm64\\.deb$"
+  }
+}
+```
+
+`id` 以 ASCII 字母或数字开头，只含字母、数字、`_`、`.`、`-`，且不能含 `..`；每个架构的正则必须恰好匹配一个官方正式版 `.deb`。缺官方 SHA256 digest、匹配不唯一、包身份不符或同版本换字节时拒绝发布。上游只有归档时，在 `scripts/` 实现具体构包处理并接入 `gen_debs.sh`，不复制发布流程或在客户端联网安装主程序。
 
 ## 发布数据与列表
 
@@ -37,9 +59,9 @@ bash scripts/update_sources.sh --catalog config/packages.json --previous tmp/pre
 
 以上地址、版本和指纹均需替换；`tmp/previous` 须为已有发布快照或首次使用的空目录，工作目录必须是新建或空目录。本仓 `vX.Y.Z` 必须已有该版的构造包与来源记录，不能仅凭本地产物声称已发布。Go 入口包依赖同版本工具链，控制字段为 `2:上游版本-修订`；这些软件版本不是本仓 Release 标签。
 
-`git_tag.sh auto` 触发同一条三段式发布链；`build.sh` 调用 `gen_debs.sh` 按清单处理软件，Go 专用格式转换位于 `scripts/gen_deb_golang.sh`。官方已有 `.deb` 只发现和核验官方发布，不转存；构造包、`<软件id>.provenance.json` 与 `SHA256SUMS` 才进入 `build/upload_tmp_dir/`，直接上传到对应本仓版本的 assets。归档、内部索引、日志和测试不进入发布成果。Pages 复用 `apt-data` 产物分支发布，只保存公开站点与签名索引，不走 Actions Artifacts，也不再另建站点副本。
+`git_tag.sh`（无参数默认为 `auto`）触发同一条三段式发布链；`build.sh` 调用 `gen_debs.sh` 按清单处理软件，Go 专用格式转换位于 `scripts/gen_deb_golang.sh`。官方已有 `.deb` 只发现和核验官方发布，不转存；构造包、`<软件id>.provenance.json` 与 `SHA256SUMS` 才进入 `build/upload_tmp_dir/`，直接上传到对应本仓版本的 assets。归档、内部索引、日志和测试不进入发布成果。Pages 复用 `apt-data` 产物分支发布，只保存公开站点与签名索引，不走 Actions Artifacts，也不再另建站点副本。
 
-签名私钥生成、备份、换钥和客户端报错修复统一见 [README](../README.md#维护者首次启用与签名密钥)。只更新同一个 `APT_HUB_GPG_PRIVATE_KEY` Secret；换钥时显式提供旧完整指纹，客户端显式核对新完整指纹。
+签名私钥生成、备份、换钥和客户端报错修复见[使用与部署](nees_user_read.md#恢复与换钥)。只更新同一个 `APT_HUB_GPG_PRIVATE_KEY` Secret。
 
 ## 本地验证
 
@@ -60,7 +82,7 @@ bash tests/sync_test.sh && bash tests/render_test.sh && bash tests/workflow_test
 `VERSION` 只属于维护脚本，禁止手工修改。统一通过下列命令自动递增、生成变更记录、提交、打标签并推送：
 
 ```bash
-bash git_tag.sh auto
+bash git_tag.sh
 ```
 
 首次脚本标签为 `v0.0.1`；以后末段逐次加 1，超过 `999` 向前进位。不手填版本、不重写已有标签。Actions 沿母版三段式，仅适配构包扩展、依赖和产物路径；软件源日常更新不递增维护脚本版本。真实发版须经用户明确授权。
