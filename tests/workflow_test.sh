@@ -85,7 +85,7 @@ export GITHUB_REPOSITORY=example/apt-hub GITHUB_API_URL=https://api.github.com
 export GITHUB_ACTOR=fixture-human GITHUB_ACTOR_ID=12345
 export GITHUB_OUTPUT="${WORK}/outputs"
 export PATH="${WORK}/bin:${PATH}"
-export APT_DATA_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+export APT_HUB_PAGES_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 export SITE_URL=https://packages.example.test
 printf '%s\n' '{"login":"fixture-human","id":12345,"type":"User"}' >"${WORK}/actor.json"
 printf '200\n' >"${WORK}/pages.status"
@@ -97,15 +97,15 @@ git init --bare "${WORK}/origin.git" >/dev/null
 git -C "${WORK}" remote add origin "${WORK}/origin.git"
 git -C "${WORK}" push -q origin HEAD:refs/heads/main
 seed="$(mktemp -d "${WORK}/tmp/seed.XXXXXX")"
-git -C "${seed}" init -b apt-data >/dev/null
+git -C "${seed}" init -b apt-hub-pages >/dev/null
 : >"${seed}/.nojekyll"
 git -C "${seed}" add -- .nojekyll
 git -C "${seed}" -c user.name=fixture -c user.email=fixture@invalid commit -m site >/dev/null
 git -C "${seed}" remote add origin "${WORK}/origin.git"
-git -C "${seed}" push -q origin HEAD:refs/heads/apt-data
+git -C "${seed}" push -q origin HEAD:refs/heads/apt-hub-pages
 seed_sha="$(git -C "${seed}" rev-parse HEAD)"
 rm -rf -- "${seed}"
-printf '%s\n' '{"html_url":"http://packages.example.test/","build_type":"legacy","source":{"branch":"apt-data","path":"/"},"cname":"packages.example.test"}' >"${WORK}/pages.json"
+printf '%s\n' '{"html_url":"http://packages.example.test/","build_type":"legacy","source":{"branch":"apt-hub-pages","path":"/"},"cname":"packages.example.test"}' >"${WORK}/pages.json"
 printf '%s\n' '{"url":"https://api.github.com/repos/example/apt-hub/pages/builds/123"}' >"${WORK}/build-request.json"
 printf '%s\n' '{"status":"built","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' >"${WORK}/build-result.json"
 printf '%s\n' '{"schema_version":"2","packages":[]}' >"${WORK}/tmp/site/state.json"
@@ -122,9 +122,9 @@ if grep -Fxq 'git_email=12345+fixture-human@users.noreply.github.com' "${GITHUB_
 cp "${WORK}/pages.json" "${WORK}/pages-good.json"
 printf '%s\n' '{"html_url":"https://packages.example.test","build_type":"workflow","source":{"branch":"main","path":"/"}}' >"${WORK}/pages.json"
 expect pages_wrong_source 1 run preflight
-printf '%s\n' '{"html_url":null,"build_type":"legacy","source":{"branch":"apt-data","path":"/"}}' >"${WORK}/pages.json"
+printf '%s\n' '{"html_url":null,"build_type":"legacy","source":{"branch":"apt-hub-pages","path":"/"}}' >"${WORK}/pages.json"
 expect pages_null_url 1 run preflight
-printf '%s\n' '{"html_url":"https://packages.example.test\nother=x","build_type":"legacy","source":{"branch":"apt-data","path":"/"}}' >"${WORK}/pages.json"
+printf '%s\n' '{"html_url":"https://packages.example.test\nother=x","build_type":"legacy","source":{"branch":"apt-hub-pages","path":"/"}}' >"${WORK}/pages.json"
 expect pages_newline_url 1 run preflight
 cp "${WORK}/pages-good.json" "${WORK}/pages.json"
 printf '%s\n' '{"login":"fixture-human","id":12345,"type":"Bot"}' >"${WORK}/actor.json"
@@ -132,12 +132,12 @@ expect actor_bot 1 run preflight
 printf '%s\n' '{"login":"fixture-human","id":54321,"type":"User"}' >"${WORK}/actor.json"
 expect actor_id_mismatch 1 run preflight
 printf '%s\n' '{"login":"fixture-human","id":12345,"type":"User"}' >"${WORK}/actor.json"
-if [[ "$(git --git-dir="${WORK}/origin.git" rev-parse refs/heads/apt-data)" == "${seed_sha}" ]]; then
-  pass '已有 apt-data 未被 preflight 改写'
+if [[ "$(git --git-dir="${WORK}/origin.git" rev-parse refs/heads/apt-hub-pages)" == "${seed_sha}" ]]; then
+  pass '已有 apt-hub-pages 未被 preflight 改写'
 else
-  fail 'preflight 改写了已有 apt-data'
+  fail 'preflight 改写了已有 apt-hub-pages'
 fi
-if grep -Fq '产物分支 apt-data 已就绪' "${WORK}/pages_wrong_source.log"; then
+if grep -Fq '产物分支 apt-hub-pages 已就绪' "${WORK}/pages_wrong_source.log"; then
   pass '源未选对时提示分支已就绪'
 else
   fail '源未选对时未提示分支已就绪'
@@ -151,16 +151,16 @@ export GIT_AUTHOR_NAME=decoy GIT_AUTHOR_EMAIL=decoy@invalid
 export GIT_COMMITTER_NAME=decoy GIT_COMMITTER_EMAIL=decoy@invalid
 expect pages_unconfigured 1 run preflight
 unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
-if grep -Fq '产物分支 apt-data 已就绪' "${WORK}/pages_unconfigured.log" \
-  && ! grep -Fq 'state.json' <<<"$(git --git-dir="${WORK}/origin-404.git" ls-tree -r --name-only refs/heads/apt-data)" \
-  && [[ "$(git --git-dir="${WORK}/origin-404.git" ls-tree -r --name-only refs/heads/apt-data)" == ".nojekyll" ]]; then
+if grep -Fq '产物分支 apt-hub-pages 已就绪' "${WORK}/pages_unconfigured.log" \
+  && ! grep -Fq 'state.json' <<<"$(git --git-dir="${WORK}/origin-404.git" ls-tree -r --name-only refs/heads/apt-hub-pages)" \
+  && [[ "$(git --git-dir="${WORK}/origin-404.git" ls-tree -r --name-only refs/heads/apt-hub-pages)" == ".nojekyll" ]]; then
   pass '404 只准备 .nojekyll，不发假 state'
 else
   fail '404 未只准备 .nojekyll'
 fi
-ready_sha="$(git --git-dir="${WORK}/origin-404.git" rev-parse refs/heads/apt-data)"
-author="$(git --git-dir="${WORK}/origin-404.git" log -1 --format='%an <%ae>' refs/heads/apt-data)"
-committer="$(git --git-dir="${WORK}/origin-404.git" log -1 --format='%cn <%ce>' refs/heads/apt-data)"
+ready_sha="$(git --git-dir="${WORK}/origin-404.git" rev-parse refs/heads/apt-hub-pages)"
+author="$(git --git-dir="${WORK}/origin-404.git" log -1 --format='%an <%ae>' refs/heads/apt-hub-pages)"
+committer="$(git --git-dir="${WORK}/origin-404.git" log -1 --format='%cn <%ce>' refs/heads/apt-hub-pages)"
 ident='fixture-human <12345+fixture-human@users.noreply.github.com>'
 if [[ "${author}" == "${ident}" && "${committer}" == "${ident}" ]]; then
   pass '404 分支 author 与 committer 都是已核验发布者'
@@ -177,8 +177,8 @@ fi
 printf '403\n' >"${WORK}/pages.status"
 expect pages_forbidden 1 run preflight
 if grep -Fq '读取 Pages 失败（权限或网络），不能当作未启用' "${WORK}/pages_forbidden.log" \
-  && ! grep -Fq '产物分支 apt-data 已就绪' "${WORK}/pages_forbidden.log" \
-  && [[ "$(git --git-dir="${WORK}/origin-404.git" rev-parse refs/heads/apt-data)" == "${ready_sha}" ]]; then
+  && ! grep -Fq '产物分支 apt-hub-pages 已就绪' "${WORK}/pages_forbidden.log" \
+  && [[ "$(git --git-dir="${WORK}/origin-404.git" rev-parse refs/heads/apt-hub-pages)" == "${ready_sha}" ]]; then
   pass '403 不当成未启用，且不改已有分支'
 else
   fail '403 被当成未启用或改写了分支'
@@ -365,13 +365,13 @@ git -C "${chain}" -c user.name=fixture-publisher -c user.email=fixture-publisher
 git init --bare "${chain}.git" >/dev/null
 git -C "${chain}" remote add origin "${chain}.git"
 git -C "${chain}" push -q origin main
-git -C "${chain}" checkout -q --orphan apt-data
+git -C "${chain}" checkout -q --orphan apt-hub-pages
 git -C "${chain}" rm -rfq . >/dev/null 2>&1 || true
 printf '%s\n' '{"schema_version":"2","packages":[]}' >"${chain}/state.json"
 git -C "${chain}" add -- state.json
-git -C "${chain}" -c user.name=fixture-publisher -c user.email=fixture-publisher@invalid commit -m 'apt-data' >/dev/null
+git -C "${chain}" -c user.name=fixture-publisher -c user.email=fixture-publisher@invalid commit -m 'apt-hub-pages' >/dev/null
 chain_sha="$(git -C "${chain}" rev-parse HEAD)"
-git -C "${chain}" push -q origin apt-data
+git -C "${chain}" push -q origin apt-hub-pages
 git -C "${chain}" checkout -q --detach main
 export CAPTURE="${chain}/tmp/render.args"
 rm -f -- "${CAPTURE}"
@@ -380,7 +380,7 @@ miss_rc=0
   cd -- "${chain}"
   env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
     APT_HUB_GIT_NAME=fixture-publisher APT_HUB_GIT_EMAIL=fixture-publisher@invalid \
-    APT_DATA_SHA="${chain_sha}" GITHUB_REPOSITORY=example/apt-hub \
+    APT_HUB_PAGES_SHA="${chain_sha}" GITHUB_REPOSITORY=example/apt-hub \
     bash scripts/publish_apt_site.sh update-readme
 ) >"${chain}/miss.log" 2>&1 || miss_rc=$?
 if [[ "${miss_rc}" -ne 0 && ! -e "${CAPTURE}" ]]; then
@@ -394,7 +394,7 @@ ok_rc=0
   cd -- "${chain}"
   env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
     APT_HUB_GIT_NAME=fixture-publisher APT_HUB_GIT_EMAIL=fixture-publisher@invalid \
-    APT_DATA_SHA="${chain_sha}" GITHUB_REPOSITORY=example/apt-hub RELEASE_TAG=v7.7.7 \
+    APT_HUB_PAGES_SHA="${chain_sha}" GITHUB_REPOSITORY=example/apt-hub RELEASE_TAG=v7.7.7 \
     bash scripts/publish_apt_site.sh update-readme
 ) >"${chain}/ok.log" 2>&1 || ok_rc=$?
 ok_args="$(cat "${CAPTURE}" 2>/dev/null || true)"

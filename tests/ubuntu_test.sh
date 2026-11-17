@@ -741,19 +741,19 @@ else
   fail "缺少 1GB 上限"
 fi
 if grep -Fq 'names=(.nojekyll CNAME apt-hub.gpg state.json index.html add_source.sh repos)' "$SITE"; then
-  pass "apt-data 白名单为元数据与单一公开加源脚本"
+  pass "apt-hub-pages 白名单为元数据与单一公开加源脚本"
 else
-  fail "apt-data 白名单不是 gpg/state/index/add_source.sh/repos"
+  fail "apt-hub-pages 白名单不是 gpg/state/index/add_source.sh/repos"
 fi
 if grep -E 'names=\(.*pool|tmp/site/pool' "$SITE"; then
-  fail "apt-data 白名单仍含 pool"
+  fail "apt-hub-pages 白名单仍含 pool"
 else
   pass "保存路径不再要求 pool"
 fi
 if grep -Fq 'git add -A' "$SITE"; then
-  fail "apt-data 保存仍 git add -A"
+  fail "apt-hub-pages 保存仍 git add -A"
 else
-  pass "apt-data 保存无 git add -A"
+  pass "apt-hub-pages 保存无 git add -A"
 fi
 if awk '
   /^publish\(\)/ {active=1}
@@ -765,10 +765,10 @@ if awk '
 else
   fail "README 回写不在 deploy 之后"
 fi
-if grep -Fq 'apt_data_sha' "$SITE"; then
-  pass "build 输出已保存 apt-data SHA"
+if grep -Fq 'apt_hub_pages_sha' "$SITE"; then
+  pass "build 输出已保存 apt-hub-pages SHA"
 else
-  fail "缺少 apt_data_sha 输出"
+  fail "缺少 apt_hub_pages_sha 输出"
 fi
 if grep -Fq "git show \"\${sha}:state.json\"" "$SITE" \
   && grep -Fq "git worktree add --detach \"\${work}\" refs/remotes/origin/main" "$SITE" \
@@ -777,10 +777,10 @@ if grep -Fq "git show \"\${sha}:state.json\"" "$SITE" \
 else
   fail "README 未从 main 回写或仍推 detached HEAD"
 fi
-if grep -Fq 'git archive origin/apt-data' "$SITE"; then
-  fail "README 仍 archive 当时最新 apt-data"
+if grep -Fq 'git archive origin/apt-hub-pages' "$SITE"; then
+  fail "README 仍 archive 当时最新 apt-hub-pages"
 else
-  pass "README 不取 apt-data 最新 tip"
+  pass "README 不取 apt-hub-pages 最新 tip"
 fi
 if sed -n '/^on:/,/^permissions:/p' "$PUB" | grep -q 'workflow_dispatch:' \
   && sed -n '/^on:/,/^permissions:/p' "$PUB" | grep -q 'schedule:' \
@@ -996,8 +996,8 @@ isolated_save() {
         GITHUB_SERVER_URL="${server_url}" \
         GITHUB_REPOSITORY="${repo_name}" \
         GITHUB_OUTPUT="${sandbox}/github-output.txt" \
-        bash scripts/publish_apt_site.sh save-apt-data
-      sed -n "s/^apt_data_sha=//p" "${sandbox}/github-output.txt" >"${out}"
+        bash scripts/publish_apt_site.sh save-apt-hub-pages
+      sed -n "s/^apt_hub_pages_sha=//p" "${sandbox}/github-output.txt" >"${out}"
     ' >"${log}" 2>&1 || rc=$?
   return "${rc}"
 }
@@ -1014,7 +1014,7 @@ make_git_site "$sandbox/tmp/site" v1
 mkdir -p "$sandbox/tmp/gnupg"
 printf '%s\n' '-----BEGIN PGP PRIVATE KEY BLOCK-----' 'secret' >"$sandbox/tmp/gnupg/private.key"
 printf 'should-not-be-saved\n' >"$sandbox/tmp/site/not-whitelisted.txt"
-: >"$sandbox/tmp/apt-data-base.sha"
+: >"$sandbox/tmp/apt-hub-pages-base.sha"
 
 set +e
 isolated_save "$sandbox" "$origin" "$shafile" "$savelog"
@@ -1070,13 +1070,13 @@ if git --git-dir="$origin" ls-tree --name-only "$sha1" 2>/dev/null | grep -Eq 'n
 else
   pass "未知根文件与私钥未进入数据分支"
 fi
-if git -C "$sandbox/tmp/apt-data-git" config --local --get user.name >/dev/null 2>&1; then
+if git -C "$sandbox/tmp/apt-hub-pages-git" config --local --get user.name >/dev/null 2>&1; then
   fail "隔离保存写了 local user.name"
 else
   pass "隔离保存未写 git config user.name"
 fi
 
-printf '%s\n' "$sha1" >"$sandbox/tmp/apt-data-base.sha"
+printf '%s\n' "$sha1" >"$sandbox/tmp/apt-hub-pages-base.sha"
 make_git_site "$sandbox/tmp/site" v2
 printf 'should-not-be-saved\n' >"$sandbox/tmp/site/not-whitelisted.txt"
 set +e
@@ -1123,27 +1123,27 @@ fi
 side="$gs/side"
 rm -rf "$side"
 git clone -q "$origin" "$side" >/dev/null 2>"$gs/clone.err"
-git -C "$side" checkout -q apt-data >/dev/null
+git -C "$side" checkout -q apt-hub-pages >/dev/null
 jq '.packages[0].token="concurrent"' "$side/state.json" >"$side/state.json.tmp"
 mv "$side/state.json.tmp" "$side/state.json"
 git -C "$side" add -- state.json
 git -C "$side" \
   -c "user.name=$GIT_NAME" -c "user.email=$GIT_EMAIL" \
   commit -m "并发推进基线" >/dev/null
-git -C "$side" push -q origin apt-data >/dev/null 2>&1
-concurrent_sha=$(git --git-dir="$origin" rev-parse apt-data)
-printf '%s\n' "$sha2" >"$sandbox/tmp/apt-data-base.sha"
+git -C "$side" push -q origin apt-hub-pages >/dev/null 2>&1
+concurrent_sha=$(git --git-dir="$origin" rev-parse apt-hub-pages)
+printf '%s\n' "$sha2" >"$sandbox/tmp/apt-hub-pages-base.sha"
 make_git_site "$sandbox/tmp/site" v3
 set +e
 isolated_save "$sandbox" "$origin" "$shafile" "$savelog"
 save3_rc=$?
 set -e
-if [[ "$save3_rc" -ne 0 ]] && grep -Fq 'apt-data 非快进推送失败' "$savelog"; then
+if [[ "$save3_rc" -ne 0 ]] && grep -Fq 'apt-hub-pages 非快进推送失败' "$savelog"; then
   pass "基线被并发推进时普通推送拒绝 (exit $save3_rc)"
 else
   fail "并发推进未拒绝 rc=$save3_rc log=$(cat "$savelog" 2>/dev/null || true)"
 fi
-now_tip=$(git --git-dir="$origin" rev-parse apt-data)
+now_tip=$(git --git-dir="$origin" rev-parse apt-hub-pages)
 if [[ "$now_tip" == "$concurrent_sha" ]]; then
   pass "并发拒绝后远端仍是并发提交"
 else
@@ -1153,28 +1153,28 @@ fi
 dirty_side="$gs/dirty"
 rm -rf "$dirty_side"
 git clone -q "$origin" "$dirty_side" >/dev/null 2>"$gs/clone2.err"
-git -C "$dirty_side" checkout -q apt-data >/dev/null
+git -C "$dirty_side" checkout -q apt-hub-pages >/dev/null
 printf '%s\n' leftover >"$dirty_side/unknown.txt"
 printf '%s\n' '-----BEGIN PGP PRIVATE KEY BLOCK-----' >"$dirty_side/secring.gpg"
 git -C "$dirty_side" add -- unknown.txt secring.gpg
 git -C "$dirty_side" \
   -c "user.name=$GIT_NAME" -c "user.email=$GIT_EMAIL" \
   commit -m "脏历史未知根文件" >/dev/null
-git -C "$dirty_side" push -q origin apt-data >/dev/null 2>&1
-dirty_sha=$(git --git-dir="$origin" rev-parse apt-data)
-git -C "$sandbox" fetch -q origin refs/heads/apt-data
-printf '%s\n' "$dirty_sha" >"$sandbox/tmp/apt-data-base.sha"
+git -C "$dirty_side" push -q origin apt-hub-pages >/dev/null 2>&1
+dirty_sha=$(git --git-dir="$origin" rev-parse apt-hub-pages)
+git -C "$sandbox" fetch -q origin refs/heads/apt-hub-pages
+printf '%s\n' "$dirty_sha" >"$sandbox/tmp/apt-hub-pages-base.sha"
 make_git_site "$sandbox/tmp/site" v4
 set +e
 isolated_save "$sandbox" "$origin" "$shafile" "$savelog"
 save4_rc=$?
 set -e
-if [[ "$save4_rc" -ne 0 ]] && grep -Fq 'apt-data 含非站点文件' "$savelog"; then
+if [[ "$save4_rc" -ne 0 ]] && grep -Fq 'apt-hub-pages 含非站点文件' "$savelog"; then
   pass "历史脏数据明确拒绝 (exit $save4_rc)"
 else
   fail "脏历史未拒绝 rc=$save4_rc log=$(cat "$savelog" 2>/dev/null || true)"
 fi
-after_dirty=$(git --git-dir="$origin" rev-parse apt-data)
+after_dirty=$(git --git-dir="$origin" rev-parse apt-hub-pages)
 if [[ "$after_dirty" == "$dirty_sha" ]]; then
   pass "脏历史拒绝后未改写远端"
 else
@@ -1218,7 +1218,7 @@ git -C "$readme_work" -c "user.name=$GIT_NAME" -c "user.email=$GIT_EMAIL" commit
 git -C "$readme_work" tag v0.0.9
 git -C "$readme_work" push -q origin v0.0.9
 tag_sha=$(git -C "$readme_work" rev-parse v0.0.9)
-git -C "$readme_work" checkout -q --orphan apt-data
+git -C "$readme_work" checkout -q --orphan apt-hub-pages
 git -C "$readme_work" rm -rfq . >/dev/null 2>&1 || true
 cat >"$readme_work/state.json" <<'EOF'
 {
@@ -1251,9 +1251,9 @@ cat >"$readme_work/state.json" <<'EOF'
 }
 EOF
 git -C "$readme_work" add -- state.json
-git -C "$readme_work" -c "user.name=$GIT_NAME" -c "user.email=$GIT_EMAIL" commit -m "apt-data" >/dev/null
+git -C "$readme_work" -c "user.name=$GIT_NAME" -c "user.email=$GIT_EMAIL" commit -m "apt-hub-pages" >/dev/null
 apt_sha=$(git -C "$readme_work" rev-parse HEAD)
-git -C "$readme_work" push -q origin apt-data
+git -C "$readme_work" push -q origin apt-hub-pages
 git -C "$readme_work" checkout -q --detach v0.0.9
 readme_rc=0
 (
@@ -1262,7 +1262,7 @@ readme_rc=0
     GIT_CONFIG_NOSYSTEM=1 \
     APT_HUB_GIT_NAME="$GIT_NAME" \
     APT_HUB_GIT_EMAIL="$GIT_EMAIL" \
-    APT_DATA_SHA="$apt_sha" \
+    APT_HUB_PAGES_SHA="$apt_sha" \
     GITHUB_REPOSITORY="example/apt-hub" \
     RELEASE_TAG="v7.7.7" \
     bash scripts/publish_apt_site.sh update-readme

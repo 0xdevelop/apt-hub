@@ -19,19 +19,19 @@ EOF
   exit 2
 }
 
-ensure_apt_data_branch() {
+ensure_apt_hub_pages_branch() {
   local name="$1" email="$2" ls_rc=0 work blob tree commit
   set +e
-  git ls-remote --exit-code --heads origin refs/heads/apt-data >/dev/null
+  git ls-remote --exit-code --heads origin refs/heads/apt-hub-pages >/dev/null
   ls_rc=$?
   set -e
   if [[ "${ls_rc}" -eq 0 ]]; then
     return 0
   fi
   if [[ "${ls_rc}" -ne 2 ]]; then
-    die "查询 apt-data 失败，不能当作分支不存在"
+    die "查询 apt-hub-pages 失败，不能当作分支不存在"
   fi
-  work=$(mktemp -d "${ROOT}/tmp/apt-data-init.XXXXXX")
+  work=$(mktemp -d "${ROOT}/tmp/apt-hub-pages-init.XXXXXX")
   rmdir "${work}"
   git worktree add --detach "${work}" HEAD
   : >"${work}/.nojekyll"
@@ -44,9 +44,9 @@ ensure_apt_data_branch() {
       GIT_COMMITTER_EMAIL="${email}" \
       git -C "${work}" commit-tree "${tree}" -m "准备 Pages 产物分支"
   )
-  if ! git -C "${work}" push origin "${commit}:refs/heads/apt-data"; then
+  if ! git -C "${work}" push origin "${commit}:refs/heads/apt-hub-pages"; then
     git worktree remove --force "${work}" >/dev/null 2>&1 || true
-    die "创建 apt-data 失败，未改已有历史"
+    die "创建 apt-hub-pages 失败，未改已有历史"
   fi
   git worktree remove --force "${work}" >/dev/null 2>&1 || true
 }
@@ -61,7 +61,7 @@ preflight() {
   [[ "${login,,}" == "${GITHUB_ACTOR,,}" && "${id}" == "${GITHUB_ACTOR_ID:?}" ]] || die "发布者身份与上下文不一致"
   [[ "${login}" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ && "${id}" =~ ^[1-9][0-9]*$ ]] || die "发布者身份格式非法"
   email="${id}+${login}@users.noreply.github.com"
-  ensure_apt_data_branch "${login}" "${email}"
+  ensure_apt_hub_pages_branch "${login}" "${email}"
   pages_err=$(mktemp "${ROOT}/tmp/pages-api.XXXXXX")
   set +e
   pages=$(gh api "repos/${GITHUB_REPOSITORY}/pages" 2>"${pages_err}")
@@ -70,14 +70,14 @@ preflight() {
   if [[ "${api_rc}" -ne 0 ]]; then
     if grep -F -q 'HTTP 404' "${pages_err}"; then
       rm -f -- "${pages_err}"
-      die "产物分支 apt-data 已就绪，请在仓库 Pages 设置选择 apt-data 分支根目录后重跑；不自动更改设置"
+      die "产物分支 apt-hub-pages 已就绪，请在仓库 Pages 设置选择 apt-hub-pages 分支根目录后重跑；不自动更改设置"
     fi
     rm -f -- "${pages_err}"
     die "读取 Pages 失败（权限或网络），不能当作未启用"
   fi
   rm -f -- "${pages_err}"
-  jq -e '.build_type=="legacy" and .source.branch=="apt-data" and .source.path=="/"' <<<"${pages}" >/dev/null \
-    || die "产物分支 apt-data 已就绪，请在仓库 Pages 设置选择 apt-data 分支根目录后重跑；不自动更改设置"
+  jq -e '.build_type=="legacy" and .source.branch=="apt-hub-pages" and .source.path=="/"' <<<"${pages}" >/dev/null \
+    || die "产物分支 apt-hub-pages 已就绪，请在仓库 Pages 设置选择 apt-hub-pages 分支根目录后重跑；不自动更改设置"
   site=$(jq -er '.html_url | select(type=="string" and length>0)' <<<"${pages}") || die "Pages html_url 不是非空字符串"
   [[ "${site}" != *$'\n'* && "${site}" != *$'\r'* ]] || die "Pages html_url 含换行"
   site="${site%/}"
@@ -162,18 +162,18 @@ remove_old() {
   esac
   [[ "${old}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "旧版本非法: ${old}"
   [[ -n "${GH_TOKEN:-}" ]] || die "缺少 GH_TOKEN"
-  if ! git fetch origin refs/heads/apt-data:refs/remotes/origin/apt-data; then
-    die "读取 apt-data 失败，拒绝删除"
+  if ! git fetch origin refs/heads/apt-hub-pages:refs/remotes/origin/apt-hub-pages; then
+    die "读取 apt-hub-pages 失败，拒绝删除"
   fi
-  sha="$(git rev-parse --verify refs/remotes/origin/apt-data)"
-  [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || die "apt-data SHA 非法"
+  sha="$(git rev-parse --verify refs/remotes/origin/apt-hub-pages)"
+  [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || die "apt-hub-pages SHA 非法"
   mkdir -p -- tmp
   [[ -d tmp && ! -L tmp ]] || die "项目 tmp 不可用"
   local scan needle magic text path scan_rc gz_rc grep_rc
   scan="$(mktemp -d tmp/script-old-scan.XXXXXX)"
   if ! git archive "${sha}" | tar -x -C "${scan}"; then
     rm -rf -- "${scan}"
-    die "解包 apt-data 失败，拒绝删除"
+    die "解包 apt-hub-pages 失败，拒绝删除"
   fi
   needle="releases/download/${old}/"
   scan_rc=0
@@ -251,22 +251,22 @@ remove_old() {
 restore_previous() {
   [[ ! -e tmp/previous && ! -L tmp/previous ]] || die "previous 已存在，拒绝覆盖"
   mkdir -p tmp/previous
-  if ! git ls-remote --heads origin apt-data >tmp/apt-data-refs.txt; then
-    echo "列出 apt-data 失败（网络或鉴权），不能当首轮空目录" >&2
+  if ! git ls-remote --heads origin apt-hub-pages >tmp/apt-hub-pages-refs.txt; then
+    echo "列出 apt-hub-pages 失败（网络或鉴权），不能当首轮空目录" >&2
     exit 1
   fi
-  if [[ ! -s tmp/apt-data-refs.txt ]]; then
-    echo "apt-data 分支不存在，使用空 previous"
-    : >tmp/apt-data-base.sha
+  if [[ ! -s tmp/apt-hub-pages-refs.txt ]]; then
+    echo "apt-hub-pages 分支不存在，使用空 previous"
+    : >tmp/apt-hub-pages-base.sha
     return 0
   fi
-  git fetch origin refs/heads/apt-data:refs/remotes/origin/apt-data
+  git fetch origin refs/heads/apt-hub-pages:refs/remotes/origin/apt-hub-pages
   local sha
-  sha="$(git rev-parse --verify origin/apt-data)"
-  [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || die "无法解析 apt-data SHA"
-  printf '%s\n' "${sha}" >tmp/apt-data-base.sha
+  sha="$(git rev-parse --verify origin/apt-hub-pages)"
+  [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || die "无法解析 apt-hub-pages SHA"
+  printf '%s\n' "${sha}" >tmp/apt-hub-pages-base.sha
   git archive "${sha}" | tar -x -C tmp/previous
-  [[ -d tmp/previous ]] || die "恢复 apt-data 失败"
+  [[ -d tmp/previous ]] || die "恢复 apt-hub-pages 失败"
 }
 
 build_site() {
@@ -337,24 +337,24 @@ gate_site() {
   [[ -z "${GITHUB_OUTPUT:-}" ]] || echo "site_ok=true" >>"${GITHUB_OUTPUT}"
 }
 
-save_apt_data() (
+save_apt_hub_pages() (
   local work base rel saved remote name="${APT_HUB_GIT_NAME:?}" email="${APT_HUB_GIT_EMAIL:?}"
-  work=$(mktemp -d "${ROOT}/tmp/apt-data.XXXXXX")
+  work=$(mktemp -d "${ROOT}/tmp/apt-hub-pages.XXXXXX")
   rmdir "${work}"
   trap 'git worktree remove --force "${work}" >/dev/null 2>&1 || true' EXIT
-  base=$(<tmp/apt-data-base.sha)
+  base=$(<tmp/apt-hub-pages-base.sha)
   if [[ -n "${base}" ]]; then
-    [[ "${base}" =~ ^[0-9a-f]{40}$ ]] || die "apt-data 基线非法"
+    [[ "${base}" =~ ^[0-9a-f]{40}$ ]] || die "apt-hub-pages 基线非法"
     git worktree add --detach "${work}" "${base}"
     git -C "${work}" ls-files >tmp/previous-paths.txt
     while IFS= read -r rel; do
       case "${rel}" in .nojekyll|CNAME|apt-hub.gpg|state.json|index.html|add_source.sh|repos/*) ;;
-        *) die "apt-data 含非站点文件: ${rel}" ;;
+        *) die "apt-hub-pages 含非站点文件: ${rel}" ;;
       esac
     done <tmp/previous-paths.txt
   else
     git worktree add --detach "${work}" HEAD
-    git -C "${work}" checkout --orphan apt-data
+    git -C "${work}" checkout --orphan apt-hub-pages
   fi
   git -C "${work}" read-tree --empty
   while IFS= read -r -d '' rel; do
@@ -372,16 +372,16 @@ save_apt_data() (
     GIT_AUTHOR_NAME="${name}" GIT_AUTHOR_EMAIL="${email}" GIT_COMMITTER_NAME="${name}" GIT_COMMITTER_EMAIL="${email}" \
       git -C "${work}" commit -m "更新 APT 站点产物"
   fi
-  git -C "${work}" push origin HEAD:refs/heads/apt-data || die "apt-data 非快进推送失败，未发布"
+  git -C "${work}" push origin HEAD:refs/heads/apt-hub-pages || die "apt-hub-pages 非快进推送失败，未发布"
   saved=$(git -C "${work}" rev-parse HEAD)
-  remote=$(git ls-remote --exit-code origin refs/heads/apt-data) || die "无法回读 apt-data"
-  [[ "${remote%%$'\t'*}" == "${saved}" ]] || die "apt-data 回读与保存提交不同"
-  printf '%s\n' "${saved}" >tmp/apt-data-saved.sha
-  [[ -z "${GITHUB_OUTPUT:-}" ]] || printf 'apt_data_sha=%s\n' "${saved}" >>"${GITHUB_OUTPUT}"
+  remote=$(git ls-remote --exit-code origin refs/heads/apt-hub-pages) || die "无法回读 apt-hub-pages"
+  [[ "${remote%%$'\t'*}" == "${saved}" ]] || die "apt-hub-pages 回读与保存提交不同"
+  printf '%s\n' "${saved}" >tmp/apt-hub-pages-saved.sha
+  [[ -z "${GITHUB_OUTPUT:-}" ]] || printf 'apt_hub_pages_sha=%s\n' "${saved}" >>"${GITHUB_OUTPUT}"
 )
 
 deploy_pages() {
-  local sha="${APT_DATA_SHA:?}" request url endpoint body status commit attempt
+  local sha="${APT_HUB_PAGES_SHA:?}" request url endpoint body status commit attempt
   [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || die "站点提交非法"
   request=$(gh api --method POST "repos/${GITHUB_REPOSITORY:?}/pages/builds") || die "请求 Pages 分支构建失败"
   url=$(jq -er '.url' <<<"${request}") || die "Pages 未返回构建地址"
@@ -427,17 +427,17 @@ publish() {
   bash gen_debs.sh metadata --upstream-dir tmp/debs/upstream
   PACKAGE_REPOSITORY="${GITHUB_REPOSITORY:?}" GITHUB_TOKEN="${GH_TOKEN:?}" build_site
   gate_site
-  save_apt_data
-  export APT_DATA_SHA
-  APT_DATA_SHA=$(<tmp/apt-data-saved.sha)
+  save_apt_hub_pages
+  export APT_HUB_PAGES_SHA
+  APT_HUB_PAGES_SHA=$(<tmp/apt-hub-pages-saved.sha)
   deploy_pages
   update_readme
 }
 
 update_readme() (
-  local name="${APT_HUB_GIT_NAME:-}" email="${APT_HUB_GIT_EMAIL:-}" sha="${APT_DATA_SHA:-}" work saved remote repo tag
+  local name="${APT_HUB_GIT_NAME:-}" email="${APT_HUB_GIT_EMAIL:-}" sha="${APT_HUB_PAGES_SHA:-}" work saved remote repo tag
   [[ -n "${name}" && -n "${email}" ]] || die "缺少已核验发布者身份"
-  [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || die "缺少已保存 apt-data SHA"
+  [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || die "缺少已保存 apt-hub-pages SHA"
   repo="${GITHUB_REPOSITORY:-}"
   tag="${RELEASE_TAG:-}"
   [[ "${repo}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*\/[A-Za-z0-9_][A-Za-z0-9._-]*$ && "${repo}" != *..* ]] \
@@ -449,8 +449,8 @@ update_readme() (
   trap 'git worktree remove --force "${work}" >/dev/null 2>&1 || true' EXIT
   git worktree add --detach "${work}" refs/remotes/origin/main
   mkdir -p tmp/readme-site "${work}/data"
-  git fetch origin refs/heads/apt-data:refs/remotes/origin/apt-data
-  git cat-file -e "${sha}^{commit}" || die "已部署 SHA 不在 apt-data 历史中"
+  git fetch origin refs/heads/apt-hub-pages:refs/remotes/origin/apt-hub-pages
+  git cat-file -e "${sha}^{commit}" || die "已部署 SHA 不在 apt-hub-pages 历史中"
   git show "${sha}:state.json" >"${work}/data/published.json"
   bash scripts/render.sh --state "${work}/data/published.json" --readme "${work}/README.md" --site tmp/readme-site \
     --repository "${repo}" --release-tag "${tag}"
@@ -483,7 +483,7 @@ main() {
     restore-previous) restore_previous ;;
     build-site) build_site ;;
     gate-site) gate_site ;;
-    save-apt-data) save_apt_data ;;
+    save-apt-hub-pages) save_apt_hub_pages ;;
     update-readme) update_readme ;;
     remove-old) remove_old ;;
     -h|--help) usage ;;

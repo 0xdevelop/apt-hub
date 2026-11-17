@@ -40,7 +40,7 @@ curl -fsSL --proto '=https' --proto-redir '=https' -o add_source.sh 'https://0xd
 bash git_tag.sh
 ```
 
-默认自动升版。同一工作流完成 `Release → Build → RemoveOldRelease`：构造包上传对应本仓 `vX.Y.Z` assets，签名站点保存到 `apt-data` 并发布，成功后回写列表。日常检查与索引续签也由该工作流定时执行。
+默认自动升版。同一工作流完成 `Release → Build → RemoveOldRelease`：构造包上传对应本仓 `vX.Y.Z` assets，签名站点保存到 `apt-hub-pages` 并发布，成功后回写列表。日常检查与索引续签也由该工作流定时执行。
 
 ## 文档
 

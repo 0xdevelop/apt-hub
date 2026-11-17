@@ -28,10 +28,10 @@ site_url='https://packages.example.test/tools' && mkdir -p tmp/apt-hub-add && (c
 
 1. 使用公开仓库并启用 Actions；fork 的定时工作流需要手动启用。
 2. 按下节生成专用无口令签名钥，将 `private-key.asc` 完整内容（含首尾标记）保存到 **Settings → Secrets and variables → Actions → Secrets**，名称为 **`APT_HUB_GPG_PRIVATE_KEY`**。不放 Variables、不提交 Git、不发聊天，离线备份密钥目录；`tmp/` 不是备份位置。
-3. **Settings → Pages → Source → Deploy from a branch → `apt-data` → `/ (root)`**。首次没有该分支时，运行一次 `Release_Build` 准备 `.nojekyll`，按提示选择来源后重跑。独立子域名可直接填入本仓 Pages 的 **Custom domain**，DNS `CNAME` 指向 `<组织或用户名>.github.io`，不含仓库路径；不要求另建组织主站。已有域名变更时须保留旧 APT 地址的可用性。
-4. 提交修改后，在干净仓库执行 `bash git_tag.sh`，自动升版并完成构建、assets 上传与签源发布。仅重签已有版本时，在 **Actions → Release_Build → Run workflow** 选 `main`，`rotate_from` 留空。
+3. **Settings → Pages → Source → Deploy from a branch → `apt-hub-pages` → `/ (root)`**。首次没有该分支时，运行一次 `Release_Build` 准备 `.nojekyll`，按提示选择来源后重跑。独立子域名可直接填入本仓 Pages 的 **Custom domain**，DNS `CNAME` 指向 `<组织或用户名>.github.io`，不含仓库路径；不要求另建组织主站。已有域名变更时须保留旧 APT 地址的可用性。
+4. 提交修改后，在干净仓库执行 `bash git_tag.sh`，自动升版并完成构建、Release assets、签源站点发布。仅重签已有版本时，在 **Actions → Release_Build → Run workflow** 选 `main`，`rotate_from` 留空。
 
-只需一个私钥 Secret；`GITHUB_TOKEN` 由 Actions 提供，公钥、指纹、站点地址和发布者身份由流程取得。`apt-data` 只保存公开站点产物；推送后显式请求 Pages 构建，核对准确提交及公网状态后才更新 README，不以测试通过冒称上线。
+只需一个私钥 Secret；`GITHUB_TOKEN` 由 Actions 提供，公钥、指纹、站点地址和发布者身份由流程取得。`apt-hub-pages` 只保存公开站点产物；二进制由官方原址或对应 Release assets 提供，缺少资产时发布失败，不由 Pages 分支兜底。推送后显式请求 Pages 构建，核对准确提交及公网状态后才更新 README，不以测试通过冒称上线。
 
 ### 生成签名密钥
 
@@ -45,7 +45,7 @@ umask 077 && mkdir -p tmp && key_dir=$(mktemp -d "$(pwd -P)/tmp/k.XXXXXX") && ch
 
 ### 查看公钥
 
-公钥只保存在 `apt-data` 根目录的 `apt-hub.gpg`，发布后地址为 `<站点>/apt-hub.gpg`，不在 Markdown 维护第二份。显示指纹而不导入默认密钥库：
+公钥只保存在 `apt-hub-pages` 根目录的 `apt-hub.gpg`，发布后地址为 `<站点>/apt-hub.gpg`，不在 Markdown 维护第二份。显示指纹而不导入默认密钥库：
 
 ```bash
 site_url='https://packages.example.test/tools' && mkdir -p tmp && curl -fsSL --proto '=https' --proto-redir '=https' -o tmp/apt-hub-public.gpg "$site_url/apt-hub.gpg" && gpg --batch --show-keys --with-fingerprint tmp/apt-hub-public.gpg
@@ -59,13 +59,13 @@ site_url='https://packages.example.test/tools' && mkdir -p tmp && curl -fsSL --p
 
 **原钥仍可用**：Secret 有效则无需改动；丢失时从离线备份恢复同一私钥，运行 `Release_Build`，`rotate_from` 留空。公钥未变，使用者无需换钥。
 
-**必须换新钥**：疑似泄露先暂停发布，有撤销证书则公告旧钥撤销。读取要恢复的 `apt-data` 快照的旧公钥指纹：
+**必须换新钥**：疑似泄露先暂停发布，有撤销证书则公告旧钥撤销。读取要恢复的 `apt-hub-pages` 快照的旧公钥指纹：
 
 ```bash
-mkdir -p tmp && git fetch origin refs/heads/apt-data && git show FETCH_HEAD:apt-hub.gpg >tmp/apt-hub-old.gpg && gpg --batch --show-keys --with-colons tmp/apt-hub-old.gpg >tmp/apt-hub-old.info && old_fpr=$(awk -F: '$1=="fpr" && !seen {print $10; seen=1}' tmp/apt-hub-old.info) && test "${#old_fpr}" -eq 40 && printf 'rotate_from=%s\n' "$old_fpr"
+mkdir -p tmp && git fetch origin refs/heads/apt-hub-pages && git show FETCH_HEAD:apt-hub.gpg >tmp/apt-hub-old.gpg && gpg --batch --show-keys --with-colons tmp/apt-hub-old.gpg >tmp/apt-hub-old.info && old_fpr=$(awk -F: '$1=="fpr" && !seen {print $10; seen=1}' tmp/apt-hub-old.info) && test "${#old_fpr}" -eq 40 && printf 'rotate_from=%s\n' "$old_fpr"
 ```
 
-生成新钥，更新**同一个 Secret**，运行 `Release_Build` 时 `rotate_from` 填**旧 40 位完整指纹**，不是新指纹。无需旧私钥，不删除 `apt-data`。发布成功后公告新钥 `fingerprint.txt` 的完整指纹。
+生成新钥，更新**同一个 Secret**，运行 `Release_Build` 时 `rotate_from` 填**旧 40 位完整指纹**，不是新指纹。无需旧私钥，不删除 `apt-hub-pages`。发布成功后公告新钥 `fingerprint.txt` 的完整指纹。
 
 ### 使用者修复
 

@@ -1,8 +1,16 @@
 # 验证记录
 
+## 2026-11-13 Pages 产物分支命名收口
+
+- Pages 公开产物分支统一命名为 `apt-hub-pages`；脚本、工作流调用契约、测试和维护文档已同步，旧命名不再作为运行时输入。
+- 原已有公开产物 tip `31bbbccd4caa0c03176e2fdb673888e42089da03` 已原样建立新分支；树内容逐项核对，未含 `.deb`。旧分支暂不删除，待 Pages 来源切换并完成新版公网验收后清理，避免切换期间中断。
+- Pages 分支只承载签名索引、元数据、公开公钥、首页和加源脚本；必要二进制由官方原址或对应 Release assets 提供，缺失时发布失败，不把二进制塞入 Pages 分支兜底。
+- 分支改名后的工作流夹具 `48` 项、Ubuntu 维护侧验收 `1526` 项均零失败；ShellCheck、Bash 语法和受保护宿主基线通过。
+- 本节是分支命名与本地联动验收；尚未完成 Pages 设置切换、新标签发布和公网消费者验收。
+
 ## 2026-11-13 简明首页与版本展示
 
-- 新域名首页与加源脚本逐字匹配旧 `apt-data` 提交，聚合源配置仍返回 `404`；这次确认的是旧产物尚未更新，不将问题归咎于浏览器缓存。
+- 新域名首页与加源脚本逐字匹配旧 `apt-hub-pages` 提交，聚合源配置仍返回 `404`；这次确认的是旧产物尚未更新，不将问题归咎于浏览器缓存。
 - 现有 HTML 模板新增用途、显式维护版本、站点根地址、统一加源命令、安装／普通升级命令和四列软件表。当前 Release 与 Markdown 变更记录绑定同一标签，“最新发行版”只链接 GitHub `releases/latest`。
 - 最终固定副本运行渲染测试 `408` 项、发布测试 `48` 项，均零失败；真实 detached tag 下的 README 回写段两项通过。维护入口真实签源、APT 下载及渲染集成 `55` 项通过，退出均为 `0`。最后增量保留版本参数与调用契约，只收紧包名校验、简化升级命令并扩展公网回读。
 - 原子拒绝非法版本参数及命令注入反例通过；公网回读测试确认仅 `state.json` 相同但首页或加源脚本滞后时不能返回部署成功。独占 Chrome 实际 DOM 为四列表头、三段可复制命令及准确版本链接，未加载前端框架或外部字体。
@@ -24,7 +32,7 @@
 
 - 原发布运行 [43185095856](https://github.com/0xdevelop/apt-hub/actions/runs/43185095856) 成功；公网首页、公钥与 `state.json` 实际返回 `200`，签名索引验签通过。隔离 APT 根完成更新、下载和安装计划；下载的 Go 包另在独占根内实际安装，并离线编译运行成功。下文“尚未上线”“列表为空”属于当时快照，不是当前状态。
 - 本轮新入口 `build.sh → gen_debs.sh → scripts/gen_deb_golang.sh` 已用官方 Go `1.27.4` 双架构归档构出四个包，`SHA256SUMS`、控制字段与精确依赖核对通过；四个 `.deb` 与已发布的同 Debian 版本逐字一致。证据：`tmp/first-live-deploy/template-realignment/official-inputs/build.rc`、`build.log` 与 `official-build/`。
-- 本次按用户要求收敛为一个 `release.yml`，保留 `Release → Build → RemoveOldRelease`，构造文件直接归对应本仓 `vX.Y.Z` assets；Pages 复用 `apt-data` 纯站点产物分支，不再使用 Actions Artifacts 或额外发布工作流。
+- 本次按用户要求收敛为一个 `release.yml`，保留 `Release → Build → RemoveOldRelease`，构造文件直接归对应本仓 `vX.Y.Z` assets；Pages 复用 `apt-hub-pages` 纯站点产物分支，不再使用 Actions Artifacts 或额外发布工作流。
 - 固定源码执行完整 `build.sh test`，九套测试全部完成、退出 `0`；真实上传文件测试前后逐字一致。随后仅修复上传接线：无构造条目时跳过上传，首次上传复用完整目录校验，构建、测试和校验失败显式传播。集成后定点复跑发版测试 `71` 项、工作流测试 `39` 项，均零失败；全仓 ShellCheck 通过。独立复审通过，生产文件与获批快照一致。
 - 从真实 YAML 抽取上传步骤重放：构建退出 `23`、测试退出 `24`、本地校验退出 `1`，均不写入上传成功输出；官方 `.deb` 清单直接跳过构建与上传。当前真实官方 Go 构造文件通过同一本地校验。证据：`tmp/first-live-deploy/template-realignment/final-parent/`、`integrated/`、`parent-review-delta/` 与 `review-delta-verdict.stream.jsonl`。
 - 上述是本地集成与复审结果，不是新工作流的生产发布。切换 Pages 发布源、对应新版本的 GitHub 运行及公网消费者仍须实际验证；旧线上成功不能代替本轮验收。
