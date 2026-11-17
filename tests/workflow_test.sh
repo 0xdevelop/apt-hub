@@ -51,8 +51,6 @@ case "${method} $1" in
     esac
     ;;
   'GET users/fixture-human') cat "${FIXTURE}/actor.json" ;;
-  'POST repos/example/apt-hub/pages/builds') cat "${FIXTURE}/build-request.json" ;;
-  'GET repos/example/apt-hub/pages/builds/123') cat "${FIXTURE}/build-result.json" ;;
   *) exit 90 ;;
 esac
 SH
@@ -104,10 +102,9 @@ git -C "${seed}" -c user.name=fixture -c user.email=fixture@invalid commit -m si
 git -C "${seed}" remote add origin "${WORK}/origin.git"
 git -C "${seed}" push -q origin HEAD:refs/heads/apt-hub-pages
 seed_sha="$(git -C "${seed}" rev-parse HEAD)"
+export APT_HUB_PAGES_SHA="${seed_sha}"
 rm -rf -- "${seed}"
 printf '%s\n' '{"html_url":"http://packages.example.test/","build_type":"legacy","source":{"branch":"apt-hub-pages","path":"/"},"cname":"packages.example.test"}' >"${WORK}/pages.json"
-printf '%s\n' '{"url":"https://api.github.com/repos/example/apt-hub/pages/builds/123"}' >"${WORK}/build-request.json"
-printf '%s\n' '{"status":"built","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' >"${WORK}/build-result.json"
 printf '%s\n' '{"schema_version":"2","packages":[]}' >"${WORK}/tmp/site/state.json"
 printf '%s\n' '<html>candidate</html>' >"${WORK}/tmp/site/index.html"
 printf '%s\n' 'candidate-client' >"${WORK}/tmp/site/add_source.sh"
@@ -186,8 +183,12 @@ fi
 printf '200\n' >"${WORK}/pages.status"
 git -C "${WORK}" remote set-url origin "${WORK}/origin.git"
 
-expect explicit_pages_build 0 run deploy-pages
-if grep -Fxq 'POST repos/example/apt-hub/pages/builds' "${WORK}/calls.log"; then pass '显式请求分支构建'; else fail '未请求构建'; fi
+expect pages_branch_readback 0 run deploy-pages
+if grep -Fq 'pages/builds' "${WORK}/calls.log"; then
+  fail 'deploy-pages 仍调用 Pages builds API'
+else
+  pass '分支推送后不重复调用 Pages builds API'
+fi
 if cmp -s "${WORK}/tmp/site/state.json" "${WORK}/tmp/public-state.json" \
   && cmp -s "${WORK}/tmp/site/index.html" "${WORK}/tmp/public-index.html" \
   && cmp -s "${WORK}/tmp/site/add_source.sh" "${WORK}/tmp/public-add_source.sh"; then
@@ -195,11 +196,9 @@ if cmp -s "${WORK}/tmp/site/state.json" "${WORK}/tmp/public-state.json" \
 else
   fail '公网三文件未全部回读比对'
 fi
-printf '%s\n' '{"status":"built","commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}' >"${WORK}/build-result.json"
-expect pages_other_commit 1 run deploy-pages
-printf '%s\n' '{"status":"errored","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","error":{"message":"fixture build failure"}}' >"${WORK}/build-result.json"
-expect pages_build_failed 1 run deploy-pages
-printf '%s\n' '{"status":"built","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' >"${WORK}/build-result.json"
+export APT_HUB_PAGES_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+expect pages_branch_other_commit 1 run deploy-pages
+export APT_HUB_PAGES_SHA="${seed_sha}"
 printf '%s\n' '{"stale":true}' >"${WORK}/public-state.json"
 expect pages_public_state_stale 1 run deploy-pages
 cp "${WORK}/tmp/site/state.json" "${WORK}/public-state.json"
@@ -353,6 +352,7 @@ EOF
 chmod a+x "${chain}/scripts/render.sh"
 cat >"${chain}/README.md" <<'EOF'
 MAIN_ONLY
+列表取自已发布状态。**全源加源是本轮新版功能，尚未部署到 Pages；下列统一命令须待本版部署后使用。**
 <!-- APT-HUB:PACKAGES:BEGIN -->
 旧列表
 <!-- APT-HUB:PACKAGES:END -->
@@ -398,10 +398,13 @@ ok_rc=0
     bash scripts/publish_apt_site.sh update-readme
 ) >"${chain}/ok.log" 2>&1 || ok_rc=$?
 ok_args="$(cat "${CAPTURE}" 2>/dev/null || true)"
-if [[ "${ok_rc}" -eq 0 && "${ok_args}" == *"--repository example/apt-hub"* && "${ok_args}" == *"--release-tag v7.7.7"* ]]; then
-  pass '回写把仓库和标签传给 render'
+if [[ "${ok_rc}" -eq 0 \
+  && "${ok_args}" == *"--repository example/apt-hub"* \
+  && "${ok_args}" == *"--release-tag v7.7.7"* \
+  && "$(git --git-dir="${chain}.git" show main:README.md)" != *'尚未部署到 Pages'* ]]; then
+  pass '回写传版本并移除未部署提示'
 else
-  fail "回写未传版本对 rc=${ok_rc} args=${ok_args} log=$(tr '\n' ' ' <"${chain}/ok.log")"
+  fail "回写未清理未部署提示 rc=${ok_rc} args=${ok_args} log=$(tr '\n' ' ' <"${chain}/ok.log")"
 fi
 cleanup
 printf 'RESULT pass=%s fail=%s evidence=%s\n' "${PASS}" "${FAIL}" "${WORK}"

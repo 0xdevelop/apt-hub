@@ -381,25 +381,10 @@ save_apt_hub_pages() (
 )
 
 deploy_pages() {
-  local sha="${APT_HUB_PAGES_SHA:?}" request url endpoint body status commit attempt
+  local sha="${APT_HUB_PAGES_SHA:?}" remote attempt
   [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || die "站点提交非法"
-  request=$(gh api --method POST "repos/${GITHUB_REPOSITORY:?}/pages/builds") || die "请求 Pages 分支构建失败"
-  url=$(jq -er '.url' <<<"${request}") || die "Pages 未返回构建地址"
-  endpoint="${url#"${GITHUB_API_URL:?}/"}"
-  [[ "${endpoint}" =~ ^repos/${GITHUB_REPOSITORY}/pages/builds/([0-9]+|latest)$ ]] || die "Pages 构建地址非法"
-  for ((attempt=0; attempt<60; attempt++)); do
-    body=$(gh api "${endpoint}") || die "读取 Pages 构建失败"
-    status=$(jq -er '.status' <<<"${body}") || die "Pages 构建状态缺失"
-    case "${status}" in
-      built)
-        commit=$(jq -er '.commit' <<<"${body}") || die "Pages 未返回部署提交"
-        [[ "${commit}" == "${sha}" ]] || die "Pages 部署了其他提交，拒绝回写列表"
-        break ;;
-      queued|building) sleep 10 ;;
-      *) die "Pages 构建未成功: ${body}" ;;
-    esac
-  done
-  [[ "${status}" == built ]] || die "Pages 构建超时"
+  remote=$(git ls-remote --exit-code origin refs/heads/apt-hub-pages) || die "无法回读 apt-hub-pages"
+  [[ "${remote%%$'\t'*}" == "${sha}" ]] || die "Pages 分支提交已变化，拒绝回读"
   for ((attempt=0; attempt<60; attempt++)); do
     if curl -fsS --proto '=https' --connect-timeout 15 --max-time 30 \
       "${SITE_URL:?}/state.json" -o tmp/public-state.json && cmp -s tmp/site/state.json tmp/public-state.json \
@@ -459,6 +444,11 @@ update_readme() (
   export GIT_COMMITTER_NAME="${name}"
   export GIT_COMMITTER_EMAIL="${email}"
   git -C "${work}" add -- README.md data/published.json
+  if grep -Fqx '列表取自已发布状态。**全源加源是本轮新版功能，尚未部署到 Pages；下列统一命令须待本版部署后使用。**' "${work}/README.md"; then
+    grep -v -F -x -- '列表取自已发布状态。**全源加源是本轮新版功能，尚未部署到 Pages；下列统一命令须待本版部署后使用。**' "${work}/README.md" >"${work}/README.md.next"
+    mv -- "${work}/README.md.next" "${work}/README.md"
+    git -C "${work}" add -- README.md
+  fi
   if git -C "${work}" diff --cached --quiet; then
     echo "README 与已发布状态已一致"
     exit 0

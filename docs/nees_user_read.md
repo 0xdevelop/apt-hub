@@ -4,7 +4,7 @@
 
 ## 使用已发布的源
 
-> 以下为新版全源入口用法，须在维护者部署本版脚本及聚合配置后使用；当前线上旧脚本尚不支持默认全源。
+> 以下为当前线上全源入口用法。维护者发布新软件后，重新执行同一条命令即可纳入适用源。
 
 不需要 fork 或启用 Pages。确认维护者站点可信后，执行 [README](../README.md#一键加源与软件列表) 的统一命令，默认添加本站对当前 Ubuntu 代号、架构支持的全部源。脚本校验公钥、签名索引和包摘要后写入专用 keyring 与各软件 `.sources`，不安装程序、不改其他源；全部成功后删除下载副本，失败保留供重跑。
 
@@ -31,7 +31,7 @@ site_url='https://packages.example.test/tools' && mkdir -p tmp/apt-hub-add && (c
 3. **Settings → Pages → Source → Deploy from a branch → `apt-hub-pages` → `/ (root)`**。首次没有该分支时，运行一次 `Release_Build` 准备 `.nojekyll`，按提示选择来源后重跑。独立子域名可直接填入本仓 Pages 的 **Custom domain**，DNS `CNAME` 指向 `<组织或用户名>.github.io`，不含仓库路径；不要求另建组织主站。已有域名变更时须保留旧 APT 地址的可用性。
 4. 提交修改后，在干净仓库执行 `bash git_tag.sh`，自动升版并完成构建、Release assets、签源站点发布。仅重签已有版本时，在 **Actions → Release_Build → Run workflow** 选 `main`，`rotate_from` 留空。
 
-只需一个私钥 Secret；`GITHUB_TOKEN` 由 Actions 提供，公钥、指纹、站点地址和发布者身份由流程取得。`apt-hub-pages` 只保存公开站点产物；二进制由官方原址或对应 Release assets 提供，缺少资产时发布失败，不由 Pages 分支兜底。推送后显式请求 Pages 构建，核对准确提交及公网状态后才更新 README，不以测试通过冒称上线。
+只需一个私钥 Secret；`GITHUB_TOKEN` 由 Actions 提供，公钥、指纹、站点地址和发布者身份由流程取得。`apt-hub-pages` 只保存公开站点产物；二进制由官方原址或对应 Release assets 提供，缺少资产时发布失败，不由 Pages 分支兜底。推送站点产物后等待分支式 Pages 自动构建，并核对准确提交及公网状态后才更新 README，不以测试通过冒称上线。
 
 ### 生成签名密钥
 
