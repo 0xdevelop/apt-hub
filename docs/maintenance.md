@@ -4,7 +4,7 @@
 
 ## 软件清单
 
-`config/packages.json` 是接入软件的配置入口，`packages` 可包含多个软件，不为每个软件复制同步脚本。
+`config/packages.json` 是接入软件的配置入口，`packages` 可包含多个软件，不为每个软件复制同步脚本。官方已有 `.deb` 的新条目照 `templates/package_github_deb.json` 填写。
 
 - `id`：本仓唯一标识；`package` 必须等于 `.deb` 的 `Package`。
 - `repository`：上游官方 GitHub `owner/repository`，不填第三方下载镜像。Go 条目仍指向 `golang/go`，生成包的发布仓库通过 `--package-repository` 单独指定。
