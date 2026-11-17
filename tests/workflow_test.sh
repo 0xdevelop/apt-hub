@@ -51,9 +51,31 @@ case "${method} $1" in
     esac
     ;;
   'GET users/fixture-human') cat "${FIXTURE}/actor.json" ;;
-  'POST repos/example/apt-hub/pages/builds') cat "${FIXTURE}/build-request.json" ;;
-  'GET repos/example/apt-hub/pages/builds/123') cat "${FIXTURE}/build-result.json" ;;
-  'GET repos/example/apt-hub/pages/builds/latest') cat "${FIXTURE}/build-result.json" ;;
+  'POST repos/example/apt-hub/pages/builds')
+    if [[ -f "${FIXTURE}/post-fail.txt" ]]; then
+      cat "${FIXTURE}/post-fail.txt" >&2
+      exit 1
+    fi
+    cat "${FIXTURE}/build-request.json"
+    ;;
+  'GET repos/example/apt-hub/pages/builds/123'|'GET repos/example/apt-hub/pages/builds/latest')
+    if [[ -s "${FIXTURE}/build-steps.jsonl" ]]; then
+      IFS= read -r step <"${FIXTURE}/build-steps.jsonl"
+      tail -n +2 "${FIXTURE}/build-steps.jsonl" >"${FIXTURE}/build-steps.next"
+      mv "${FIXTURE}/build-steps.next" "${FIXTURE}/build-steps.jsonl"
+      printf '%s\n' "${step}"
+      exit 0
+    fi
+    if [[ -f "${FIXTURE}/build-queue-left" ]]; then
+      left="$(tr -d '[:space:]' <"${FIXTURE}/build-queue-left")"
+      if [[ "${left}" =~ ^[1-9][0-9]*$ ]]; then
+        printf '%s\n' "$((left - 1))" >"${FIXTURE}/build-queue-left"
+        printf '%s\n' '{"status":"queued"}'
+        exit 0
+      fi
+    fi
+    cat "${FIXTURE}/build-result.json"
+    ;;
   *) exit 90 ;;
 esac
 SH
@@ -172,10 +194,10 @@ fi
 src_head="$(git -C "${WORK}" rev-parse 'HEAD^{commit}')"
 ready_parents="$(git --git-dir="${WORK}/origin-404.git" log -1 --format='%P' "${ready_sha}")"
 ready_names="$(git --git-dir="${WORK}/origin-404.git" ls-tree -r --name-only "${ready_sha}")"
-if [[ "${ready_parents}" == "${src_head}" && "${ready_names}" == ".nojekyll" ]]; then
-  pass '404 初始化以当前 HEAD 为唯一源码父且仅 .nojekyll'
+if [[ -z "${ready_parents}" && "${ready_names}" == ".nojekyll" ]]; then
+  pass '404 初始化无父且仅 .nojekyll'
 else
-  fail "404 初始化父或树不对 parents=${ready_parents} tree=${ready_names} head=${src_head}"
+  fail "404 初始化父或树不对 parents=${ready_parents:-<empty>} tree=${ready_names} head=${src_head}"
 fi
 common="$(git -C "${WORK}" rev-parse --path-format=absolute --git-common-dir)"
 if git --git-dir="${common}" cat-file -e "${ready_sha}^{commit}" \
@@ -213,6 +235,11 @@ printf '%s\n' '{"status":"built","commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 expect pages_other_commit 1 run deploy-pages
 printf '%s\n' "{\"status\":\"errored\",\"commit\":\"${seed_sha}\",\"error\":{\"message\":\"fixture build failure\"}}" >"${WORK}/build-result.json"
 expect pages_build_failed 1 run deploy-pages
+if grep -Fq 'Pages 已部署并回读提交' "${WORK}/pages_build_failed.log"; then
+  fail '构建失败仍输出部署成功'
+else
+  pass '构建失败不覆盖成功'
+fi
 printf '%s\n' "{\"status\":\"built\",\"commit\":\"${seed_sha}\"}" >"${WORK}/build-result.json"
 printf '%s\n' '{"stale":true}' >"${WORK}/public-state.json"
 expect pages_public_state_stale 1 run deploy-pages
@@ -272,6 +299,66 @@ if grep -Fxq 'GET repos/example/apt-hub/pages/builds/latest' "${WORK}/calls.log"
 else
   fail 'latest 构建地址未按原校验回读'
 fi
+old_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+printf '%s\n' \
+  "{\"status\":\"built\",\"commit\":\"${old_sha}\"}" \
+  '{"status":"queued"}' \
+  "{\"status\":\"built\",\"commit\":\"${seed_sha}\"}" >"${WORK}/build-steps.jsonl"
+printf '%s\n' '{"url":"https://api.github.com/repos/example/apt-hub/pages/builds/latest"}' >"${WORK}/build-request.json"
+: >"${WORK}/calls.log"
+expect pages_latest_stale_then_expected 0 run deploy-pages
+if grep -Fxq 'POST repos/example/apt-hub/pages/builds' "${WORK}/calls.log" \
+  && [[ "$(grep -c 'GET repos/example/apt-hub/pages/builds/latest' "${WORK}/calls.log")" -eq 3 ]] \
+  && grep -Fq 'Pages 已部署并回读提交' "${WORK}/pages_latest_stale_then_expected.log" \
+  && ! grep -Fq "${old_sha}" "${WORK}/pages_latest_stale_then_expected.log"; then
+  pass 'latest 先回旧 built 再 queued 后才等到预期提交'
+else
+  fail '旧 built 被当成成功，或未等到预期提交'
+fi
+rm -f -- "${WORK}/build-steps.jsonl" "${WORK}/build-steps.next"
+printf '%s\n' '{"url":"https://api.github.com/repos/example/apt-hub/pages/builds/123"}' >"${WORK}/build-request.json"
+rm -f -- "${WORK}/build-queue-left" "${WORK}/post-fail.txt"
+printf '%s\n' '1' >"${WORK}/build-queue-left"
+printf '%s\n' "{\"status\":\"built\",\"commit\":\"${seed_sha}\"}" >"${WORK}/build-result.json"
+: >"${WORK}/calls.log"
+expect pages_queued_then_built 0 run deploy-pages
+if grep -Fxq 'POST repos/example/apt-hub/pages/builds' "${WORK}/calls.log" \
+  && [[ "$(grep -c 'GET repos/example/apt-hub/pages/builds/123' "${WORK}/calls.log")" -eq 2 ]] \
+  && grep -Fq 'Pages 已部署并回读提交' "${WORK}/pages_queued_then_built.log"; then
+  pass 'queued 后再 built 且提交一致才成功'
+else
+  fail 'queued 到 built 未按两次回读成功'
+fi
+printf '%s\n' '80' >"${WORK}/build-queue-left"
+: >"${WORK}/calls.log"
+expect pages_build_timeout 1 run deploy-pages
+if grep -Eq '^::error::阶段=deploy-pages 命令=轮询构建状态 Pages 构建超时:' "${WORK}/pages_build_timeout.log" \
+  && grep -Fxq 'POST repos/example/apt-hub/pages/builds' "${WORK}/calls.log" \
+  && ! grep -Fq 'Pages 已部署并回读提交' "${WORK}/pages_build_timeout.log"; then
+  pass '构建停在 queued 超时且不记成功'
+else
+  fail '构建超时被当成成功或错误行不可见'
+fi
+rm -f -- "${WORK}/build-queue-left"
+cat >"${WORK}/post-fail.txt" <<'EOF'
+HTTP 502
+{"message":"boom","token":"fixture-not-a-credential"}
+-----BEGIN PGP PRIVATE KEY BLOCK-----
+secret
+-----END PGP SECRET KEY BLOCK-----
+EOF
+: >"${WORK}/calls.log"
+expect pages_post_http 1 run deploy-pages
+if grep -Eq '^::error::阶段=deploy-pages 命令=gh api --method POST repos/example/apt-hub/pages/builds HTTP 502$' "${WORK}/pages_post_http.log" \
+  && ! grep -Fq 'boom' "${WORK}/pages_post_http.log" \
+  && ! grep -Fq 'fixture-not-a-credential' "${WORK}/pages_post_http.log" \
+  && ! grep -Fq 'BEGIN PGP PRIVATE KEY' "${WORK}/pages_post_http.log" \
+  && ! grep -Fq 'Pages 已部署并回读提交' "${WORK}/pages_post_http.log"; then
+  pass 'POST 失败留下阶段、命令与 HTTP 状态且不掩盖成功'
+else
+  fail 'POST 失败不可观察或被公网文件掩盖'
+fi
+rm -f -- "${WORK}/post-fail.txt"
 
 for item in key key-other key-protected; do mkdir -p "${WORK}/${item}"; chmod 700 "${WORK}/${item}"; done
 gpg --homedir "${WORK}/key" --batch --pinentry-mode loopback --passphrase '' --quick-generate-key 'Workflow fixture <workflow@invalid>' ed25519 sign 1d >"${WORK}/keygen.log" 2>&1

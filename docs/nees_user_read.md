@@ -16,7 +16,7 @@ site_url='https://packages.example.test/tools' && mkdir -p tmp/apt-hub-add && (c
 
 客户端需要 Bash、curl、GnuPG、dpkg、flock 及 Ubuntu 基础命令，可访问 Pages、上游 GitHub Release 和资产 CDN。不支持的系统拒绝；个别软件不支持当前系列或架构时不添加该项；适用项中任何验证失败都不提交半套源。再次运行可纳入后来发布的软件。高级用法仍可传 `--software <软件标识>` 只处理一个源。
 
-加源后按需执行 `sudo apt update && sudo apt install <软件包名>`，以后普通 `sudo apt update && sudo apt upgrade`。Go 的入口包 `golang` 依赖精确同版本 `golang-go`，命令文件由后者提供。`2:` 是沿用 Ubuntu 的 Debian epoch，不是本仓发版版本。
+加源后按需执行 `sudo apt update && sudo apt install <软件包名>`，以后普通 `sudo apt update && sudo apt upgrade`。Go 使用 `sudo apt install golang`，每个架构一个完整工具链包，提供 `go` 与 `gofmt`，不再拆分新 `golang-go` 资产。已装旧双包时，执行一次 `sudo apt install golang` 接管工具链文件并替换旧 `golang-go`；普通升级不会自动删除冲突包。`2:` 是沿用 Ubuntu 的 Debian epoch，不是本仓发版版本。
 
 ### 手动配置
 

@@ -42,7 +42,7 @@
 
 - `apt-hub-pages` 分支只保存签名索引、公开公钥、分流列表、已发布元数据和 `add_source.sh`，不承担通用二进制存储。RustDesk 等官方 `.deb` 由客户端按已签名元数据从官方地址获取；Go 生成包从对应本仓 Release assets 获取。缺少可验证的官方包或构造包时，发布直接拒绝，不把二进制塞进 Pages 分支。
 - `data/published.json` 只记录成功部署后回写的状态，不手动填入尚未生效的软件。
-- Pages 提交沿上一份产物连续追加，并记录本次执行源码的父提交；首次创建也从源码提交派生，不另起孤立历史。产物文件树仍只含公开站点文件，不把源码复制进站点；相同产物、相同源码重复发布不新增提交。
+- Pages 提交只沿上一份产物追加，首次创建独立产物历史；不追加源码父提交。站点文件未变时复用原产物提交，版本对应关系由发布记录和页面链接表达。
 - `templates/readme_packages.md`、`templates/readme_empty.md` 控制列表表头与空态；`templates/index.html` 控制首页。页面显示用途、当前站点版本、源根地址、加源与安装命令和软件短表，随同一次发布自动生成。
 - 站点版本使用本次本仓 `vX.Y.Z`，不是 Go 或 RustDesk 的软件版本。当前发行版和变更记录链接固定到该标签；“最新发行版”链接使用 GitHub `releases/latest`，不维护另一个 `latest` 标签。变更记录沿用 `changelog/vX.Y.Z.md` 的 GitHub 渲染页，不另建前端或 Markdown 解析器。
 - `scripts/render.sh` 只替换 README 中 `APT-HUB:PACKAGES:BEGIN` / `END` 两条独占行之间的区域，区域外正文由人维护。缺失或重复标记会拒绝写入。
@@ -59,7 +59,7 @@ bash scripts/update_sources.sh --catalog config/packages.json --previous tmp/pre
 
 其余参数是候选目录、站点和发行版数据输入；入口只生成候选，不上传、不推送、不部署。
 
-以上地址、版本和指纹均需替换；`tmp/previous` 须为已有发布快照或首次使用的空目录，工作目录必须是新建或空目录。本仓 `vX.Y.Z` 必须已有该版的构造包与来源记录，不能仅凭本地产物声称已发布。Go 入口包依赖同版本工具链，控制字段为 `2:上游版本-修订`；这些软件版本不是本仓 Release 标签。
+以上地址、版本和指纹均需替换；`tmp/previous` 须为已有发布快照或首次使用的空目录，工作目录必须是新建或空目录。本仓 `vX.Y.Z` 必须已有该版的构造包与来源记录，不能仅凭本地产物声称已发布。Go 每个架构只发布一个完整 `golang` 包，控制字段为 `2:上游版本-基础修订+本仓版本`；本仓版本从 `VERSION` 自动取得，不手填包修订，避免同版替换已发布字节。
 
 `git_tag.sh`（无参数默认为 `auto`）触发同一条三段式发布链；`build.sh` 调用 `gen_debs.sh` 按清单处理软件，Go 专用格式转换位于 `scripts/gen_deb_golang.sh`。官方已有 `.deb` 只发现和核验官方发布，不转存；构造包、`<软件id>.provenance.json` 与 `SHA256SUMS` 才进入 `build/upload_tmp_dir/`，直接上传到对应本仓版本的 assets。归档、内部索引、日志和测试不进入发布成果。Pages 复用 `apt-hub-pages` 产物分支发布，只保存公开站点与签名索引，不走 Actions Artifacts，也不再另建站点副本。
 

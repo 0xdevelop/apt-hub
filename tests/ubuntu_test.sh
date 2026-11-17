@@ -1077,11 +1077,11 @@ else
 fi
 src_head=$(git -C "$sandbox" rev-parse 'HEAD^{commit}')
 sha1_parents=$(git --git-dir="$origin" log -1 --format='%P' "$sha1" 2>/dev/null || true)
-if [[ "$sha1_parents" == "$src_head" ]] \
+if [[ -z "$sha1_parents" ]] \
   && ! git --git-dir="$origin" ls-tree -r --name-only "$sha1" 2>/dev/null | grep -q '^scripts/'; then
-  pass "首次保存以当前 HEAD 为源码父且无源码文件"
+  pass "首次保存为独立根且无源码文件"
 else
-  fail "首次保存源码父或树不对 parents=$sha1_parents head=$src_head"
+  fail "首次保存父或树不对 parents=${sha1_parents:-<empty>} head=$src_head"
 fi
 
 printf '%s\n' "$sha1" >"$sandbox/tmp/apt-hub-pages-base.sha"
@@ -1122,10 +1122,11 @@ else
   fail "旧部署脚本未固定到精确 SHA"
 fi
 parent=$(git --git-dir="$origin" rev-parse "${sha2}^" 2>/dev/null || true)
-if [[ "$parent" == "$sha1" ]]; then
-  pass "第二次提交父节点是旧 SHA"
+parent2=$(git --git-dir="$origin" rev-parse --verify --quiet "${sha2}^2" 2>/dev/null || true)
+if [[ "$parent" == "$sha1" && -z "$parent2" ]]; then
+  pass "第二次提交唯一父节点是旧 SHA"
 else
-  fail "第二次提交父节点不是旧 SHA: $parent"
+  fail "第二次提交父节点不是唯一旧 SHA: p1=$parent p2=${parent2:-<empty>}"
 fi
 
 printf '%s\n' "$sha2" >"$sandbox/tmp/apt-hub-pages-base.sha"
@@ -1153,13 +1154,11 @@ save_track_rc=$?
 set -e
 sha_track=$(tr -d '[:space:]' <"$shafile" 2>/dev/null || true)
 track_tree=$(git --git-dir="$origin" rev-parse "${sha_track}^{tree}" 2>/dev/null || true)
-track_p1=$(git --git-dir="$origin" rev-parse "${sha_track}^" 2>/dev/null || true)
-track_p2=$(git --git-dir="$origin" rev-parse "${sha_track}^2" 2>/dev/null || true)
-if [[ "$save_track_rc" -eq 0 && "$sha_track" != "$sha2" && "$track_tree" == "$tree2" \
-  && "$track_p1" == "$sha2" && "$track_p2" == "$src_moved" ]]; then
-  pass "源码前进但产物树不变仍记录源码父"
+track_tip=$(git --git-dir="$origin" rev-parse refs/heads/apt-hub-pages)
+if [[ "$save_track_rc" -eq 0 && "$sha_track" == "$sha2" && "$track_tip" == "$sha2" && "$track_tree" == "$tree2" ]]; then
+  pass "源码前进但产物树不变不新增提交"
 else
-  fail "源码前进未形成可追踪产物 rc=$save_track_rc sha=$sha_track tree=$track_tree/$tree2 p1=$track_p1 p2=$track_p2 src=$src_moved log=$(cat "$savelog" 2>/dev/null || true)"
+  fail "源码前进仍新增提交 rc=$save_track_rc sha=$sha_track tip=$track_tip tree=$track_tree/$tree2 src=$src_moved log=$(cat "$savelog" 2>/dev/null || true)"
 fi
 
 side="$gs/side"
@@ -1257,13 +1256,13 @@ orphan_rc=$?
 set -e
 orphan_sha=$(tr -d '[:space:]' <"$orphan_shafile" 2>/dev/null || true)
 orphan_p1=$(git --git-dir="$orphan_origin" rev-parse "${orphan_sha}^" 2>/dev/null || true)
-orphan_p2=$(git --git-dir="$orphan_origin" rev-parse "${orphan_sha}^2" 2>/dev/null || true)
+orphan_p2=$(git --git-dir="$orphan_origin" rev-parse --verify --quiet "${orphan_sha}^2" 2>/dev/null || true)
 if [[ -z "$orphan_root_parents" && "$orphan_rc" -eq 0 \
-  && "$orphan_p1" == "$orphan_base" && "$orphan_p2" == "$orphan_src" ]] \
+  && "$orphan_p1" == "$orphan_base" && -z "$orphan_p2" ]] \
   && ! git --git-dir="$orphan_origin" ls-tree -r --name-only "$orphan_sha" 2>/dev/null | grep -q '^scripts/'; then
-  pass "孤立历史保存首父不变并记录源码父"
+  pass "孤立历史保存唯一父为旧产物且无源码父"
 else
-  fail "孤立历史父关系不对 rc=$orphan_rc parents=${orphan_root_parents} p1=$orphan_p1 p2=$orphan_p2 base=$orphan_base src=$orphan_src log=$(cat "$orphan_log" 2>/dev/null || true)"
+  fail "孤立历史父关系不对 rc=$orphan_rc parents=${orphan_root_parents:-<empty>} p1=$orphan_p1 p2=${orphan_p2:-<empty>} base=$orphan_base src=$orphan_src log=$(cat "$orphan_log" 2>/dev/null || true)"
 fi
 
 echo "== detached tag 下 README 回写读 main =="

@@ -8,6 +8,11 @@ export LANGUAGE=C
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD="${ROOT}/scripts/gen_deb_golang.sh"
 CONFIG="${ROOT}/config/go.json"
+BASE_REV="$(jq -r '.revision' "${CONFIG}")"
+PROJ_VER="$(tr -d '[:space:]' <"${ROOT}/VERSION")"
+GO_REV="${BASE_REV}+${PROJ_VER}"
+GO_VER="2:9.9.9-${GO_REV}"
+GO_FN="9.9.9-${GO_REV}"
 TMP="${ROOT}/tmp/go-build-v9"
 EVIDENCE="${TMP}/evidence.log"
 # 优先仓内 tmp/metadata-C/bin；其次 PATH。
@@ -199,15 +204,15 @@ write_fixture_json() {
 }
 
 run_isolated_apt_upgrade() {
-  # 旧 Ubuntu 同名 golang/golang-go → 新 epoch 完整目标；upgrade 应 Inst 无 Remv。
-  local new_meta="$1" new_go="$2" expect_ver="$3" label="$4"
+  # 隔离根。普通 upgrade 只面对已装的单个 golang；双包 Conflicts 另测 holdback。
+  local new_deb="$1" expect_ver="$2" label="$3"
   local fp ar
   APT_ROOT="${TMP}/apt-upgrade-${label}"
   rm -rf -- "${APT_ROOT}"
   mkdir -p -- "${APT_ROOT}/repo/pool/main" "${APT_ROOT}/repo/dists/stable/main/binary-amd64" \
     "${APT_ROOT}/gnupg" "${APT_ROOT}/apt-root" "${APT_ROOT}/bin"
 
-  cp -a -- "${new_meta}" "${new_go}" "${APT_ROOT}/repo/pool/main/"
+  cp -a -- "${new_deb}" "${APT_ROOT}/repo/pool/main/"
 
   cat >"${APT_ROOT}/status-seed" <<'EOF'
 Package: golang
@@ -217,17 +222,7 @@ Section: devel
 Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
 Architecture: amd64
 Version: 2:1.22~2build1
-Depends: golang-go (>= 2:1.22~2build1)
-Description: fixture ubuntu golang meta
-
-Package: golang-go
-Status: install ok installed
-Priority: optional
-Section: devel
-Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
-Architecture: amd64
-Version: 2:1.22~2build1
-Description: fixture ubuntu golang-go
+Description: fixture single golang
 
 EOF
 
@@ -329,20 +324,11 @@ EOF
   set -e
   record "apt_s_upgrade_${label}" "${RC}" 0
   set +e
-  grep -E "Inst golang\\b.*${expect_ver}" "${APT_ROOT}/apt-s-upgrade.log" >/dev/null \
-    && grep -E "Inst golang-go\\b.*${expect_ver}" "${APT_ROOT}/apt-s-upgrade.log" >/dev/null
+  grep -E 'Inst golang\b' "${APT_ROOT}/apt-s-upgrade.log" | grep -F "${expect_ver}" >/dev/null \
+    && ! grep -E '^Remv ' "${APT_ROOT}/apt-s-upgrade.log" >/dev/null
   RC=$?
   set -e
-  record "apt_s_selects_new_${label}" "${RC}" 0
-  set +e
-  grep -E 'Remv golang(-go)?\b' "${APT_ROOT}/apt-s-upgrade.log" >/dev/null
-  RC=$?
-  set -e
-  if [[ "${RC}" -eq 0 ]]; then
-    record "apt_s_upgrade_no_remv_${label}" 1 0
-  else
-    record "apt_s_upgrade_no_remv_${label}" 0 0
-  fi
+  record "apt_s_single_golang_${label}" "${RC}" 0
 
   set +e
   APT_CONFIG="${ar}/etc/apt/apt.conf" apt-get -s upgrade >"${APT_ROOT}/aptget-s-upgrade.log" 2>&1
@@ -350,20 +336,65 @@ EOF
   set -e
   record "aptget_s_upgrade_${label}" "${RC}" 0
   set +e
-  grep -E "Inst golang\\b.*${expect_ver}" "${APT_ROOT}/aptget-s-upgrade.log" >/dev/null \
-    && grep -E "Inst golang-go\\b.*${expect_ver}" "${APT_ROOT}/aptget-s-upgrade.log" >/dev/null
+  grep -E 'Inst golang\b' "${APT_ROOT}/aptget-s-upgrade.log" | grep -F "${expect_ver}" >/dev/null \
+    && ! grep -E '^Remv ' "${APT_ROOT}/aptget-s-upgrade.log" >/dev/null
   RC=$?
   set -e
-  record "aptget_s_selects_new_${label}" "${RC}" 0
+  record "aptget_s_single_golang_${label}" "${RC}" 0
+
+  cat >"${ar}/var/lib/dpkg/status" <<'EOF'
+Package: golang
+Status: install ok installed
+Priority: optional
+Section: devel
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Architecture: amd64
+Version: 2:1.22~2build1
+Description: fixture dual golang
+
+Package: golang-go
+Status: install ok installed
+Priority: optional
+Section: devel
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Architecture: amd64
+Version: 2:1.22~2build1
+Description: fixture dual golang-go
+
+Package: hello-biz
+Status: install ok installed
+Priority: optional
+Section: misc
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Architecture: amd64
+Version: 1.0-1
+Description: fixture unrelated package
+
+EOF
   set +e
-  grep -E 'Remv golang(-go)?\b' "${APT_ROOT}/aptget-s-upgrade.log" >/dev/null
+  APT_CONFIG="${ar}/etc/apt/apt.conf" apt-get -s upgrade >"${APT_ROOT}/holdback.log" 2>&1
   RC=$?
   set -e
-  if [[ "${RC}" -eq 0 ]]; then
-    record "aptget_s_upgrade_no_remv_${label}" 1 0
-  else
-    record "aptget_s_upgrade_no_remv_${label}" 0 0
-  fi
+  record "aptget_s_dual_holdback_rc_${label}" "${RC}" 0
+  set +e
+  grep -F 'kept back' "${APT_ROOT}/holdback.log" >/dev/null \
+    && ! grep -E '^Remv ' "${APT_ROOT}/holdback.log" >/dev/null \
+    && ! grep -E 'Inst golang\b' "${APT_ROOT}/holdback.log" | grep -F "${expect_ver}" >/dev/null
+  RC=$?
+  set -e
+  record "aptget_s_dual_holdback_${label}" "${RC}" 0
+  set +e
+  APT_CONFIG="${ar}/etc/apt/apt.conf" apt-get -s install golang >"${APT_ROOT}/install-golang.log" 2>&1
+  RC=$?
+  set -e
+  record "aptget_s_install_golang_rc_${label}" "${RC}" 0
+  set +e
+  grep -E '^Remv golang-go ' "${APT_ROOT}/install-golang.log" >/dev/null \
+    && grep -E 'Inst golang\b' "${APT_ROOT}/install-golang.log" | grep -F "${expect_ver}" >/dev/null \
+    && ! grep -E '^Remv hello-biz ' "${APT_ROOT}/install-golang.log" >/dev/null
+  RC=$?
+  set -e
+  record "aptget_s_install_removes_only_golang_go_${label}" "${RC}" 0
 
   GNUPGHOME="${GNUPG_TEST_HOME}" gpgconf --kill all >/dev/null 2>&1 || true
   rm -rf -- "${GNUPG_TEST_HOME}"
@@ -440,68 +471,70 @@ set +e
 RC=$?
 set -e
 record "fixture_build_ok" "${RC}" 0
-assert_file "${OUT_OK}/golang-go_9.9.9-1_amd64.deb"
-assert_file "${OUT_OK}/golang-go_9.9.9-1_arm64.deb"
-assert_file "${OUT_OK}/golang_9.9.9-1_amd64.deb"
-assert_file "${OUT_OK}/golang_9.9.9-1_arm64.deb"
+assert_file "${OUT_OK}/golang_${GO_FN}_amd64.deb"
+assert_file "${OUT_OK}/golang_${GO_FN}_arm64.deb"
 assert_file "${OUT_OK}/provenance.json"
 assert_file "${OUT_OK}/SHA256SUMS"
+if find -- "${OUT_OK}" -maxdepth 1 -type f -name 'golang-go_*.deb' | grep -q .; then
+  record "no_golang_go_deb" 1 0
+else
+  record "no_golang_go_deb" 0 0
+fi
 
 set +e
-dpkg-deb -f "${OUT_OK}/golang-go_9.9.9-1_amd64.deb" Package | grep -Fxq 'golang-go'
-RC=$?
-set -e
-record "control_package_golang_go" "${RC}" 0
-set +e
-dpkg-deb -f "${OUT_OK}/golang_9.9.9-1_amd64.deb" Package | grep -Fxq 'golang'
+dpkg-deb -f "${OUT_OK}/golang_${GO_FN}_amd64.deb" Package | grep -Fxq 'golang'
 RC=$?
 set -e
 record "control_package_golang" "${RC}" 0
 set +e
-dpkg-deb -f "${OUT_OK}/golang-go_9.9.9-1_amd64.deb" Version | grep -Fxq '2:9.9.9-1'
+dpkg-deb -f "${OUT_OK}/golang_${GO_FN}_amd64.deb" Version | grep -Fxq "${GO_VER}"
 RC=$?
 set -e
 record "control_version" "${RC}" 0
 set +e
-dpkg-deb -f "${OUT_OK}/golang_9.9.9-1_amd64.deb" Depends | grep -Fxq 'golang-go (= 2:9.9.9-1)'
+dpkg-deb -f "${OUT_OK}/golang_${GO_FN}_amd64.deb" Provides | grep -Fxq "golang-go (= ${GO_VER})" \
+  && dpkg-deb -f "${OUT_OK}/golang_${GO_FN}_amd64.deb" Replaces | grep -Fxq "golang-go (<< ${GO_VER})" \
+  && dpkg-deb -f "${OUT_OK}/golang_${GO_FN}_amd64.deb" Conflicts | grep -Fxq "gccgo-go, golang-go (<< ${GO_VER})" \
+  && [[ -z "$(dpkg-deb -f "${OUT_OK}/golang_${GO_FN}_amd64.deb" Breaks 2>/dev/null || true)" ]] \
+  && [[ -z "$(dpkg-deb -f "${OUT_OK}/golang_${GO_FN}_amd64.deb" Depends 2>/dev/null || true)" ]]
 RC=$?
 set -e
-record "meta_depends_exact" "${RC}" 0
+record "control_takeover_fields" "${RC}" 0
 set +e
-dpkg-deb -f "${OUT_OK}/golang-go_9.9.9-1_amd64.deb" Architecture | grep -Fxq 'amd64'
+dpkg-deb -f "${OUT_OK}/golang_${GO_FN}_amd64.deb" Architecture | grep -Fxq 'amd64'
 RC=$?
 set -e
 record "control_arch_amd64" "${RC}" 0
 set +e
-dpkg-deb -c "${OUT_OK}/golang-go_9.9.9-1_amd64.deb" | grep -q 'usr/lib/golang/bin/go'
+dpkg-deb -c "${OUT_OK}/golang_${GO_FN}_amd64.deb" | grep -q 'usr/lib/golang/bin/go'
 RC=$?
 set -e
 record "contents_go_tree" "${RC}" 0
 set +e
-dpkg-deb -c "${OUT_OK}/golang-go_9.9.9-1_amd64.deb" | grep -E -q '(^|/)usr/bin/go( -> |$)'
+dpkg-deb -c "${OUT_OK}/golang_${GO_FN}_amd64.deb" | grep -E -q '(^|/)usr/bin/go( -> |$)'
 RC=$?
 set -e
 record "contents_entrypoint_go" "${RC}" 0
 set +e
-dpkg-deb -c "${OUT_OK}/golang-go_9.9.9-1_amd64.deb" | grep -E -q '(^|/)usr/bin/gofmt( -> |$)'
+dpkg-deb -c "${OUT_OK}/golang_${GO_FN}_amd64.deb" | grep -E -q '(^|/)usr/bin/gofmt( -> |$)'
 RC=$?
 set -e
 record "contents_entrypoint_gofmt" "${RC}" 0
 set +e
-dpkg-deb -c "${OUT_OK}/golang-go_9.9.9-1_amd64.deb" | grep -E -q '(^|/)usr/lib/go( -> |$)'
+dpkg-deb -c "${OUT_OK}/golang_${GO_FN}_amd64.deb" | grep -E -q '(^|/)usr/lib/go( -> |$)'
 RC=$?
 set -e
 record "contents_lib_go_link" "${RC}" 0
 set +e
-jq -e '
+jq -e --arg rev "${GO_REV}" --arg ver "${GO_VER}" '
   .schema_version=="1"
   and .upstream.version=="go9.9.9"
   and .upstream.version_debian=="9.9.9"
   and .upstream.epoch=="2"
-  and .upstream.revision=="1"
-  and (.packages|length)==4
-  and (([.packages[].package]|unique|sort)==["golang","golang-go"])
-  and all(.packages[]; .version=="2:9.9.9-1")
+  and .upstream.revision==$rev
+  and (.packages|length)==2
+  and (([.packages[].package]|unique)==["golang"])
+  and all(.packages[]; .version==$ver)
   and (.packages[0].size|type=="string")
   and (.packages[0].upstream.size|type=="string")
 ' "${OUT_OK}/provenance.json" >/dev/null
@@ -559,12 +592,12 @@ RC=$?
 set -e
 record "fixture_build_repeat" "${RC}" 0
 set +e
-assert_same_bytes "${OUT_OK}/golang-go_9.9.9-1_amd64.deb" "${OUT_OK2}/golang-go_9.9.9-1_amd64.deb"
+assert_same_bytes "${OUT_OK}/golang_${GO_FN}_amd64.deb" "${OUT_OK2}/golang_${GO_FN}_amd64.deb"
 RC=$?
 set -e
 record "repro_amd64_bytes" "${RC}" 0
 set +e
-assert_same_bytes "${OUT_OK}/golang-go_9.9.9-1_arm64.deb" "${OUT_OK2}/golang-go_9.9.9-1_arm64.deb"
+assert_same_bytes "${OUT_OK}/golang_${GO_FN}_arm64.deb" "${OUT_OK2}/golang_${GO_FN}_arm64.deb"
 RC=$?
 set -e
 record "repro_arm64_bytes" "${RC}" 0
@@ -597,12 +630,12 @@ RC=$?
 set -e
 record "mtime_build_b" "${RC}" 0
 set +e
-assert_same_bytes "${OUT_MT_A}/golang-go_9.9.9-1_amd64.deb" "${OUT_MT_B}/golang-go_9.9.9-1_amd64.deb"
+assert_same_bytes "${OUT_MT_A}/golang_${GO_FN}_amd64.deb" "${OUT_MT_B}/golang_${GO_FN}_amd64.deb"
 RC=$?
 set -e
 record "mtime_invariant_amd64" "${RC}" 0
 set +e
-assert_same_bytes "${OUT_MT_A}/golang-go_9.9.9-1_arm64.deb" "${OUT_MT_B}/golang-go_9.9.9-1_arm64.deb"
+assert_same_bytes "${OUT_MT_A}/golang_${GO_FN}_arm64.deb" "${OUT_MT_B}/golang_${GO_FN}_arm64.deb"
 RC=$?
 set -e
 record "mtime_invariant_arm64" "${RC}" 0
@@ -646,12 +679,12 @@ RC=$?
 set -e
 record "mtime_notime_build_b" "${RC}" 0
 set +e
-assert_same_bytes "${OUT_NT_A}/golang-go_9.9.9-1_amd64.deb" "${OUT_NT_B}/golang-go_9.9.9-1_amd64.deb"
+assert_same_bytes "${OUT_NT_A}/golang_${GO_FN}_amd64.deb" "${OUT_NT_B}/golang_${GO_FN}_amd64.deb"
 RC=$?
 set -e
 record "mtime_notime_invariant_amd64" "${RC}" 0
 set +e
-assert_same_bytes "${OUT_NT_A}/golang-go_9.9.9-1_arm64.deb" "${OUT_NT_B}/golang-go_9.9.9-1_arm64.deb"
+assert_same_bytes "${OUT_NT_A}/golang_${GO_FN}_arm64.deb" "${OUT_NT_B}/golang_${GO_FN}_arm64.deb"
 RC=$?
 set -e
 record "mtime_notime_invariant_arm64" "${RC}" 0
@@ -746,14 +779,14 @@ if [[ ! -s "${SIZE_SCRATCH}/out-missing.txt" ]]; then
 fi
 record "installed_size_missing_root_no_output" "${RC}" 0
 # 完整构包：Installed-Size 可复现且不跟 du 分配漂
-IS_A="$(dpkg-deb -f -- "${OUT_OK}/golang-go_9.9.9-1_amd64.deb" Installed-Size)"
-IS_B="$(dpkg-deb -f -- "${OUT_OK2}/golang-go_9.9.9-1_amd64.deb" Installed-Size)"
+IS_A="$(dpkg-deb -f -- "${OUT_OK}/golang_${GO_FN}_amd64.deb" Installed-Size)"
+IS_B="$(dpkg-deb -f -- "${OUT_OK2}/golang_${GO_FN}_amd64.deb" Installed-Size)"
 RC=1
 if [[ "${IS_A}" == "${IS_B}" && "${IS_A}" =~ ^[0-9]+$ ]]; then
   RC=0
 fi
 record "installed_size_repro_in_deb" "${RC}" 0
-META_IS="$(dpkg-deb -f -- "${OUT_OK}/golang_9.9.9-1_amd64.deb" Installed-Size)"
+META_IS="$(dpkg-deb -f -- "${OUT_OK}/golang_${GO_FN}_amd64.deb" Installed-Size)"
 RC=1
 if [[ "${META_IS}" =~ ^[0-9]+$ ]]; then
   RC=0
@@ -1090,10 +1123,10 @@ set -e
 wait "${ATOM_WATCH_PID}" 2>/dev/null || true
 rm -f -- "${TMP}/test/atomic-watch-stop"
 record "atomic_build_ok" "${RC}" 0
-if [[ -f "${OUT_ATOM}/golang-go_9.9.9-1_amd64.deb" \
-  && -f "${OUT_ATOM}/golang-go_9.9.9-1_arm64.deb" \
-  && -f "${OUT_ATOM}/golang_9.9.9-1_amd64.deb" \
-  && -f "${OUT_ATOM}/golang_9.9.9-1_arm64.deb" \
+if [[ -f "${OUT_ATOM}/golang_${GO_FN}_amd64.deb" \
+  && -f "${OUT_ATOM}/golang_${GO_FN}_arm64.deb" \
+  && -f "${OUT_ATOM}/golang_${GO_FN}_amd64.deb" \
+  && -f "${OUT_ATOM}/golang_${GO_FN}_arm64.deb" \
   && -f "${OUT_ATOM}/provenance.json" ]]; then
   record "atomic_full_commit" 0 0
 else
@@ -1253,18 +1286,18 @@ RC=$?
 set -e
 record "fixture_one_arch_ok" "${RC}" 0
 set +e
-[[ -f "${OUT_ONE}/golang-go_9.9.9-1_amd64.deb" \
-  && -f "${OUT_ONE}/golang_9.9.9-1_amd64.deb" \
-  && ! -f "${OUT_ONE}/golang-go_9.9.9-1_arm64.deb" \
-  && ! -f "${OUT_ONE}/golang_9.9.9-1_arm64.deb" ]]
+[[ -f "${OUT_ONE}/golang_${GO_FN}_amd64.deb" && ! -f "${OUT_ONE}/golang_${GO_FN}_arm64.deb" ]]
 RC=$?
+if find -- "${OUT_ONE}" -maxdepth 1 -type f -name 'golang-go_*.deb' | grep -q .; then
+  RC=1
+fi
 set -e
 record "one_arch_deb_set" "${RC}" 0
 set +e
 jq -e --argjson want '["amd64"]' '
   (([.packages[].architecture]|unique|sort) == ($want|sort))
-  and (.packages|length)==(($want|length)*2)
-  and (([.packages[].package]|unique|sort)==["golang","golang-go"])
+  and (.packages|length)==($want|length)
+  and (([.packages[].package]|unique)==["golang"])
 ' "${OUT_ONE}/provenance.json" >/dev/null
 RC=$?
 set -e
@@ -1272,9 +1305,8 @@ record "one_arch_provenance" "${RC}" 0
 
 # ---------- 默认：夹具签名 APT（旧 Ubuntu 同名 → 新 epoch，无 Remv） ----------
 run_isolated_apt_upgrade \
-  "${OUT_OK}/golang_9.9.9-1_amd64.deb" \
-  "${OUT_OK}/golang-go_9.9.9-1_amd64.deb" \
-  "2:9.9.9-1" \
+  "${OUT_OK}/golang_${GO_FN}_amd64.deb" \
+  "${GO_VER}" \
   "fixture"
 
 # ---------- 可选 live：现有缓存真官方 ----------
@@ -1332,11 +1364,10 @@ if [[ "${LIVE}" -eq 1 ]]; then
   set -e
   record "official_build" "${RC}" 0
 
-  OFF_VER_DEB="$(jq -r '.packages[] | select(.package=="golang-go" and .architecture=="amd64") | .version' "${OUT_OFF}/provenance.json")"
+  OFF_VER_DEB="$(jq -r '.packages[] | select(.package=="golang" and .architecture=="amd64") | .version' "${OUT_OFF}/provenance.json")"
   OFF_VER_FN="${OFF_VER_DEB#2:}"
-  OFF_AMD_DEB="${OUT_OFF}/golang-go_${OFF_VER_FN}_amd64.deb"
-  OFF_ARM_DEB="${OUT_OFF}/golang-go_${OFF_VER_FN}_arm64.deb"
-  OFF_AMD_META="${OUT_OFF}/golang_${OFF_VER_FN}_amd64.deb"
+  OFF_AMD_DEB="${OUT_OFF}/golang_${OFF_VER_FN}_amd64.deb"
+  OFF_ARM_DEB="${OUT_OFF}/golang_${OFF_VER_FN}_arm64.deb"
   assert_file "${OFF_AMD_DEB}"
   assert_file "${OFF_ARM_DEB}"
   log "official_deb_amd_sha=$(sha256sum -- "${OFF_AMD_DEB}" | awk '{print $1}')"
@@ -1430,10 +1461,10 @@ EOF
     log "host not amd64; skip offline run"
   fi
 
-  run_isolated_apt_upgrade "${OFF_AMD_META}" "${OFF_AMD_DEB}" "${OFF_VER_DEB}" "official"
+  run_isolated_apt_upgrade "${OFF_AMD_DEB}" "${OFF_VER_DEB}" "official"
 
   set +e
-  dpkg-deb -f "${OFF_AMD_DEB}" Package | grep -Fxq golang-go
+  dpkg-deb -f "${OFF_AMD_DEB}" Package | grep -Fxq golang
   RC=$?
   set -e
   record "final_control_package" "${RC}" 0

@@ -91,7 +91,12 @@ validate_constructed_dir() {
   ' "${catalog}" >/dev/null || die "catalog 与 go 配置组合不一致"
   pkg="$(jq -r '.package' "${gocfg}")"
   epoch="$(jq -r '.epoch' "${gocfg}")"
-  rev="$(jq -r '.revision' "${gocfg}")"
+  base_rev="$(jq -r '.revision' "${gocfg}")"
+  [[ -f "${ROOT}/VERSION" && ! -L "${ROOT}/VERSION" ]] || die "缺少 VERSION"
+  project_version="$(tr -d '[:space:]' <"${ROOT}/VERSION")" || die "无法读取 VERSION"
+  [[ "${base_rev}" =~ ^[0-9]+$ && "${project_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || die "VERSION 或 config revision 语法非法"
+  rev="${base_rev}+${project_version}"
   cat_id="$(jq -r '[.packages[] | select(.source_type=="go_official_archive")][0].id' "${catalog}")"
   [[ "${cat_id}" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || die "catalog id 非法"
   prov="${dl}/${cat_id}.provenance.json"
@@ -102,10 +107,10 @@ validate_constructed_dir() {
   jq -e --arg pkg "${pkg}" --arg epoch "${epoch}" --arg rev "${rev}" --slurpfile go "${gocfg}" '
     . as $root
     | ($go[0].architectures | sort) as $archs
-    | ([$pkg, "golang-go"] | unique | sort) as $names
+    | ([$pkg] | unique | sort) as $names
     | ([$names[] as $n | $archs[] as $a | "\($n)|\($a)"] | sort) as $want
     | ([.packages[] | "\(.package)|\(.architecture)"] | sort) as $got
-    | ($names | length) == 2
+    | ($names | length) == 1
     and ($root.schema_version=="1")
     and ($root.upstream.epoch==$epoch)
     and ($root.upstream.revision==$rev)
@@ -115,7 +120,7 @@ validate_constructed_dir() {
     and all(.packages[];
         .version == ($root.upstream.epoch + ":" + $root.upstream.version_debian + "-" + $root.upstream.revision))
   ' "${prov}" >/dev/null || die "来源与规定组合不一致"
-  local row filename row_pkg row_ver row_arch row_sha row_size got_size got_sha
+  local row filename row_pkg row_ver row_arch row_sha row_size got_size got_sha rev_re
   while IFS= read -r row; do
     filename="$(jq -r '.filename' <<<"${row}")"
     row_pkg="$(jq -r '.package' <<<"${row}")"
@@ -134,7 +139,9 @@ validate_constructed_dir() {
     [[ "$(dpkg-deb -f -- "${dl}/${filename}" Package)" == "${row_pkg}" ]] || die "Package 不一致: ${filename}"
     [[ "$(dpkg-deb -f -- "${dl}/${filename}" Version)" == "${row_ver}" ]] || die "Version 不一致: ${filename}"
     [[ "$(dpkg-deb -f -- "${dl}/${filename}" Architecture)" == "${row_arch}" ]] || die "Architecture 不一致: ${filename}"
-    [[ "${row_ver}" =~ ^${epoch}:.+-${rev}$ ]] || die "版本与 config epoch/revision 不符: ${row_ver}"
+    rev_re="${rev//./\\.}"
+    rev_re="${rev_re//+/\\+}"
+    [[ "${row_ver}" =~ ^${epoch}:.+-${rev_re}$ ]] || die "版本与 config epoch/revision 不符: ${row_ver}"
   done < <(jq -c '.packages[]' "${prov}")
   find "${dl}" -maxdepth 1 -type f -name '*.deb' -printf '%f\n' | LC_ALL=C sort >"${work}/deb.names"
   jq -r '.packages[].filename' "${prov}" | LC_ALL=C sort >"${work}/prov.names"

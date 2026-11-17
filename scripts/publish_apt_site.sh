@@ -8,7 +8,9 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd -- "${ROOT}"
 
 die() {
-  printf 'publish_apt_site.sh: %s\n' "$*" >&2
+  local msg="$*"
+  msg="${msg#::error::}"
+  printf '::error::%s\n' "${msg}" >&2
   exit 1
 }
 
@@ -20,7 +22,7 @@ EOF
 }
 
 ensure_apt_hub_pages_branch() {
-  local name="$1" email="$2" ls_rc=0 work blob tree commit source
+  local name="$1" email="$2" ls_rc=0 work blob tree commit
   set +e
   git ls-remote --exit-code --heads origin refs/heads/apt-hub-pages >/dev/null
   ls_rc=$?
@@ -34,7 +36,6 @@ ensure_apt_hub_pages_branch() {
   work=$(mktemp -d "${ROOT}/tmp/apt-hub-pages-init.XXXXXX")
   rmdir "${work}"
   git worktree add --detach "${work}" HEAD
-  source=$(git -C "${work}" rev-parse --verify 'HEAD^{commit}')
   : >"${work}/.nojekyll"
   blob=$(git -C "${work}" hash-object -w -- "${work}/.nojekyll")
   tree=$(printf '100644 blob %s\t.nojekyll\n' "${blob}" | git -C "${work}" mktree)
@@ -43,7 +44,7 @@ ensure_apt_hub_pages_branch() {
       GIT_AUTHOR_EMAIL="${email}" \
       GIT_COMMITTER_NAME="${name}" \
       GIT_COMMITTER_EMAIL="${email}" \
-      git -C "${work}" commit-tree "${tree}" -p "${source}" -m "准备 Pages 产物分支"
+      git -C "${work}" commit-tree "${tree}" -m "准备 Pages 产物分支"
   )
   if ! git -C "${work}" push origin "${commit}:refs/heads/apt-hub-pages"; then
     git worktree remove --force "${work}" >/dev/null 2>&1 || true
@@ -340,13 +341,12 @@ gate_site() {
 
 save_apt_hub_pages() (
   local work base rel saved="" remote name="${APT_HUB_GIT_NAME:?}" email="${APT_HUB_GIT_EMAIL:?}"
-  local source="" tree="" base_tree="" anc_rc=0
+  local tree="" base_tree=""
   local -a parents=()
   work=$(mktemp -d "${ROOT}/tmp/apt-hub-pages.XXXXXX")
   rmdir "${work}"
   trap 'git worktree remove --force "${work}" >/dev/null 2>&1 || true' EXIT
   base=$(<tmp/apt-hub-pages-base.sha)
-  source=$(git rev-parse --verify 'HEAD^{commit}')
   if [[ -n "${base}" ]]; then
     [[ "${base}" =~ ^[0-9a-f]{40}$ ]] || die "apt-hub-pages 基线非法"
     git worktree add --detach "${work}" "${base}"
@@ -356,20 +356,9 @@ save_apt_hub_pages() (
         *) die "apt-hub-pages 含非站点文件: ${rel}" ;;
       esac
     done <tmp/previous-paths.txt
-    set +e
-    git merge-base --is-ancestor "${source}" "${base}"
-    anc_rc=$?
-    set -e
-    if [[ "${anc_rc}" -eq 0 ]]; then
-      parents=(-p "${base}")
-    elif [[ "${anc_rc}" -eq 1 ]]; then
-      parents=(-p "${base}" -p "${source}")
-    else
-      die "无法判断源码提交是否已在产物基线中"
-    fi
+    parents=(-p "${base}")
   else
-    git worktree add --detach "${work}" "${source}"
-    parents=(-p "${source}")
+    git worktree add --detach "${work}" HEAD
   fi
   git -C "${work}" read-tree --empty
   while IFS= read -r -d '' rel; do
@@ -384,7 +373,7 @@ save_apt_hub_pages() (
     [[ ! -f "${work}/${rel}" ]] || git -C "${work}" add -- "${rel}"
   done
   tree=$(git -C "${work}" write-tree)
-  if [[ -n "${base}" && "${anc_rc}" -eq 0 ]]; then
+  if [[ -n "${base}" ]]; then
     base_tree=$(git rev-parse "${base}^{tree}")
     if [[ "${tree}" == "${base_tree}" ]]; then
       saved="${base}"
@@ -404,29 +393,56 @@ save_apt_hub_pages() (
   [[ -z "${GITHUB_OUTPUT:-}" ]] || printf 'apt_hub_pages_sha=%s\n' "${saved}" >>"${GITHUB_OUTPUT}"
 )
 
+pages_http_note() {
+  local file="$1" line=""
+  line=$(grep -m 1 -oE 'HTTP [0-9]{3}' -- "${file}" || true)
+  if [[ -n "${line}" ]]; then
+    printf '%s\n' "${line}"
+  else
+    printf '%s\n' 'HTTP 状态缺失'
+  fi
+}
+
 deploy_pages() {
   local sha="${APT_HUB_PAGES_SHA:?}" remote request url endpoint body status commit attempt
+  local matched=0 err note post_cmd
   [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || die "::error::站点提交非法"
   remote=$(git ls-remote --exit-code origin refs/heads/apt-hub-pages) || die "::error::无法回读 apt-hub-pages"
   [[ "${remote%%$'\t'*}" == "${sha}" ]] || die "::error::Pages 分支提交已变化，拒绝回读: ${sha}"
-  request=$(gh api --method POST "repos/${GITHUB_REPOSITORY:?}/pages/builds") || die "::error::请求 Pages 分支构建失败"
+  post_cmd="gh api --method POST repos/${GITHUB_REPOSITORY:?}/pages/builds"
+  err=$(mktemp "${ROOT}/tmp/pages-http.XXXXXX")
+  if ! request=$(gh api --method POST "repos/${GITHUB_REPOSITORY}/pages/builds" 2>"${err}"); then
+    note=$(pages_http_note "${err}")
+    rm -f -- "${err}"
+    die "阶段=deploy-pages 命令=${post_cmd} ${note}"
+  fi
+  rm -f -- "${err}"
   url=$(jq -er '.url' <<<"${request}") || die "::error::Pages 未返回构建地址: ${SITE_URL:?}"
   endpoint="${url#"${GITHUB_API_URL:?}/"}"
   [[ "${endpoint}" =~ ^repos/${GITHUB_REPOSITORY}/pages/builds/([0-9]+|latest)$ ]] || die "::error::Pages 构建地址非法: ${SITE_URL:?} ${url}"
   status=""
   for ((attempt=0; attempt<60; attempt++)); do
-    body=$(gh api "${endpoint}") || die "::error::读取 Pages 构建失败"
+    err=$(mktemp "${ROOT}/tmp/pages-http.XXXXXX")
+    if ! body=$(gh api "${endpoint}" 2>"${err}"); then
+      note=$(pages_http_note "${err}")
+      rm -f -- "${err}"
+      die "阶段=deploy-pages 命令=轮询构建状态 ${note}"
+    fi
+    rm -f -- "${err}"
     status=$(jq -er '.status' <<<"${body}") || die "::error::Pages 构建状态缺失"
     case "${status}" in
       built)
         commit=$(jq -er '.commit' <<<"${body}") || die "::error::Pages 未返回部署提交"
-        [[ "${commit}" == "${sha}" ]] || die "::error::Pages 部署了其他提交，拒绝回写列表: ${commit}"
-        break ;;
+        if [[ "${commit}" == "${sha}" ]]; then
+          matched=1
+          break
+        fi
+        sleep 10 ;;
       queued|building) sleep 10 ;;
       *) die "::error::Pages 构建未成功: ${status}" ;;
     esac
   done
-  [[ "${status}" == built ]] || die "::error::Pages 构建超时: ${status}"
+  [[ "${matched}" -eq 1 ]] || die "阶段=deploy-pages 命令=轮询构建状态 Pages 构建超时: ${status}"
   for ((attempt=0; attempt<60; attempt++)); do
     if curl -fsS --proto '=https' --connect-timeout 15 --max-time 30 \
       "${SITE_URL:?}/state.json" -o tmp/public-state.json && cmp -s tmp/site/state.json tmp/public-state.json \

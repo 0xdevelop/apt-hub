@@ -24,7 +24,6 @@ PACKAGE_RELEASE_TAG_RE='^v[0-9]+\.[0-9]+\.[0-9]+$'
 GO_PROVENANCE_ASSET='golang.provenance.json'
 LEGACY_GO_PROVENANCE_ASSET='provenance.json'
 GO_META_PACKAGE='golang'
-GO_TOOL_PACKAGE='golang-go'
 SITE_URL_RE='^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]+)?(/[A-Za-z0-9._~/-]*)?$'
 GO_DOWNLOADS_DEFAULT_URL='https://go.dev/dl/?mode=json&include=all'
 
@@ -224,7 +223,7 @@ assert_origin_relative_filename() {
   [[ "${f}" != *//* ]] || die "${role} 含空路径段: ${f}"
   [[ "${f}" != pool/* ]] || die "${role} 不能是旧 pool 路径: ${f}"
   [[ "${f}" == *.deb ]] || die "${role} 必须以 .deb 结尾: ${f}"
-  [[ "${f}" =~ ^[A-Za-z0-9._~/-]+\.deb$ ]] || die "${role} 不是规范官方相对路径: ${f}"
+  [[ "${f}" =~ ^[A-Za-z0-9._~/+-]+\.deb$ ]] || die "${role} 不是规范官方相对路径: ${f}"
 }
 
 # catalog / previous / consumer 同一 id 规则：ASCII 字母数字开头 + _.-，拒 .. 与路径分隔符
@@ -393,10 +392,22 @@ assert_go_release_tag_matches_provenance() {
   rev="$(jq -r '.upstream.revision // empty' "${prov}")"
   epoch="$(jq -r '.upstream.epoch // empty' "${prov}")"
   [[ "${ver_deb}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "provenance version_debian 非法"
-  [[ "${rev}" =~ ^[1-9][0-9]*$ ]] || die "provenance revision 非法"
+  [[ "${rev}" =~ ^[1-9][0-9]*$ ]] || die "存量 provenance revision 必须是纯数字"
   [[ "${epoch}" == "2" ]] || die "provenance upstream.epoch 必须是 \"2\""
   expect="golang-${ver_deb}-${rev}"
   [[ "${tag}" == "${expect}" ]] || die "存量 golang tag 与 provenance 不符: ${tag} != ${expect}"
+}
+
+go_checkout_derived_revision() {
+  local cfg base ver
+  cfg="${PROJECT_ROOT}/config/go.json"
+  [[ -f "${cfg}" && ! -L "${cfg}" ]] || die "缺少 config/go.json"
+  [[ -f "${PROJECT_ROOT}/VERSION" && ! -L "${PROJECT_ROOT}/VERSION" ]] || die "缺少 VERSION"
+  base="$(jq -r '.revision // empty' "${cfg}")"
+  ver="$(tr -d '[:space:]' <"${PROJECT_ROOT}/VERSION")" || die "无法读取 VERSION"
+  [[ "${base}" =~ ^[1-9][0-9]*$ ]] || die "config revision 非法"
+  [[ "${ver}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "VERSION 语法非法"
+  printf '%s+%s\n' "${base}" "${ver}"
 }
 
 go_provenance_name_for_tag() {
@@ -418,7 +429,8 @@ go_expected_deb_version() {
   ver_deb="$(jq -r '.upstream.version_debian // empty' "${prov}")"
   rev="$(jq -r '.upstream.revision // empty' "${prov}")"
   epoch="$(jq -r '.upstream.epoch // empty' "${prov}")"
-  [[ "${epoch}" == "2" && "${ver_deb}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "${rev}" =~ ^[1-9][0-9]*$ ]] \
+  [[ "${epoch}" == "2" && "${ver_deb}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ \
+    && "${rev}" =~ ^[1-9][0-9]*(\+[0-9]+\.[0-9]+\.[0-9]+)?$ ]] \
     || die "provenance 无法派生 deb Version"
   printf '%s:%s-%s\n' "${epoch}" "${ver_deb}" "${rev}"
 }
@@ -1516,6 +1528,17 @@ while IFS= read -r pkgjson; do
     jq -e '.schema_version=="1" and (.upstream|type)=="object" and (.packages|type)=="array"' "${go_prov_path}" >/dev/null \
       || die "provenance 结构非法"
     go_expected_deb_version "${go_prov_path}" >/dev/null
+    derived_rev="$(go_checkout_derived_revision)"
+    got_rev="$(jq -r '.upstream.revision // empty' "${go_prov_path}")"
+    [[ "${got_rev}" == "${derived_rev}" ]] \
+      || die "活跃 Go revision 必须由 config.revision 与 VERSION 派生为 ${derived_rev}"
+    jq -e --arg pkg "${pkg}" --arg rev "${derived_rev}" '
+      . as $root
+      | ([.packages[].package]|unique)==[$pkg]
+      and all(.packages[];
+        .version == ("2:" + $root.upstream.version_debian + "-" + $rev)
+      )
+    ' "${go_prov_path}" >/dev/null || die "活跃 Go 包族必须唯一等于 catalog package"
     go_downloads_path="${scratch}/go-downloads-${id}.json"
     load_go_downloads_index "${go_downloads_path}"
     go_version="$(jq -r '.upstream.version // empty' "${go_prov_path}")"
@@ -1568,13 +1591,13 @@ while IFS= read -r pkgjson; do
     : >"${stanza_dir}/${arch}.stanza"
     arch_unit_specs=()
     if [[ "${source_type}" == "go_official_archive" ]]; then
-      # catalog 正则锚定主包；同 arch 工具包从 provenance 清单取。
+      # catalog 正则锚定主包文件名；包族只认 catalog package，不认 provenance 自证。
       match_unique_asset "${release_json}" "${regex}" >/dev/null
       go_arch_count="$(jq --arg a "${arch}" '[.packages[]? | select(.architecture==$a)] | length' "${go_prov_path}")"
-      [[ "${go_arch_count}" == "2" ]] || die "Go provenance ${arch} 必须恰好 2 个包，实际 ${go_arch_count}"
-      jq -e --arg a "${arch}" --arg m "${GO_META_PACKAGE}" --arg t "${GO_TOOL_PACKAGE}" '
-        ([.packages[]? | select(.architecture==$a) | .package] | sort) == ([$m,$t] | sort)
-      ' "${go_prov_path}" >/dev/null || die "Go provenance ${arch} 必须是 ${GO_META_PACKAGE}+${GO_TOOL_PACKAGE}"
+      [[ "${go_arch_count}" == "1" ]] || die "活跃 Go provenance ${arch} 必须恰好 1 个包，实际 ${go_arch_count}"
+      jq -e --arg a "${arch}" --arg m "${pkg}" '
+        ([.packages[]? | select(.architecture==$a) | .package]) == [$m]
+      ' "${go_prov_path}" >/dev/null || die "活跃 Go provenance ${arch} 必须是 catalog package ${pkg}"
       go_units_file="${scratch}/go-units-${id}-${arch}.jsonl"
       jq -c --arg a "${arch}" '.packages[] | select(.architecture==$a)' "${go_prov_path}" \
         >"${go_units_file}" || die "枚举 Go provenance ${arch} 失败"

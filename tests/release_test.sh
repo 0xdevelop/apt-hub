@@ -39,6 +39,9 @@ record() {
 }
 
 VER_BEFORE="$(tr -d '[:space:]' <"${VERSION_FILE}")"
+BASE_REV="$(jq -r '.revision' "${ROOT}/config/go.json")"
+GO_REV="${BASE_REV}+${VER_BEFORE}"
+GO_UP="7.7.7-${GO_REV}"
 
 if [[ ! -e "${ROOT}/scripts/release_golang.sh" && ! -e "${ROOT}/gen_deb_golang.sh" ]]; then
   pass "已删除独立 Go 发布脚本与根 gen_deb_golang"
@@ -127,18 +130,17 @@ RC=$?
 set -e
 record "build_explicit_output" "${RC}" 0
 names="$(find "${OUT_BUILD}" -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | LC_ALL=C sort | tr '\n' ' ')"
-if [[ -f "${OUT_BUILD}/golang_7.7.7-1_amd64.deb" \
-  && -f "${OUT_BUILD}/golang_7.7.7-1_arm64.deb" \
-  && -f "${OUT_BUILD}/golang-go_7.7.7-1_amd64.deb" \
-  && -f "${OUT_BUILD}/golang-go_7.7.7-1_arm64.deb" \
+if [[ -f "${OUT_BUILD}/golang_${GO_UP}_amd64.deb" \
+  && -f "${OUT_BUILD}/golang_${GO_UP}_arm64.deb" \
   && -f "${OUT_BUILD}/golang.provenance.json" \
   && -f "${OUT_BUILD}/SHA256SUMS" \
-  && ! -e "${OUT_BUILD}/provenance.json" ]]; then
-  pass "上传集仅四 deb + golang.provenance.json + SHA256SUMS"
+  && ! -e "${OUT_BUILD}/provenance.json" ]] \
+  && ! find -- "${OUT_BUILD}" -maxdepth 1 -type f -name 'golang-go_*.deb' | grep -q .; then
+  pass "上传集仅两 deb + golang.provenance.json + SHA256SUMS"
 else
   fail "上传集不符: ${names}"
 fi
-if jq -e '.schema_version=="1" and (.upstream.epoch=="2") and (.packages|length==4)' \
+if jq -e --arg rev "${GO_REV}" '.schema_version=="1" and (.upstream.epoch=="2") and (.upstream.revision==$rev) and (.packages|length==2)' \
   "${OUT_BUILD}/golang.provenance.json" >/dev/null 2>&1; then
   pass "golang.provenance.json 仍为 schema1"
 else
@@ -395,16 +397,16 @@ asset_case() {
 }
 asset_case empty '{"tag_name":"v0.0.2","draft":false,"assets":[]}' 10
 asset_case array '[]' 1
-asset_case partial '{"tag_name":"v0.0.2","draft":false,"assets":[{"name":"golang_7.7.7-1_amd64.deb","size":1,"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"uploaded"}]}' 1
+asset_case partial "$(jq -nc --arg n "golang_${GO_UP}_amd64.deb" '{tag_name:"v0.0.2",draft:false,assets:[{name:$n,size:1,digest:"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",state:"uploaded"}]}')" 1
 # 名字齐全但 digest 与真实字节不符，不能当 complete。
-bad_digest='{"tag_name":"v0.0.2","draft":false,"assets":[
-  {"name":"golang_7.7.7-1_amd64.deb","size":1,"digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","state":"uploaded"},
-  {"name":"golang_7.7.7-1_arm64.deb","size":1,"digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","state":"uploaded"},
-  {"name":"golang-go_7.7.7-1_amd64.deb","size":1,"digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","state":"uploaded"},
-  {"name":"golang-go_7.7.7-1_arm64.deb","size":1,"digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","state":"uploaded"},
-  {"name":"golang.provenance.json","size":2,"digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","state":"uploaded"},
-  {"name":"SHA256SUMS","size":3,"digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","state":"uploaded"}
-]}'
+bad_digest="$(jq -nc --arg amd "golang_${GO_UP}_amd64.deb" --arg arm "golang_${GO_UP}_arm64.deb" '{
+  tag_name:"v0.0.2", draft:false,
+  assets:[
+    {name:$amd,size:1,digest:"sha256:0000000000000000000000000000000000000000000000000000000000000000",state:"uploaded"},
+    {name:$arm,size:1,digest:"sha256:0000000000000000000000000000000000000000000000000000000000000000",state:"uploaded"},
+    {name:"golang.provenance.json",size:2,digest:"sha256:0000000000000000000000000000000000000000000000000000000000000000",state:"uploaded"},
+    {name:"SHA256SUMS",size:3,digest:"sha256:0000000000000000000000000000000000000000000000000000000000000000",state:"uploaded"}
+  ]}')"
 asset_case digest "${bad_digest}" 1
 set +e
 env PATH="${EVIDENCE}/bin:${PATH}" GH_TOKEN=t TMPDIR="${EVIDENCE}/no-such-tmpdir" \
@@ -503,26 +505,26 @@ assets_from_dir() {
   set -e
   record "assets_${name}" "${RC}" "${want}"
 }
-miss_go="${EVIDENCE}/miss-golang-go"
-rm -rf -- "${miss_go}"
-mkdir -p -- "${miss_go}"
-cp -a -- "${OUT_BUILD}/." "${miss_go}/"
-rm -f -- "${miss_go}"/golang-go_*.deb
-jq 'del(.packages[] | select(.package=="golang-go"))' \
-  "${OUT_BUILD}/golang.provenance.json" >"${miss_go}/golang.provenance.json"
-assets_from_dir missing_golang_go "${miss_go}" 1
-if grep -Fq '来源与规定组合不一致' "${EVIDENCE}/runs/assets-missing_golang_go.err"; then
-  pass "缺整组 golang-go 拒绝"
+miss_arch="${EVIDENCE}/miss-arch"
+rm -rf -- "${miss_arch}"
+mkdir -p -- "${miss_arch}"
+cp -a -- "${OUT_BUILD}/." "${miss_arch}/"
+rm -f -- "${miss_arch}/golang_${GO_UP}_arm64.deb"
+jq --arg fn "golang_${GO_UP}_arm64.deb" 'del(.packages[] | select(.filename==$fn))' \
+  "${OUT_BUILD}/golang.provenance.json" >"${miss_arch}/golang.provenance.json"
+assets_from_dir missing_arch "${miss_arch}" 1
+if grep -Fq '来源与规定组合不一致' "${EVIDENCE}/runs/assets-missing_arch.err"; then
+  pass "缺一个架构拒绝"
 else
-  fail "缺整组 golang-go 未拒绝"
+  fail "缺一个架构未拒绝"
 fi
 extra_dir="${EVIDENCE}/extra-family"
 rm -rf -- "${extra_dir}"
 mkdir -p -- "${extra_dir}"
 cp -a -- "${OUT_BUILD}/." "${extra_dir}/"
-cp -a -- "${extra_dir}/golang_7.7.7-1_amd64.deb" "${extra_dir}/extra_7.7.7-1_amd64.deb"
-cp -a -- "${extra_dir}/golang_7.7.7-1_arm64.deb" "${extra_dir}/extra_7.7.7-1_arm64.deb"
-jq '.packages += [.packages[] | select(.package=="golang") | .package="extra-lang" | .filename=("extra_7.7.7-1_"+.architecture+".deb")]' \
+cp -a -- "${extra_dir}/golang_${GO_UP}_amd64.deb" "${extra_dir}/extra_${GO_UP}_amd64.deb"
+cp -a -- "${extra_dir}/golang_${GO_UP}_arm64.deb" "${extra_dir}/extra_${GO_UP}_arm64.deb"
+jq --arg up "${GO_UP}" '.packages += [.packages[] | select(.package=="golang") | .package="extra-lang" | .filename=("extra_"+$up+"_"+.architecture+".deb")]' \
   "${OUT_BUILD}/golang.provenance.json" >"${extra_dir}/golang.provenance.json"
 assets_from_dir extra_family "${extra_dir}" 1
 if grep -Fq '来源与规定组合不一致' "${EVIDENCE}/runs/assets-extra_family.err"; then
@@ -545,12 +547,12 @@ dup_dir="${EVIDENCE}/dup-pair"
 rm -rf -- "${dup_dir}"
 mkdir -p -- "${dup_dir}"
 cp -a -- "${OUT_BUILD}/." "${dup_dir}/"
-cp -a -- "${dup_dir}/golang_7.7.7-1_amd64.deb" "${dup_dir}/golang_7.7.7-1_amd64_dup.deb"
-rm -f -- "${dup_dir}/golang-go_7.7.7-1_arm64.deb"
-jq '
+cp -a -- "${dup_dir}/golang_${GO_UP}_amd64.deb" "${dup_dir}/golang_${GO_UP}_amd64_dup.deb"
+rm -f -- "${dup_dir}/golang_${GO_UP}_arm64.deb"
+jq --arg fn "golang_${GO_UP}_amd64_dup.deb" '
   (.packages | map(select(.package=="golang" and .architecture=="amd64"))[0]) as $dup
-  | .packages |= (map(select(.package!="golang-go" or .architecture!="arm64"))
-      + [$dup | .filename="golang_7.7.7-1_amd64_dup.deb"])
+  | .packages |= (map(select(.architecture!="arm64"))
+      + [$dup | .filename=$fn])
 ' "${OUT_BUILD}/golang.provenance.json" >"${dup_dir}/golang.provenance.json"
 assets_from_dir duplicate_pair "${dup_dir}" 1
 if grep -Fq '来源与规定组合不一致' "${EVIDENCE}/runs/assets-duplicate_pair.err"; then
@@ -752,8 +754,8 @@ gap="${EVIDENCE}/local-gap"
 rm -rf -- "${gap}"
 mkdir -p -- "${gap}"
 cp -a -- "${OUT_BUILD}/." "${gap}/"
-rm -f -- "${gap}"/golang-go_*.deb
-jq 'del(.packages[] | select(.package=="golang-go"))' "${gap}/golang.provenance.json" >"${EVIDENCE}/runs/local-gap.prov"
+rm -f -- "${gap}/golang_${GO_UP}_arm64.deb"
+jq --arg fn "golang_${GO_UP}_arm64.deb" 'del(.packages[] | select(.filename==$fn))' "${gap}/golang.provenance.json" >"${EVIDENCE}/runs/local-gap.prov"
 mv -f -- "${EVIDENCE}/runs/local-gap.prov" "${gap}/golang.provenance.json"
 (
   cd -- "${gap}"
@@ -768,9 +770,9 @@ rc=$?
 set -e
 record "local_status_missing_group" "${rc}" 1
 if grep -Fq '来源与规定组合不一致' "${EVIDENCE}/runs/local-gap.err"; then
-  pass "缺整组 golang-go 拒绝"
+  pass "缺一个架构拒绝"
 else
-  fail "缺整组未按组合拒绝"
+  fail "缺一个架构未按组合拒绝"
 fi
 cache="${EVIDENCE}/local-cache"
 rm -rf -- "${cache}"

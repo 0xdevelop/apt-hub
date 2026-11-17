@@ -4,7 +4,7 @@
   "release_index_url": "https://go.dev/dl/?mode=json",
   "package": "golang",
   "epoch": "2",
-  "description": "Go programming language compiler - metapackage",
+  "description": "Go programming language compiler",
   "maintainer": "apt-hub <apt-hub@invalid>",
   "homepage": "https://go.dev/",
   "section": "devel",

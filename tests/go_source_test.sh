@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
-# Go 同源双包 golang+golang-go、rotate-from、真 APT type:deb download/upgrade。
+# Go 同源单包 golang、旧 revision 存量、rotate-from、真 APT download/upgrade。
 set -euo pipefail
 export LC_ALL=C
 export LANG=C
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+BASE_REV="$(jq -r '.revision' "${ROOT}/config/go.json")"
+PROJ_VER="$(tr -d '[:space:]' <"${ROOT}/VERSION")"
+GO_REV="${BASE_REV}+${PROJ_VER}"
+VER_FULL="2:9.9.9-${GO_REV}"
+DEB_AMD="golang_9.9.9-${GO_REV}_amd64.deb"
+DEB_ARM="golang_9.9.9-${GO_REV}_arm64.deb"
 SYNC="${ROOT}/scripts/sync.sh"
 UPD="${ROOT}/scripts/update_sources.sh"
 VER="${ROOT}/scripts/verify_ubuntu.sh"
@@ -77,7 +83,7 @@ Maintainer: apt-hub-go-source-test <invalid>
 Description: go source fixture ${pkg}
 EOF
     if [[ -n "${depends}" ]]; then
-      printf 'Depends: %s\n' "${depends}"
+      printf '%s\n' "${depends}"
     fi
   } >"${root}/DEBIAN/control"
   printf 'payload %s %s %s %s\n' "${pkg}" "${ver}" "${arch}" "${marker}" \
@@ -124,22 +130,17 @@ bash -n -- "${UPD}"; record_rc bash_n_upd "$?" 0 || true
 bash -n -- "${VER}"; record_rc bash_n_ver "$?" 0 || true
 bash -n -- "${ROOT}/tests/go_source_test.sh"; record_rc bash_n_test "$?" 0 || true
 
-# --- 双包夹具：元包 Depends 工具包；无 libc6 ---
-VER_FULL='2:9.9.9-1'
-build_deb golang-go "${VER_FULL}" amd64 "${TMP}/debs/golang-go_9.9.9-1_amd64.deb"
-build_deb golang-go "${VER_FULL}" arm64 "${TMP}/debs/golang-go_9.9.9-1_arm64.deb"
-build_deb golang "${VER_FULL}" amd64 "${TMP}/debs/golang_9.9.9-1_amd64.deb" "golang-go (= ${VER_FULL})"
-build_deb golang "${VER_FULL}" arm64 "${TMP}/debs/golang_9.9.9-1_arm64.deb" "golang-go (= ${VER_FULL})"
-build_deb golang "${VER_FULL}" amd64 "${TMP}/debs/golang_9.9.9-1_amd64-replaced.deb" "golang-go (= ${VER_FULL})" replaced
+# --- 活跃单包；接管字段与生产 control 同形。历史纯数字 revision 另写 provenance ---
+TAKEOVER="$(printf 'Provides: golang-go (= %s)\nReplaces: golang-go (<< %s)\nConflicts: gccgo-go, golang-go (<< %s)\n' \
+  "${VER_FULL}" "${VER_FULL}" "${VER_FULL}")"
+build_deb golang "${VER_FULL}" amd64 "${TMP}/debs/${DEB_AMD}" "${TAKEOVER}"
+build_deb golang "${VER_FULL}" arm64 "${TMP}/debs/${DEB_ARM}" "${TAKEOVER}"
+build_deb golang "${VER_FULL}" amd64 "${TMP}/debs/${DEB_AMD%.deb}-replaced.deb" "${TAKEOVER}" replaced
 build_deb alpha 1.0.0 amd64 "${TMP}/debs/alpha_1.0.0_amd64.deb"
-META_AMD_SHA="$(sha_of "${TMP}/debs/golang_9.9.9-1_amd64.deb")"
-META_ARM_SHA="$(sha_of "${TMP}/debs/golang_9.9.9-1_arm64.deb")"
-TOOL_AMD_SHA="$(sha_of "${TMP}/debs/golang-go_9.9.9-1_amd64.deb")"
-TOOL_ARM_SHA="$(sha_of "${TMP}/debs/golang-go_9.9.9-1_arm64.deb")"
-META_AMD_SZ="$(stat -c '%s' -- "${TMP}/debs/golang_9.9.9-1_amd64.deb")"
-META_ARM_SZ="$(stat -c '%s' -- "${TMP}/debs/golang_9.9.9-1_arm64.deb")"
-TOOL_AMD_SZ="$(stat -c '%s' -- "${TMP}/debs/golang-go_9.9.9-1_amd64.deb")"
-TOOL_ARM_SZ="$(stat -c '%s' -- "${TMP}/debs/golang-go_9.9.9-1_arm64.deb")"
+META_AMD_SHA="$(sha_of "${TMP}/debs/${DEB_AMD}")"
+META_ARM_SHA="$(sha_of "${TMP}/debs/${DEB_ARM}")"
+META_AMD_SZ="$(stat -c '%s' -- "${TMP}/debs/${DEB_AMD}")"
+META_ARM_SZ="$(stat -c '%s' -- "${TMP}/debs/${DEB_ARM}")"
 UP_AMD_SHA="$(printf 'amd-upstream-tar-fixture' | sha256sum | awk '{print $1}')"
 UP_ARM_SHA="$(printf 'arm-upstream-tar-fixture' | sha256sum | awk '{print $1}')"
 UP_AMD_SZ=111
@@ -148,33 +149,25 @@ UP_ARM_SZ=222
 write_provenance() {
   local dest="$1"
   local meta_amd="${2:-${META_AMD_SHA}}" meta_arm="${3:-${META_ARM_SHA}}"
-  local tool_amd="${4:-${TOOL_AMD_SHA}}" tool_arm="${5:-${TOOL_ARM_SHA}}"
-  local up_amd="${6:-${UP_AMD_SHA}}" up_arm="${7:-${UP_ARM_SHA}}"
-  local meta_amd_sz="${8:-${META_AMD_SZ}}" meta_arm_sz="${9:-${META_ARM_SZ}}"
-  local tool_amd_sz="${10:-${TOOL_AMD_SZ}}" tool_arm_sz="${11:-${TOOL_ARM_SZ}}"
+  local up_amd="${4:-${UP_AMD_SHA}}" up_arm="${5:-${UP_ARM_SHA}}"
+  local meta_amd_sz="${6:-${META_AMD_SZ}}" meta_arm_sz="${7:-${META_ARM_SZ}}"
   jq -n \
     --arg meta_amd "${meta_amd}" --arg meta_arm "${meta_arm}" \
-    --arg tool_amd "${tool_amd}" --arg tool_arm "${tool_arm}" \
     --argjson meta_amd_sz "${meta_amd_sz}" --argjson meta_arm_sz "${meta_arm_sz}" \
-    --argjson tool_amd_sz "${tool_amd_sz}" --argjson tool_arm_sz "${tool_arm_sz}" \
     --arg up_amd "${up_amd}" --arg up_arm "${up_arm}" \
     --argjson up_amd_sz "${UP_AMD_SZ}" --argjson up_arm_sz "${UP_ARM_SZ}" \
+    --arg ver "${VER_FULL}" --arg rev "${GO_REV}" \
+    --arg fn_amd "${DEB_AMD}" --arg fn_arm "${DEB_ARM}" \
     '{
       schema_version:"1",
       generated_at_utc:"2026-11-09T00:00:00Z",
-      upstream:{version:"go9.9.9",version_debian:"9.9.9",revision:"1",epoch:"2"},
+      upstream:{version:"go9.9.9",version_debian:"9.9.9",revision:$rev,epoch:"2"},
       packages:[
-        {package:"golang",version:"2:9.9.9-1",architecture:"amd64",
-         filename:"golang_9.9.9-1_amd64.deb",sha256:$meta_amd,size:($meta_amd_sz|tostring),
+        {package:"golang",version:$ver,architecture:"amd64",
+         filename:$fn_amd,sha256:$meta_amd,size:($meta_amd_sz|tostring),
          upstream:{url:"https://go.dev/dl/go9.9.9.linux-amd64.tar.gz",sha256:$up_amd,size:($up_amd_sz|tostring)}},
-        {package:"golang-go",version:"2:9.9.9-1",architecture:"amd64",
-         filename:"golang-go_9.9.9-1_amd64.deb",sha256:$tool_amd,size:($tool_amd_sz|tostring),
-         upstream:{url:"https://go.dev/dl/go9.9.9.linux-amd64.tar.gz",sha256:$up_amd,size:($up_amd_sz|tostring)}},
-        {package:"golang",version:"2:9.9.9-1",architecture:"arm64",
-         filename:"golang_9.9.9-1_arm64.deb",sha256:$meta_arm,size:($meta_arm_sz|tostring),
-         upstream:{url:"https://go.dev/dl/go9.9.9.linux-arm64.tar.gz",sha256:$up_arm,size:($up_arm_sz|tostring)}},
-        {package:"golang-go",version:"2:9.9.9-1",architecture:"arm64",
-         filename:"golang-go_9.9.9-1_arm64.deb",sha256:$tool_arm,size:($tool_arm_sz|tostring),
+        {package:"golang",version:$ver,architecture:"arm64",
+         filename:$fn_arm,sha256:$meta_arm,size:($meta_arm_sz|tostring),
          upstream:{url:"https://go.dev/dl/go9.9.9.linux-arm64.tar.gz",sha256:$up_arm,size:($up_arm_sz|tostring)}}
       ]
     }' >"${dest}"
@@ -192,19 +185,16 @@ write_release_json() {
   jq -n \
     --arg tag "${GO_TAG}" \
     --arg html "https://github.com/${PKG_REPO}/releases/tag/${GO_TAG}" \
-    --argjson s1 "${meta_amd_sz}" --argjson s2 "${TOOL_AMD_SZ}" \
-    --argjson s3 "${META_ARM_SZ}" --argjson s4 "${TOOL_ARM_SZ}" --argjson sp "${sp}" \
-    --arg d1 "sha256:${meta_amd_sha}" --arg d2 "sha256:${TOOL_AMD_SHA}" \
-    --arg d3 "sha256:${META_ARM_SHA}" --arg d4 "sha256:${TOOL_ARM_SHA}" --arg dp "sha256:${dp}" \
+    --argjson s1 "${meta_amd_sz}" --argjson s3 "${META_ARM_SZ}" --argjson sp "${sp}" \
+    --arg d1 "sha256:${meta_amd_sha}" --arg d3 "sha256:${META_ARM_SHA}" --arg dp "sha256:${dp}" \
     --arg base "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}" \
     --arg pname "${PROV_ASSET}" \
+    --arg fn_amd "${DEB_AMD}" --arg fn_arm "${DEB_ARM}" \
     '{
       tag_name:$tag, html_url:$html, draft:false, prerelease:false,
       assets:[
-        {name:"golang_9.9.9-1_amd64.deb",size:$s1,browser_download_url:($base+"/golang_9.9.9-1_amd64.deb"),digest:$d1},
-        {name:"golang-go_9.9.9-1_amd64.deb",size:$s2,browser_download_url:($base+"/golang-go_9.9.9-1_amd64.deb"),digest:$d2},
-        {name:"golang_9.9.9-1_arm64.deb",size:$s3,browser_download_url:($base+"/golang_9.9.9-1_arm64.deb"),digest:$d3},
-        {name:"golang-go_9.9.9-1_arm64.deb",size:$s4,browser_download_url:($base+"/golang-go_9.9.9-1_arm64.deb"),digest:$d4},
+        {name:$fn_amd,size:$s1,browser_download_url:($base+"/"+$fn_amd),digest:$d1},
+        {name:$fn_arm,size:$s3,browser_download_url:($base+"/"+$fn_arm),digest:$d3},
         {name:$pname,size:$sp,browser_download_url:($base+"/"+$pname),digest:$dp}
       ]
     }' >"${dest}"
@@ -227,10 +217,8 @@ jq -n \
 reset_curl_map() {
   : >"${TMP}/curl-map.tsv"
   map_add "https://api.github.com/repos/${PKG_REPO}/releases/tags/${GO_TAG}" "${TMP}/api/go-release.json"
-  map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/golang_9.9.9-1_amd64.deb" "${TMP}/debs/golang_9.9.9-1_amd64.deb"
-  map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/golang-go_9.9.9-1_amd64.deb" "${TMP}/debs/golang-go_9.9.9-1_amd64.deb"
-  map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/golang_9.9.9-1_arm64.deb" "${TMP}/debs/golang_9.9.9-1_arm64.deb"
-  map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/golang-go_9.9.9-1_arm64.deb" "${TMP}/debs/golang-go_9.9.9-1_arm64.deb"
+  map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/${DEB_AMD}" "${TMP}/debs/${DEB_AMD}"
+  map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/${DEB_ARM}" "${TMP}/debs/${DEB_ARM}"
   map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/${PROV_ASSET}" "${TMP}/api/provenance.json"
 }
 reset_curl_map
@@ -258,8 +246,8 @@ jq -n '{
     source_url:"https://go.dev", license:"BSD-3-Clause",
     ubuntu_series:["jammy"],
     architectures:{
-      amd64:"^golang_[0-9]+\\.[0-9]+\\.[0-9]+-[0-9]+_amd64\\.deb$",
-      arm64:"^golang_[0-9]+\\.[0-9]+\\.[0-9]+-[0-9]+_arm64\\.deb$"
+      amd64:"^golang_[0-9]+\\.[0-9]+\\.[0-9]+-[0-9]+\\+[0-9]+\\.[0-9]+\\.[0-9]+_amd64\\.deb$",
+      arm64:"^golang_[0-9]+\\.[0-9]+\\.[0-9]+-[0-9]+\\+[0-9]+\\.[0-9]+\\.[0-9]+_arm64\\.deb$"
     }
   }]
 }' >"${TMP}/catalog-go.json"
@@ -336,10 +324,15 @@ rc=0
 grep -Fq '严格 vX.Y.Z' "${TMP}/run-legacy-tag.log" || rc=1
 record_rc go_legacy_tag_reason "${rc}" 0 || true
 
-# 缺工具包 golang-go arm64：release 去掉该资产，外层 provenance 仍完整
-jq '(.assets |= map(select(.name != "golang-go_9.9.9-1_arm64.deb")))' \
-  "${TMP}/api/go-release.json" >"${TMP}/api/go-release-no-tool-arm.json"
-cp -f -- "${TMP}/api/go-release-no-tool-arm.json" "${TMP}/api/go-release.json"
+# 活跃 provenance 自证多余包族
+jq --arg fn "golang-go_9.9.9-1_amd64.deb" '
+  .packages += [.packages[0] | .package="golang-go" | .filename=$fn]
+' "${TMP}/api/provenance.json" >"${TMP}/api/provenance-extra-family.json"
+cp -f -- "${TMP}/api/provenance-extra-family.json" "${TMP}/api/provenance.json"
+write_release_json "${TMP}/api/go-release.json" "${TMP}/api/provenance.json"
+reset_curl_map
+map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/${PROV_ASSET}" "${TMP}/api/provenance.json"
+cp -f -- "${TMP}/api/go-release.json" "${TMP}/api/go-release-no-tool-arm.json"
 (cd "${TMP}/empty-prev" && find . -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum) \
   >"${TMP}/empty-prev.before" || : >"${TMP}/empty-prev.before"
 rc="$(capture_rc "${TMP}/run-no-tool-arm.log" run_sync_go "${TMP}/empty-prev" "${TMP}/site-no-tool-arm")"
@@ -351,11 +344,12 @@ rc=0
 cmp -s "${TMP}/empty-prev.before" \
   <(cd "${TMP}/empty-prev" && find . -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum || true) || rc=1
 record_rc go_missing_tool_arm64_previous_unchanged "${rc}" 0 || true
+write_provenance "${TMP}/api/provenance.json"
 write_release_json "${TMP}/api/go-release.json"
 reset_curl_map
 
 # 缺主包架构：catalog 声明 arm64 但 release 去掉 golang arm64
-jq '(.assets |= map(select(.name != "golang_9.9.9-1_arm64.deb")))' \
+jq --arg n "${DEB_ARM}" '(.assets |= map(select(.name != $n)))' \
   "${TMP}/api/go-release.json" >"${TMP}/api/go-release-no-meta-arm.json"
 cp -f -- "${TMP}/api/go-release-no-meta-arm.json" "${TMP}/api/go-release.json"
 rc="$(capture_rc "${TMP}/run-no-arch.log" run_sync_go "${TMP}/empty-prev" "${TMP}/site-no-arch")"
@@ -381,7 +375,7 @@ reset_curl_map
 # 官方上游 tar 摘要不符：改 provenance 内层并同步外层 digest，避免外层先拒
 BAD_UP="$(printf 'bad-up' | sha256sum | awk '{print $1}')"
 write_provenance "${TMP}/api/provenance-bad-up.json" \
-  "${META_AMD_SHA}" "${META_ARM_SHA}" "${TOOL_AMD_SHA}" "${TOOL_ARM_SHA}" \
+  "${META_AMD_SHA}" "${META_ARM_SHA}" \
   "${BAD_UP}" "${UP_ARM_SHA}"
 cp -f -- "${TMP}/api/provenance-bad-up.json" "${TMP}/api/provenance.json"
 write_release_json "${TMP}/api/go-release.json" "${TMP}/api/provenance.json"
@@ -401,42 +395,40 @@ rc="$(capture_rc "${TMP}/run-ok.log" run_sync_go "${TMP}/empty-prev" "${TMP}/sit
 cat "${TMP}/run-ok.log" >>"${EVIDENCE}"
 record_rc go_first_sync "${rc}" 0 || true
 rc=0
-jq -e '
+jq -e --arg ver "${VER_FULL}" '
   .schema_version=="2"
   and (.packages|length==1)
   and .packages[0].id=="golang"
   and .packages[0].package=="golang"
   and .packages[0].source_type=="go_official_archive"
-  and .packages[0].version=="2:9.9.9-1"
+  and .packages[0].version==$ver
   and .packages[0].release_tag=="v0.0.9"
-  and (.packages[0].assets|length==4)
-  and ([.packages[0].assets[].package]|sort)==["golang","golang","golang-go","golang-go"]
+  and (.packages[0].assets|length==2)
+  and ([.packages[0].assets[].package]|unique)==["golang"]
   and all(.packages[0].assets[]; (.upstream.sha256|type)=="string")
 ' "${TMP}/site-go1/state.json" >/dev/null || rc=$?
-record_rc go_state_dual_assets "${rc}" 0 || true
+record_rc go_state_single_golang "${rc}" 0 || true
 rc=0
-# Packages 含两 stanza
-grep -c '^Package: ' "${TMP}/site-go1/repos/golang/dists/jammy/main/binary-amd64/Packages" | grep -qx 2 || rc=1
-record_rc go_packages_two_stanzas_amd64 "${rc}" 0 || true
+grep -c '^Package: ' "${TMP}/site-go1/repos/golang/dists/jammy/main/binary-amd64/Packages" | grep -qx 1 || rc=1
+record_rc go_packages_one_stanza_amd64 "${rc}" 0 || true
 rc=0
 if find -- "${TMP}/site-go1" -type f -name '*.deb' -print -quit | grep -q .; then rc=1; fi
 record_rc go_metadata_no_deb "${rc}" 0 || true
 
 # 同版本内容替换拒（golang amd64 bytes 变，外层 digest 与 provenance 同步更新）
-REPL_SHA="$(sha_of "${TMP}/debs/golang_9.9.9-1_amd64-replaced.deb")"
-REPL_SZ="$(stat -c '%s' -- "${TMP}/debs/golang_9.9.9-1_amd64-replaced.deb")"
+REPL_DEB="${TMP}/debs/${DEB_AMD%.deb}-replaced.deb"
+REPL_SHA="$(sha_of "${REPL_DEB}")"
+REPL_SZ="$(stat -c '%s' -- "${REPL_DEB}")"
 write_provenance "${TMP}/api/provenance-repl.json" \
-  "${REPL_SHA}" "${META_ARM_SHA}" "${TOOL_AMD_SHA}" "${TOOL_ARM_SHA}" \
+  "${REPL_SHA}" "${META_ARM_SHA}" \
   "${UP_AMD_SHA}" "${UP_ARM_SHA}" \
-  "${REPL_SZ}" "${META_ARM_SZ}" "${TOOL_AMD_SZ}" "${TOOL_ARM_SZ}"
+  "${REPL_SZ}" "${META_ARM_SZ}"
 write_release_json "${TMP}/api/go-release-repl.json" "${TMP}/api/provenance-repl.json" \
   "${REPL_SHA}" "${REPL_SZ}"
 : >"${TMP}/curl-map.tsv"
 map_add "https://api.github.com/repos/${PKG_REPO}/releases/tags/${GO_TAG}" "${TMP}/api/go-release-repl.json"
-map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/golang_9.9.9-1_amd64.deb" "${TMP}/debs/golang_9.9.9-1_amd64-replaced.deb"
-map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/golang-go_9.9.9-1_amd64.deb" "${TMP}/debs/golang-go_9.9.9-1_amd64.deb"
-map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/golang_9.9.9-1_arm64.deb" "${TMP}/debs/golang_9.9.9-1_arm64.deb"
-map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/golang-go_9.9.9-1_arm64.deb" "${TMP}/debs/golang-go_9.9.9-1_arm64.deb"
+map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/${DEB_AMD}" "${REPL_DEB}"
+map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/${DEB_ARM}" "${TMP}/debs/${DEB_ARM}"
 map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/${PROV_ASSET}" "${TMP}/api/provenance-repl.json"
 cp -f -- "${TMP}/api/go-release-repl.json" "${TMP}/api/go-release.json"
 cp -f -- "${TMP}/api/provenance-repl.json" "${TMP}/api/provenance.json"
@@ -461,17 +453,15 @@ reset_curl_map
 saved_tag="${GO_TAG}"
 GO_TAG='v0.0.10'
 write_provenance "${TMP}/api/provenance-cross-bad.json" \
-  "${REPL_SHA}" "${META_ARM_SHA}" "${TOOL_AMD_SHA}" "${TOOL_ARM_SHA}" \
+  "${REPL_SHA}" "${META_ARM_SHA}" \
   "${UP_AMD_SHA}" "${UP_ARM_SHA}" \
-  "${REPL_SZ}" "${META_ARM_SZ}" "${TOOL_AMD_SZ}" "${TOOL_ARM_SZ}"
+  "${REPL_SZ}" "${META_ARM_SZ}"
 write_release_json "${TMP}/api/go-release-cross-bad.json" "${TMP}/api/provenance-cross-bad.json" \
   "${REPL_SHA}" "${REPL_SZ}"
 : >"${TMP}/curl-map.tsv"
 map_add "https://api.github.com/repos/${PKG_REPO}/releases/tags/${GO_TAG}" "${TMP}/api/go-release-cross-bad.json"
-map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/golang_9.9.9-1_amd64.deb" "${TMP}/debs/golang_9.9.9-1_amd64-replaced.deb"
-map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/golang-go_9.9.9-1_amd64.deb" "${TMP}/debs/golang-go_9.9.9-1_amd64.deb"
-map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/golang_9.9.9-1_arm64.deb" "${TMP}/debs/golang_9.9.9-1_arm64.deb"
-map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/golang-go_9.9.9-1_arm64.deb" "${TMP}/debs/golang-go_9.9.9-1_arm64.deb"
+map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/${DEB_AMD}" "${REPL_DEB}"
+map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/${DEB_ARM}" "${TMP}/debs/${DEB_ARM}"
 map_add "https://github.com/${PKG_REPO}/releases/download/${GO_TAG}/${PROV_ASSET}" "${TMP}/api/provenance-cross-bad.json"
 cp -f -- "${TMP}/api/go-release-cross-bad.json" "${TMP}/api/go-release.json"
 cp -f -- "${TMP}/api/provenance-cross-bad.json" "${TMP}/api/provenance.json"
@@ -564,12 +554,17 @@ jq --arg tag "${LEGACY_TAG}" --arg old "${saved_tag}" --arg repo "${PKG_REPO}" '
         else . end
     )
 ' "${TMP}/api/go-release.json" >"${TMP}/api/go-release-legacy.json"
+jq '.upstream.revision="1"' "${TMP}/api/provenance.json" >"${TMP}/api/provenance-legacy-rev1.json"
+legacy_prov_sz="$(stat -c '%s' -- "${TMP}/api/provenance-legacy-rev1.json")"
+legacy_prov_sha="$(sha_of "${TMP}/api/provenance-legacy-rev1.json")"
+jq --arg d "sha256:${legacy_prov_sha}" --argjson sz "${legacy_prov_sz}" '
+  .assets |= map(if .name=="provenance.json" then .digest=$d | .size=$sz else . end)
+' "${TMP}/api/go-release-legacy.json" >"${TMP}/api/go-release-legacy.json.tmp"
+mv -- "${TMP}/api/go-release-legacy.json.tmp" "${TMP}/api/go-release-legacy.json"
 map_add "https://api.github.com/repos/${PKG_REPO}/releases/tags/${LEGACY_TAG}" "${TMP}/api/go-release-legacy.json"
-map_add "https://github.com/${PKG_REPO}/releases/download/${LEGACY_TAG}/golang_9.9.9-1_amd64.deb" "${TMP}/debs/golang_9.9.9-1_amd64.deb"
-map_add "https://github.com/${PKG_REPO}/releases/download/${LEGACY_TAG}/golang-go_9.9.9-1_amd64.deb" "${TMP}/debs/golang-go_9.9.9-1_amd64.deb"
-map_add "https://github.com/${PKG_REPO}/releases/download/${LEGACY_TAG}/golang_9.9.9-1_arm64.deb" "${TMP}/debs/golang_9.9.9-1_arm64.deb"
-map_add "https://github.com/${PKG_REPO}/releases/download/${LEGACY_TAG}/golang-go_9.9.9-1_arm64.deb" "${TMP}/debs/golang-go_9.9.9-1_arm64.deb"
-map_add "https://github.com/${PKG_REPO}/releases/download/${LEGACY_TAG}/provenance.json" "${TMP}/api/provenance.json"
+map_add "https://github.com/${PKG_REPO}/releases/download/${LEGACY_TAG}/${DEB_AMD}" "${TMP}/debs/${DEB_AMD}"
+map_add "https://github.com/${PKG_REPO}/releases/download/${LEGACY_TAG}/${DEB_ARM}" "${TMP}/debs/${DEB_ARM}"
+map_add "https://github.com/${PKG_REPO}/releases/download/${LEGACY_TAG}/provenance.json" "${TMP}/api/provenance-legacy-rev1.json"
 legacy_byhash="$(find "${legacy_src}/repos/golang/dists/jammy/main/binary-amd64/by-hash/SHA256" -type f -printf '%f\n' | head -1)"
 rc="$(capture_rc "${TMP}/run-legacy-read.log" "${SYNC}" \
   --catalog "${TMP}/catalog-empty.json" --releases "${TMP}/releases.json" \
@@ -801,13 +796,12 @@ if [[ "${rc}" -eq 0 ]]; then
   [[ -n "${arch_root}" ]] || rc=1
   meta_hit="$(find -- "${arch_root}" -maxdepth 1 -type f -name 'golang_*.deb' -print -quit || true)"
   tool_hit="$(find -- "${arch_root}" -maxdepth 1 -type f -name 'golang-go_*.deb' -print -quit || true)"
-  [[ -n "${meta_hit}" && -n "${tool_hit}" ]] || rc=1
-  record_rc verify_archives_both_packages "${rc}" 0 || true
+  [[ -n "${meta_hit}" && -z "${tool_hit}" ]] || rc=1
+  record_rc verify_archives_single_golang "${rc}" 0 || true
   rc=0
-  grep -F 'Inst golang [2:1.22~2build1] (2:9.9.9-1' "${TMP}/ver-dl/"*/upgrade.log >/dev/null || rc=1
-  grep -F 'Inst golang-go [2:1.22~2build1] (2:9.9.9-1' "${TMP}/ver-dl/"*/upgrade.log >/dev/null || rc=1
+  grep -F "Inst golang [2:1.22~2build1] (${VER_FULL}" "${TMP}/ver-dl/"*/upgrade.log >/dev/null || rc=1
   ! grep -q '^Remv ' "${TMP}/ver-dl/"*/upgrade.log || rc=1
-  record_rc verify_upgrade_both_no_remv "${rc}" 0 || true
+  record_rc verify_upgrade_single_golang_no_remv "${rc}" 0 || true
   rc=0
   jq -e 'select(.role=="release-fixture" and .method=="GET" and .status==200)' "${TMP}/access.jsonl" >/dev/null || rc=1
   record_rc verify_release_fixture_get "${rc}" 0 || true
@@ -873,11 +867,9 @@ write_provenance "${TMP}/api/provenance.json"
 write_release_json "${TMP}/api/go-release-derived.json"
 derived_rel="fixture/apt-hub/releases/download/${DERIVED}"
 mkdir -p -- "${TMP}/assets/${derived_rel}"
-cp -- "${TMP}/debs/golang_9.9.9-1_amd64.deb" "${TMP}/debs/golang-go_9.9.9-1_amd64.deb" \
-  "${TMP}/assets/${derived_rel}/"
+cp -- "${TMP}/debs/${DEB_AMD}" "${TMP}/assets/${derived_rel}/"
 map_add "https://api.github.com/repos/${PKG_REPO}/releases/tags/${DERIVED}" "${TMP}/api/go-release-derived.json"
-map_add "https://github.com/${PKG_REPO}/releases/download/${DERIVED}/golang_9.9.9-1_amd64.deb" "${TMP}/debs/golang_9.9.9-1_amd64.deb"
-map_add "https://github.com/${PKG_REPO}/releases/download/${DERIVED}/golang-go_9.9.9-1_amd64.deb" "${TMP}/debs/golang-go_9.9.9-1_amd64.deb"
+map_add "https://github.com/${PKG_REPO}/releases/download/${DERIVED}/${DEB_AMD}" "${TMP}/debs/${DEB_AMD}"
 map_add "https://github.com/${PKG_REPO}/releases/download/${DERIVED}/${PROV_ASSET}" "${TMP}/api/provenance.json"
 rm -rf -- "${TMP}/work-derived" "${TMP}/work-derived.lock"
 mkdir -p -- "${TMP}/work-derived" "${TMP}/prev-derived"
