@@ -1,5 +1,5 @@
 Types: deb
-URIs: mirror+https://0xdevelop.m-b-crazy.com/repos/rustdesk/mirror.list
+URIs: mirror+https://apt-hub.m-b-crazy.com/repos/rustdesk/mirror.list
 Suites: stonking
 Components: main
 Signed-By: /etc/apt/keyrings/apt-hub.gpg

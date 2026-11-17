@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 一次加源：下载站点公钥与当前系列 .sources，验签后写入目标根；之后走普通 apt。
+# 一次加源：默认同站全部适用源；--software 仍加单个。验签后写入目标根，之后走普通 apt。
 set -euo pipefail
 umask 022
 export LC_ALL=C
@@ -32,7 +32,8 @@ scratch_owned=0
 lock_fd=""
 success=0
 created_key=0
-created_sources=0
+created_source_paths=()
+sources_path=""
 replaced_key=0
 key_backup_mode=""
 retain_scratch_for_backup=0
@@ -45,7 +46,7 @@ die() {
 
 usage() {
   cat >&2 <<'EOF'
-用法: add_source.sh --site-url <https站点URL> --software <软件id> [--root <已存在隔离根>] [--architecture <架构>] [--cacert <仅隔离根>] [--replace-key <新公钥完整40hex指纹>]
+用法: add_source.sh --site-url <https站点URL> [--software <软件id>] [--root <已存在隔离根>] [--architecture <架构>] [--cacert <仅隔离根>] [--replace-key <新公钥完整40hex指纹>]
 EOF
   exit 2
 }
@@ -64,9 +65,14 @@ cleanup() {
   local rc=$?
   # 仍持锁时处理未提交写入；成功路径不回滚。
   if [[ "${success}" -ne 1 ]]; then
-    if [[ "${created_sources}" -eq 1 && -n "${sources_path}" && -f "${sources_path}" && ! -L "${sources_path}" ]]; then
-      rm -f -- "${sources_path}"
-      created_sources=0
+    if [[ "${#created_source_paths[@]}" -gt 0 ]]; then
+      local created_path
+      for created_path in "${created_source_paths[@]}"; do
+        if [[ -n "${created_path}" && -f "${created_path}" && ! -L "${created_path}" ]]; then
+          rm -f -- "${created_path}"
+        fi
+      done
+      created_source_paths=()
     fi
     if [[ "${replaced_key}" -eq 1 ]]; then
       if restore_replaced_key; then
@@ -607,6 +613,30 @@ atomic_install_file() {
   return 0
 }
 
+# 调用前须已完成指纹比对与冲突拒绝。key_backup_mode 保持全局，供 cleanup 恢复。
+install_final_key() {
+  if [[ ! -f "${key_path}" ]]; then
+    created_key=1
+    if ! atomic_install_file "${scratch}/final.gpg" "${key_path}" 0644; then
+      created_key=0
+      die "写入公钥失败"
+    fi
+  elif cmp -s -- "${key_path}" "${scratch}/final.gpg"; then
+    :
+  elif [[ "${replacing_key}" -eq 1 ]]; then
+    key_backup_mode="$(stat -c '%a' "${key_path}")"
+    [[ "${key_backup_mode}" =~ ^[0-7]{3,4}$ ]] || die "无法读取已有公钥权限"
+    cp -f -- "${key_path}" "${scratch}/apt-hub.gpg.backup" || die "备份已有公钥失败"
+    chmod -- "${key_backup_mode}" "${scratch}/apt-hub.gpg.backup" || die "备份公钥权限失败"
+    replaced_key=1
+    if ! atomic_install_file "${scratch}/final.gpg" "${key_path}" "${key_backup_mode}"; then
+      die "替换公钥失败"
+    fi
+  else
+    die "已有公钥指纹相同但内容不同，拒绝覆盖"
+  fi
+}
+
 # shellcheck disable=SC2317 # EXIT/INT/TERM cleanup 与失败路径调用
 restore_replaced_key() {
   if [[ "${replaced_key}" -eq 1 && -n "${scratch}" && -f "${scratch}/apt-hub.gpg.backup" && ! -L "${scratch}/apt-hub.gpg.backup" ]]; then
@@ -711,6 +741,198 @@ ensure_leaf_dir() {
   done
 }
 
+# 聚合 Deb822：只接受锚定本站的 stanza，验完全部适用项后再提交。
+add_all_applicable_sources() {
+  local agg="${scratch}/aggregate.sources"
+  local stanza_dir="${scratch}/stanzas"
+  local stanza_count=0 stanza_i=0 stanza_file
+  local types uris suites components signed_by archs id path pkg
+  local prefix suffix id_base pkg_hash got_hash new_fpr old_fpr
+  local all_same=1 install_line="" seen_file="${scratch}/seen-ids"
+  local -a applicable_ids=() applicable_pkgs=() applicable_paths=() applicable_stanzas=()
+  mkdir -p -- "${stanza_dir}"
+  : >"${seen_file}"
+  curl_get "${site_url}/apt-hub.gpg" "${scratch}/apt-hub.gpg" || die "下载公钥失败"
+  curl_get "${site_url}/repos/${series}.sources" "${agg}" || die "下载聚合 sources 失败"
+  dearmor_key_to "${scratch}/apt-hub.gpg" "${scratch}/trusted.gpg"
+  stanza_count="$(awk -v dir="${stanza_dir}" '
+    function flush() {
+      if (nlines == 0) return
+      n++
+      path = dir "/stanza-" n
+      for (i = 1; i <= nlines; i++) print lines[i] > path
+      close(path)
+      nlines = 0
+    }
+    /^[[:space:]]*$/ { flush(); next }
+    { nlines++; lines[nlines] = $0 }
+    END { flush(); printf "%d\n", n + 0 }
+  ' "${agg}")"
+  [[ "${stanza_count}" =~ ^[0-9]+$ ]] || die "聚合 sources 格式未知"
+  stanza_i=1
+  while [[ "${stanza_i}" -le "${stanza_count}" ]]; do
+    stanza_file="${stanza_dir}/stanza-${stanza_i}"
+    awk -F': ' '
+      NF < 2 || $1 ~ /[[:space:]]/ { exit 2 }
+      {
+        if ($1!="Types" && $1!="URIs" && $1!="Suites" && $1!="Components" && $1!="Signed-By" && $1!="Architectures") exit 3
+        seen[$1]++
+        if (seen[$1] != 1) exit 5
+      }
+      END {
+        if (NR == 0) exit 4
+        n = 0
+        for (k in seen) n++
+        if (n != 6) exit 5
+      }
+    ' "${stanza_file}" || die "聚合 sources 格式未知"
+    types="$(awk -F': ' '$1=="Types"{print $2; exit}' "${stanza_file}")"
+    uris="$(awk -F': ' '$1=="URIs"{print $2; exit}' "${stanza_file}")"
+    suites="$(awk -F': ' '$1=="Suites"{print $2; exit}' "${stanza_file}")"
+    components="$(awk -F': ' '$1=="Components"{print $2; exit}' "${stanza_file}")"
+    signed_by="$(awk -F': ' '$1=="Signed-By"{print $2; exit}' "${stanza_file}")"
+    archs="$(awk -F': ' '$1=="Architectures"{print $2; exit}' "${stanza_file}")"
+    [[ "${types}" == "deb" ]] || die "sources Types 非法"
+    [[ "${components}" == "main" ]] || die "sources Components 非法"
+    [[ "${signed_by}" == "/etc/apt/keyrings/apt-hub.gpg" ]] || die "sources Signed-By 必须是专用 keyring 路径"
+    if grep -qiE 'trusted\s*=\s*yes|Signed-By:\s*/etc/apt/trusted' "${stanza_file}"; then
+      die "sources 试图使用全局 trusted"
+    fi
+    prefix="mirror+${site_url}/repos/"
+    suffix="/mirror.list"
+    case "${uris}" in
+      "${prefix}"*"${suffix}")
+        id="${uris#"${prefix}"}"
+        id="${id%"${suffix}"}"
+        ;;
+      *)
+        die "sources URIs 未锚定当前站点/软件"
+        ;;
+    esac
+    [[ "${id}" =~ ${SOFTWARE_ID_RE} && "${id}" != *..* && "${uris}" == "${prefix}${id}${suffix}" ]] \
+      || die "software id 非法: ${id}"
+    if grep -Fxq -- "${id}" "${seen_file}"; then
+      die "聚合 sources id 重复: ${id}"
+    fi
+    printf '%s\n' "${id}" >>"${seen_file}"
+    [[ "${suites}" == "${series}" ]] || die "sources Suites 不匹配"
+    if ! printf '%s\n' "${archs}" | tr ' ' '\n' | grep -qx -- "${arch}"; then
+      printf '跳过不适用架构: %s\n' "${id}" >&2
+      stanza_i=$((stanza_i + 1))
+      continue
+    fi
+    path="${sources_dir}/apt-hub-${id}.sources"
+    preflight_dest_file "${path}" "sources 路径是符号链接"
+    applicable_ids+=("${id}")
+    applicable_paths+=("${path}")
+    applicable_stanzas+=("${stanza_file}")
+    stanza_i=$((stanza_i + 1))
+  done
+  [[ "${#applicable_ids[@]}" -gt 0 ]] || die "没有适用于当前系列/架构的源"
+
+  stanza_i=0
+  while [[ "${stanza_i}" -lt "${#applicable_ids[@]}" ]]; do
+    id="${applicable_ids[${stanza_i}]}"
+    stanza_file="${applicable_stanzas[${stanza_i}]}"
+    id_base="${site_url}/repos/${id}"
+    mkdir -p -- "${scratch}/ids/${id}"
+    curl_get "${id_base}/dists/${series}/InRelease" "${scratch}/ids/${id}/InRelease" \
+      || die "下载 InRelease 失败"
+    verify_inrelease "${scratch}/trusted.gpg" "${scratch}/ids/${id}/InRelease" \
+      "${scratch}/ids/${id}/Release.body" "${scratch}/ids/${id}/gpg.status"
+    check_release_body "${scratch}/ids/${id}/Release.body"
+    validate_sources_file "${stanza_file}" "mirror+${site_url}/repos/${id}/mirror.list"
+    pkg_hash="$(packages_hash_from_release "${scratch}/ids/${id}/Release.body" "${arch}")"
+    [[ -n "${pkg_hash}" && "${pkg_hash}" =~ ^[a-f0-9]{64}$ ]] \
+      || die "Release 缺少当前架构 Packages SHA256"
+    curl_get "${id_base}/dists/${series}/main/binary-${arch}/Packages" "${scratch}/ids/${id}/Packages" \
+      || die "下载 Packages 失败"
+    got_hash="$(sha256sum -- "${scratch}/ids/${id}/Packages" | awk '{print $1}')"
+    [[ "${got_hash}" == "${pkg_hash}" ]] || die "Packages 摘要与已签名 Release 不符"
+    pkg="$(awk -F': ' '$1=="Package"{print $2; exit}' "${scratch}/ids/${id}/Packages")"
+    [[ -n "${pkg}" ]] || die "已签名 Packages 中无 Package 字段"
+    write_final_sources "${stanza_file}" "${scratch}/ids/${id}/final.sources" "${signed_by_final}"
+    applicable_pkgs+=("${pkg}")
+    stanza_i=$((stanza_i + 1))
+  done
+
+  cp -f -- "${scratch}/trusted.gpg" "${scratch}/final.gpg"
+  chmod 0644 -- "${scratch}/final.gpg"
+  new_fpr="$(strip_fp "$(public_key_fingerprint "${scratch}/final.gpg")")"
+  [[ "${new_fpr}" =~ ^[A-F0-9]{40}$ ]] || die "无法读取下载公钥指纹"
+  assert_unique_primary_fingerprint "${scratch}/final.gpg" "${new_fpr}"
+  if [[ -n "${replace_key_fpr}" ]]; then
+    [[ "${new_fpr}" == "${replace_key_fpr}" ]] \
+      || die "下载公钥指纹与 --replace-key 不符: 下载=${new_fpr} 指定=${replace_key_fpr}"
+  fi
+  replacing_key=0
+  if [[ -f "${key_path}" && ! -L "${key_path}" ]]; then
+    old_fpr="$(strip_fp "$(public_key_fingerprint "${key_path}")")"
+    [[ "${old_fpr}" =~ ^[A-F0-9]{40}$ ]] || die "无法读取已有公钥指纹"
+    if [[ "${old_fpr}" != "${new_fpr}" ]]; then
+      if [[ -z "${replace_key_fpr}" ]]; then
+        die "拒绝静默换钥/跨站点同名钥冲突: 已有=${old_fpr} 下载=${new_fpr}"
+      fi
+      replacing_key=1
+    fi
+  fi
+  if [[ "${replacing_key}" -eq 1 ]]; then
+    assert_shared_key_sources_same_site "${sources_dir}" "${site_url}"
+  fi
+
+  stanza_i=0
+  while [[ "${stanza_i}" -lt "${#applicable_ids[@]}" ]]; do
+    path="${applicable_paths[${stanza_i}]}"
+    id="${applicable_ids[${stanza_i}]}"
+    if [[ -f "${path}" && ! -L "${path}" ]]; then
+      if ! cmp -s -- "${path}" "${scratch}/ids/${id}/final.sources"; then
+        die "已有冲突源，拒绝覆盖: ${path}"
+      fi
+    else
+      all_same=0
+    fi
+    stanza_i=$((stanza_i + 1))
+  done
+  if [[ "${all_same}" -eq 1 && -f "${key_path}" ]] && cmp -s -- "${key_path}" "${scratch}/final.gpg"; then
+    stanza_i=0
+    while [[ "${stanza_i}" -lt "${#applicable_paths[@]}" ]]; do
+      printf '已添加（幂等）: %s\n' "${applicable_paths[${stanza_i}]}"
+      stanza_i=$((stanza_i + 1))
+    done
+    for pkg in "${applicable_pkgs[@]}"; do
+      install_line="${install_line}${install_line:+ }${pkg}"
+    done
+    printf '下一步: apt update && apt install %s\n' "${install_line}"
+    success=1
+    exit 0
+  fi
+
+  install_final_key
+  stanza_i=0
+  while [[ "${stanza_i}" -lt "${#applicable_ids[@]}" ]]; do
+    path="${applicable_paths[${stanza_i}]}"
+    id="${applicable_ids[${stanza_i}]}"
+    if [[ ! -f "${path}" ]] || ! cmp -s -- "${path}" "${scratch}/ids/${id}/final.sources"; then
+      created_source_paths+=("${path}")
+      if ! atomic_install_file "${scratch}/ids/${id}/final.sources" "${path}" 0644; then
+        die "写入 sources 失败"
+      fi
+    fi
+    stanza_i=$((stanza_i + 1))
+  done
+  stanza_i=0
+  while [[ "${stanza_i}" -lt "${#applicable_paths[@]}" ]]; do
+    printf '已添加: %s\n' "${applicable_paths[${stanza_i}]}"
+    stanza_i=$((stanza_i + 1))
+  done
+  for pkg in "${applicable_pkgs[@]}"; do
+    install_line="${install_line}${install_line:+ }${pkg}"
+  done
+  printf '下一步: apt update && apt install %s\n' "${install_line}"
+  success=1
+  exit 0
+}
+
 # ---- args ----
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -739,11 +961,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "${site_url}" && -n "${software_id}" ]] || usage
+[[ -n "${site_url}" ]] || usage
 require_cmd bash curl gpg gpgv flock dpkg date awk sed grep tr chmod mkdir mv cp rm realpath sha256sum id readlink head stat
 
 site_url="$(assert_site_url "${site_url}")"
-software_id="$(assert_software_id "${software_id}")"
+if [[ -n "${software_id}" ]]; then
+  software_id="$(assert_software_id "${software_id}")"
+fi
 if [[ -n "${replace_key_fpr}" ]]; then
   replace_key_fpr="$(strip_fp "${replace_key_fpr}")"
   [[ "${replace_key_fpr}" =~ ^[A-F0-9]{40}$ ]] || die "--replace-key 必须是 40 位十六进制完整指纹"
@@ -762,7 +986,6 @@ fi
 key_dir="${target_root}/etc/apt/keyrings"
 sources_dir="${target_root}/etc/apt/sources.list.d"
 key_path="${key_dir}/apt-hub.gpg"
-sources_path="${sources_dir}/apt-hub-${software_id}.sources"
 # 同根一把锁：覆盖共享 apt-hub.gpg，不同 software 串行
 lock_file="${key_dir}/.apt-hub-add-source.lock"
 if [[ "${isolated}" -eq 1 ]]; then
@@ -770,16 +993,33 @@ if [[ "${isolated}" -eq 1 ]]; then
 else
   signed_by_final="/etc/apt/keyrings/apt-hub.gpg"
 fi
+if [[ -n "${software_id}" ]]; then
+  sources_path="${sources_dir}/apt-hub-${software_id}.sources"
+fi
 
 # 全部目的路径无写入预检通过后，再 mkdir / 开锁
-preflight_all_dest_paths "${key_dir}" "${sources_dir}" "${key_path}" "${sources_path}" "${lock_file}"
+if [[ -n "${software_id}" ]]; then
+  preflight_all_dest_paths "${key_dir}" "${sources_dir}" "${key_path}" "${sources_path}" "${lock_file}"
+else
+  preflight_dest_dir "${key_dir}"
+  preflight_dest_dir "${sources_dir}"
+  preflight_dest_file "${key_path}" "公钥路径是符号链接"
+  preflight_dest_file "${lock_file}" "lock 不能是符号链接"
+fi
 ensure_leaf_dir "${key_dir}"
 ensure_leaf_dir "${sources_dir}"
 exec 9>>"${lock_file}"
 lock_fd=9
 flock 9 || die "无法取得加源锁"
 # 拿锁后复查，避免协作竞争下路径被替换
-preflight_all_dest_paths "${key_dir}" "${sources_dir}" "${key_path}" "${sources_path}" "${lock_file}"
+if [[ -n "${software_id}" ]]; then
+  preflight_all_dest_paths "${key_dir}" "${sources_dir}" "${key_path}" "${sources_path}" "${lock_file}"
+else
+  preflight_dest_dir "${key_dir}"
+  preflight_dest_dir "${sources_dir}"
+  preflight_dest_file "${key_path}" "公钥路径是符号链接"
+  preflight_dest_file "${lock_file}" "lock 不能是符号链接"
+fi
 
 # scratch 祖先不得含 symlink；规范化后必须仍在 PROJECT_TMP 或 key_dir 内。
 prepare_owned_scratch() {
@@ -819,6 +1059,9 @@ prepare_owned_scratch() {
 prepare_owned_scratch
 scratch_owned=1
 chmod 0700 -- "${scratch}"
+if [[ -z "${software_id}" ]]; then
+  add_all_applicable_sources
+fi
 
 expected_uri="mirror+${site_url}/repos/${software_id}/mirror.list"
 base="${site_url}/repos/${software_id}"
@@ -890,35 +1133,12 @@ if [[ -f "${sources_path}" && ! -L "${sources_path}" ]]; then
   fi
 fi
 
-if [[ ! -f "${key_path}" ]]; then
-  # 标志先于 rename：TERM 落在 mv 成功后仍可回滚本脚本新建钥
-  created_key=1
-  if ! atomic_install_file "${scratch}/final.gpg" "${key_path}" 0644; then
-    created_key=0
-    die "写入公钥失败"
-  fi
-elif cmp -s -- "${key_path}" "${scratch}/final.gpg"; then
-  :
-elif [[ "${replacing_key}" -eq 1 ]]; then
-  key_backup_mode="$(stat -c '%a' "${key_path}")"
-  [[ "${key_backup_mode}" =~ ^[0-7]{3,4}$ ]] || die "无法读取已有公钥权限"
-  cp -f -- "${key_path}" "${scratch}/apt-hub.gpg.backup" || die "备份已有公钥失败"
-  chmod -- "${key_backup_mode}" "${scratch}/apt-hub.gpg.backup" || die "备份公钥权限失败"
-  # 标志先于 rename：持锁 cleanup 才能恢复旧钥；不无条件先删备份
-  replaced_key=1
-  if ! atomic_install_file "${scratch}/final.gpg" "${key_path}" "${key_backup_mode}"; then
-    die "替换公钥失败"
-  fi
-else
-  die "已有公钥指纹相同但内容不同，拒绝覆盖"
-fi
+install_final_key
 
 if [[ "${sources_missing}" -eq 1 ]] || ! cmp -s -- "${sources_path}" "${scratch}/final.sources"; then
-  # 仅创建缺失 sources；标志先于 rename，避免留下半提交文件
-  created_sources=1
+  # 标志先于 rename：TERM 落在 mv 成功后仍回滚本批新建文件
+  created_source_paths+=("${sources_path}")
   if ! atomic_install_file "${scratch}/final.sources" "${sources_path}" 0644; then
-    created_sources=0
-    # 未提交事务由 cleanup 持锁恢复；此处不谎报已回滚。
     die "写入 sources 失败"
   fi
 fi
