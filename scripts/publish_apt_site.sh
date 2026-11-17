@@ -20,7 +20,7 @@ EOF
 }
 
 ensure_apt_hub_pages_branch() {
-  local name="$1" email="$2" ls_rc=0 work blob tree commit
+  local name="$1" email="$2" ls_rc=0 work blob tree commit source
   set +e
   git ls-remote --exit-code --heads origin refs/heads/apt-hub-pages >/dev/null
   ls_rc=$?
@@ -34,6 +34,7 @@ ensure_apt_hub_pages_branch() {
   work=$(mktemp -d "${ROOT}/tmp/apt-hub-pages-init.XXXXXX")
   rmdir "${work}"
   git worktree add --detach "${work}" HEAD
+  source=$(git -C "${work}" rev-parse --verify 'HEAD^{commit}')
   : >"${work}/.nojekyll"
   blob=$(git -C "${work}" hash-object -w -- "${work}/.nojekyll")
   tree=$(printf '100644 blob %s\t.nojekyll\n' "${blob}" | git -C "${work}" mktree)
@@ -42,7 +43,7 @@ ensure_apt_hub_pages_branch() {
       GIT_AUTHOR_EMAIL="${email}" \
       GIT_COMMITTER_NAME="${name}" \
       GIT_COMMITTER_EMAIL="${email}" \
-      git -C "${work}" commit-tree "${tree}" -m "准备 Pages 产物分支"
+      git -C "${work}" commit-tree "${tree}" -p "${source}" -m "准备 Pages 产物分支"
   )
   if ! git -C "${work}" push origin "${commit}:refs/heads/apt-hub-pages"; then
     git worktree remove --force "${work}" >/dev/null 2>&1 || true
@@ -338,11 +339,14 @@ gate_site() {
 }
 
 save_apt_hub_pages() (
-  local work base rel saved remote name="${APT_HUB_GIT_NAME:?}" email="${APT_HUB_GIT_EMAIL:?}"
+  local work base rel saved="" remote name="${APT_HUB_GIT_NAME:?}" email="${APT_HUB_GIT_EMAIL:?}"
+  local source="" tree="" base_tree="" anc_rc=0
+  local -a parents=()
   work=$(mktemp -d "${ROOT}/tmp/apt-hub-pages.XXXXXX")
   rmdir "${work}"
   trap 'git worktree remove --force "${work}" >/dev/null 2>&1 || true' EXIT
   base=$(<tmp/apt-hub-pages-base.sha)
+  source=$(git rev-parse --verify 'HEAD^{commit}')
   if [[ -n "${base}" ]]; then
     [[ "${base}" =~ ^[0-9a-f]{40}$ ]] || die "apt-hub-pages 基线非法"
     git worktree add --detach "${work}" "${base}"
@@ -352,9 +356,20 @@ save_apt_hub_pages() (
         *) die "apt-hub-pages 含非站点文件: ${rel}" ;;
       esac
     done <tmp/previous-paths.txt
+    set +e
+    git merge-base --is-ancestor "${source}" "${base}"
+    anc_rc=$?
+    set -e
+    if [[ "${anc_rc}" -eq 0 ]]; then
+      parents=(-p "${base}")
+    elif [[ "${anc_rc}" -eq 1 ]]; then
+      parents=(-p "${base}" -p "${source}")
+    else
+      die "无法判断源码提交是否已在产物基线中"
+    fi
   else
-    git worktree add --detach "${work}" HEAD
-    git -C "${work}" checkout --orphan apt-hub-pages
+    git worktree add --detach "${work}" "${source}"
+    parents=(-p "${source}")
   fi
   git -C "${work}" read-tree --empty
   while IFS= read -r -d '' rel; do
@@ -368,12 +383,21 @@ save_apt_hub_pages() (
   for rel in .nojekyll CNAME; do
     [[ ! -f "${work}/${rel}" ]] || git -C "${work}" add -- "${rel}"
   done
-  if ! git -C "${work}" diff --cached --quiet; then
-    GIT_AUTHOR_NAME="${name}" GIT_AUTHOR_EMAIL="${email}" GIT_COMMITTER_NAME="${name}" GIT_COMMITTER_EMAIL="${email}" \
-      git -C "${work}" commit -m "更新 APT 站点产物"
+  tree=$(git -C "${work}" write-tree)
+  if [[ -n "${base}" && "${anc_rc}" -eq 0 ]]; then
+    base_tree=$(git rev-parse "${base}^{tree}")
+    if [[ "${tree}" == "${base_tree}" ]]; then
+      saved="${base}"
+    fi
   fi
-  git -C "${work}" push origin HEAD:refs/heads/apt-hub-pages || die "apt-hub-pages 非快进推送失败，未发布"
-  saved=$(git -C "${work}" rev-parse HEAD)
+  if [[ -z "${saved}" ]]; then
+    saved=$(
+      GIT_AUTHOR_NAME="${name}" GIT_AUTHOR_EMAIL="${email}" \
+        GIT_COMMITTER_NAME="${name}" GIT_COMMITTER_EMAIL="${email}" \
+        git -C "${work}" commit-tree "${tree}" "${parents[@]}" -m "更新 APT 站点产物"
+    )
+  fi
+  git -C "${work}" push origin "${saved}:refs/heads/apt-hub-pages" || die "apt-hub-pages 非快进推送失败，未发布"
   remote=$(git ls-remote --exit-code origin refs/heads/apt-hub-pages) || die "无法回读 apt-hub-pages"
   [[ "${remote%%$'\t'*}" == "${saved}" ]] || die "apt-hub-pages 回读与保存提交不同"
   printf '%s\n' "${saved}" >tmp/apt-hub-pages-saved.sha

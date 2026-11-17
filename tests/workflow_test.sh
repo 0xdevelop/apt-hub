@@ -169,6 +169,14 @@ if [[ "${author}" == "${ident}" && "${committer}" == "${ident}" ]]; then
 else
   fail "404 分支身份不对: author=${author} committer=${committer}"
 fi
+src_head="$(git -C "${WORK}" rev-parse 'HEAD^{commit}')"
+ready_parents="$(git --git-dir="${WORK}/origin-404.git" log -1 --format='%P' "${ready_sha}")"
+ready_names="$(git --git-dir="${WORK}/origin-404.git" ls-tree -r --name-only "${ready_sha}")"
+if [[ "${ready_parents}" == "${src_head}" && "${ready_names}" == ".nojekyll" ]]; then
+  pass '404 初始化以当前 HEAD 为唯一源码父且仅 .nojekyll'
+else
+  fail "404 初始化父或树不对 parents=${ready_parents} tree=${ready_names} head=${src_head}"
+fi
 common="$(git -C "${WORK}" rev-parse --path-format=absolute --git-common-dir)"
 if git --git-dir="${common}" cat-file -e "${ready_sha}^{commit}" \
   && [[ "$(git -C "${WORK}" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]]; then

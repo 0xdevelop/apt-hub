@@ -42,6 +42,7 @@
 
 - `apt-hub-pages` 分支只保存签名索引、公开公钥、分流列表、已发布元数据和 `add_source.sh`，不承担通用二进制存储。RustDesk 等官方 `.deb` 由客户端按已签名元数据从官方地址获取；Go 生成包从对应本仓 Release assets 获取。缺少可验证的官方包或构造包时，发布直接拒绝，不把二进制塞进 Pages 分支。
 - `data/published.json` 只记录成功部署后回写的状态，不手动填入尚未生效的软件。
+- Pages 提交沿上一份产物连续追加，并记录本次执行源码的父提交；首次创建也从源码提交派生，不另起孤立历史。产物文件树仍只含公开站点文件，不把源码复制进站点；相同产物、相同源码重复发布不新增提交。
 - `templates/readme_packages.md`、`templates/readme_empty.md` 控制列表表头与空态；`templates/index.html` 控制首页。页面显示用途、当前站点版本、源根地址、加源与安装命令和软件短表，随同一次发布自动生成。
 - 站点版本使用本次本仓 `vX.Y.Z`，不是 Go 或 RustDesk 的软件版本。当前发行版和变更记录链接固定到该标签；“最新发行版”链接使用 GitHub `releases/latest`，不维护另一个 `latest` 标签。变更记录沿用 `changelog/vX.Y.Z.md` 的 GitHub 渲染页，不另建前端或 Markdown 解析器。
 - `scripts/render.sh` 只替换 README 中 `APT-HUB:PACKAGES:BEGIN` / `END` 两条独占行之间的区域，区域外正文由人维护。缺失或重复标记会拒绝写入。

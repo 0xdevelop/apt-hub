@@ -1075,6 +1075,14 @@ if git -C "$sandbox/tmp/apt-hub-pages-git" config --local --get user.name >/dev/
 else
   pass "隔离保存未写 git config user.name"
 fi
+src_head=$(git -C "$sandbox" rev-parse 'HEAD^{commit}')
+sha1_parents=$(git --git-dir="$origin" log -1 --format='%P' "$sha1" 2>/dev/null || true)
+if [[ "$sha1_parents" == "$src_head" ]] \
+  && ! git --git-dir="$origin" ls-tree -r --name-only "$sha1" 2>/dev/null | grep -q '^scripts/'; then
+  pass "首次保存以当前 HEAD 为源码父且无源码文件"
+else
+  fail "首次保存源码父或树不对 parents=$sha1_parents head=$src_head"
+fi
 
 printf '%s\n' "$sha1" >"$sandbox/tmp/apt-hub-pages-base.sha"
 make_git_site "$sandbox/tmp/site" v2
@@ -1118,6 +1126,40 @@ if [[ "$parent" == "$sha1" ]]; then
   pass "第二次提交父节点是旧 SHA"
 else
   fail "第二次提交父节点不是旧 SHA: $parent"
+fi
+
+printf '%s\n' "$sha2" >"$sandbox/tmp/apt-hub-pages-base.sha"
+set +e
+isolated_save "$sandbox" "$origin" "$shafile" "$savelog"
+save_same_rc=$?
+set -e
+sha_same=$(tr -d '[:space:]' <"$shafile" 2>/dev/null || true)
+tip_same=$(git --git-dir="$origin" rev-parse refs/heads/apt-hub-pages)
+if [[ "$save_same_rc" -eq 0 && "$sha_same" == "$sha2" && "$tip_same" == "$sha2" ]]; then
+  pass "重复同输入不新增提交"
+else
+  fail "重复同输入新增了提交 rc=$save_same_rc sha=$sha_same tip=$tip_same log=$(cat "$savelog" 2>/dev/null || true)"
+fi
+
+tree2=$(git --git-dir="$origin" rev-parse "${sha2}^{tree}")
+printf '\n# source-moved\n' >>"$sandbox/scripts/publish_apt_site.sh"
+git -C "$sandbox" add -- scripts/publish_apt_site.sh
+git -C "$sandbox" -c "user.name=$GIT_NAME" -c "user.email=$GIT_EMAIL" commit -m "源码前进" >/dev/null
+src_moved=$(git -C "$sandbox" rev-parse 'HEAD^{commit}')
+printf '%s\n' "$sha2" >"$sandbox/tmp/apt-hub-pages-base.sha"
+set +e
+isolated_save "$sandbox" "$origin" "$shafile" "$savelog"
+save_track_rc=$?
+set -e
+sha_track=$(tr -d '[:space:]' <"$shafile" 2>/dev/null || true)
+track_tree=$(git --git-dir="$origin" rev-parse "${sha_track}^{tree}" 2>/dev/null || true)
+track_p1=$(git --git-dir="$origin" rev-parse "${sha_track}^" 2>/dev/null || true)
+track_p2=$(git --git-dir="$origin" rev-parse "${sha_track}^2" 2>/dev/null || true)
+if [[ "$save_track_rc" -eq 0 && "$sha_track" != "$sha2" && "$track_tree" == "$tree2" \
+  && "$track_p1" == "$sha2" && "$track_p2" == "$src_moved" ]]; then
+  pass "源码前进但产物树不变仍记录源码父"
+else
+  fail "源码前进未形成可追踪产物 rc=$save_track_rc sha=$sha_track tree=$track_tree/$tree2 p1=$track_p1 p2=$track_p2 src=$src_moved log=$(cat "$savelog" 2>/dev/null || true)"
 fi
 
 side="$gs/side"
@@ -1179,6 +1221,49 @@ if [[ "$after_dirty" == "$dirty_sha" ]]; then
   pass "脏历史拒绝后未改写远端"
 else
   fail "脏历史拒绝后远端被改写"
+fi
+
+orphan_root="$gs/orphan-lineage"
+orphan_origin="$orphan_root/origin.git"
+orphan_seed="$orphan_root/seed"
+orphan_sandbox="$orphan_root/sandbox"
+orphan_shafile="$orphan_root/saved.sha"
+orphan_log="$orphan_root/save.log"
+rm -rf "$orphan_root"
+mkdir -p "$orphan_seed" "$orphan_sandbox/tmp"
+git init --bare "$orphan_origin" >/dev/null
+git -C "$orphan_seed" init -b apt-hub-pages >/dev/null
+printf '%s\n' '{"schema_version":"2","packages":[]}' >"$orphan_seed/state.json"
+printf '<html>orphan</html>\n' >"$orphan_seed/index.html"
+: >"$orphan_seed/.nojekyll"
+git -C "$orphan_seed" add -- .nojekyll state.json index.html
+git -C "$orphan_seed" -c "user.name=$GIT_NAME" -c "user.email=$GIT_EMAIL" commit -m "孤立产物" >/dev/null
+orphan_base=$(git -C "$orphan_seed" rev-parse 'HEAD^{commit}')
+orphan_root_parents=$(git -C "$orphan_seed" log -1 --format='%P')
+git -C "$orphan_seed" remote add origin "$orphan_origin"
+git -C "$orphan_seed" push -q origin HEAD:refs/heads/apt-hub-pages
+make_git_site "$orphan_sandbox/tmp/site" orphan-v
+install_publish_script "$orphan_sandbox"
+git -C "$orphan_sandbox" init -b main >/dev/null
+git -C "$orphan_sandbox" add -- scripts
+git -C "$orphan_sandbox" -c "user.name=$GIT_NAME" -c "user.email=$GIT_EMAIL" commit -m "源码" >/dev/null
+git -C "$orphan_sandbox" remote add origin "$orphan_origin"
+git -C "$orphan_sandbox" fetch -q origin refs/heads/apt-hub-pages
+printf '%s\n' "$orphan_base" >"$orphan_sandbox/tmp/apt-hub-pages-base.sha"
+orphan_src=$(git -C "$orphan_sandbox" rev-parse 'HEAD^{commit}')
+set +e
+isolated_save "$orphan_sandbox" "$orphan_origin" "$orphan_shafile" "$orphan_log"
+orphan_rc=$?
+set -e
+orphan_sha=$(tr -d '[:space:]' <"$orphan_shafile" 2>/dev/null || true)
+orphan_p1=$(git --git-dir="$orphan_origin" rev-parse "${orphan_sha}^" 2>/dev/null || true)
+orphan_p2=$(git --git-dir="$orphan_origin" rev-parse "${orphan_sha}^2" 2>/dev/null || true)
+if [[ -z "$orphan_root_parents" && "$orphan_rc" -eq 0 \
+  && "$orphan_p1" == "$orphan_base" && "$orphan_p2" == "$orphan_src" ]] \
+  && ! git --git-dir="$orphan_origin" ls-tree -r --name-only "$orphan_sha" 2>/dev/null | grep -q '^scripts/'; then
+  pass "孤立历史保存首父不变并记录源码父"
+else
+  fail "孤立历史父关系不对 rc=$orphan_rc parents=${orphan_root_parents} p1=$orphan_p1 p2=$orphan_p2 base=$orphan_base src=$orphan_src log=$(cat "$orphan_log" 2>/dev/null || true)"
 fi
 
 echo "== detached tag 下 README 回写读 main =="
