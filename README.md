@@ -23,12 +23,12 @@ Go 安装后直接使用 `go`、`gofmt`。环境要求、手动配置与换钥�
 <a id="apt-hub-add-source"></a>
 
 ```bash
-curl -fsSL --proto '=https' --proto-redir '=https' -o add_source.sh 'https://0xdevelop.m-b-crazy.com/add_source.sh' && chmod a+x ./add_source.sh && sudo ./add_source.sh --site-url 'https://0xdevelop.m-b-crazy.com'
+curl -fsSL --proto '=https' --proto-redir '=https' -o add_source.sh 'https://apt-hub.m-b-crazy.com/add_source.sh' && chmod a+x ./add_source.sh && sudo ./add_source.sh --site-url 'https://apt-hub.m-b-crazy.com'
 ```
 
 | 软件 | 版本 | 支持环境 | 说明 |
 | --- | --- | --- | --- |
-| [golang](https://github.com/0xdevelop/apt-hub/releases/tag/golang-1.27.4-1) | 2:1.27.4-1 | jammy, noble, resolute, stonking · amd64, arm64 | Go 官方 Linux 归档构建的工具链 |
+| [golang](https://github.com/0xdevelop/apt-hub/releases/tag/v0.0.4) | 2:1.27.4-1 | jammy, noble, resolute, stonking · amd64, arm64 | Go 官方 Linux 归档构建的工具链 |
 | [rustdesk](https://github.com/rustdesk/rustdesk/releases/tag/1.5.3) | 1.5.3 | jammy, noble, resolute, stonking · amd64, arm64 | 开源远程桌面 |
 <!-- APT-HUB:PACKAGES:END -->
 
