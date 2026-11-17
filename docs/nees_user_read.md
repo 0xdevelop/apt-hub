@@ -31,7 +31,7 @@ site_url='https://packages.example.test/tools' && mkdir -p tmp/apt-hub-add && (c
 3. **Settings → Pages → Source → Deploy from a branch → `apt-hub-pages` → `/ (root)`**。首次没有该分支时，运行一次 `Release_Build` 准备 `.nojekyll`，按提示选择来源后重跑。独立子域名可直接填入本仓 Pages 的 **Custom domain**，DNS `CNAME` 指向 `<组织或用户名>.github.io`，不含仓库路径；不要求另建组织主站。已有域名变更时须保留旧 APT 地址的可用性。
 4. 提交修改后，在干净仓库执行 `bash git_tag.sh`，自动升版并完成构建、Release assets、签源站点发布。仅重签已有版本时，在 **Actions → Release_Build → Run workflow** 选 `main`，`rotate_from` 留空。
 
-只需一个私钥 Secret；`GITHUB_TOKEN` 由 Actions 提供，公钥、指纹、站点地址和发布者身份由流程取得。`apt-hub-pages` 只保存公开站点产物；二进制由官方原址或对应 Release assets 提供，缺少资产时发布失败，不由 Pages 分支兜底。推送站点产物后等待分支式 Pages 自动构建，并核对准确提交及公网状态后才更新 README，不以测试通过冒称上线。
+只需一个私钥 Secret；`GITHUB_TOKEN` 由 Actions 提供，公钥、指纹、站点地址和发布者身份由流程取得。`apt-hub-pages` 只保存公开站点产物；二进制由官方原址或对应 Release assets 提供，缺少资产时发布失败，不由 Pages 分支兜底。推送站点产物后显式请求 Pages 构建，核对准确部署提交及公网三份关键文件后才更新 README，不以测试通过冒称上线。
 
 ### 生成签名密钥
 

@@ -51,6 +51,9 @@ case "${method} $1" in
     esac
     ;;
   'GET users/fixture-human') cat "${FIXTURE}/actor.json" ;;
+  'POST repos/example/apt-hub/pages/builds') cat "${FIXTURE}/build-request.json" ;;
+  'GET repos/example/apt-hub/pages/builds/123') cat "${FIXTURE}/build-result.json" ;;
+  'GET repos/example/apt-hub/pages/builds/latest') cat "${FIXTURE}/build-result.json" ;;
   *) exit 90 ;;
 esac
 SH
@@ -105,6 +108,8 @@ seed_sha="$(git -C "${seed}" rev-parse HEAD)"
 export APT_HUB_PAGES_SHA="${seed_sha}"
 rm -rf -- "${seed}"
 printf '%s\n' '{"html_url":"http://packages.example.test/","build_type":"legacy","source":{"branch":"apt-hub-pages","path":"/"},"cname":"packages.example.test"}' >"${WORK}/pages.json"
+printf '%s\n' '{"url":"https://api.github.com/repos/example/apt-hub/pages/builds/123"}' >"${WORK}/build-request.json"
+printf '%s\n' "{\"status\":\"built\",\"commit\":\"${seed_sha}\"}" >"${WORK}/build-result.json"
 printf '%s\n' '{"schema_version":"2","packages":[]}' >"${WORK}/tmp/site/state.json"
 printf '%s\n' '<html>candidate</html>' >"${WORK}/tmp/site/index.html"
 printf '%s\n' 'candidate-client' >"${WORK}/tmp/site/add_source.sh"
@@ -183,12 +188,9 @@ fi
 printf '200\n' >"${WORK}/pages.status"
 git -C "${WORK}" remote set-url origin "${WORK}/origin.git"
 
-expect pages_branch_readback 0 run deploy-pages
-if grep -Fq 'pages/builds' "${WORK}/calls.log"; then
-  fail 'deploy-pages 仍调用 Pages builds API'
-else
-  pass '分支推送后不重复调用 Pages builds API'
-fi
+expect explicit_pages_build 0 run deploy-pages
+if grep -Fxq 'POST repos/example/apt-hub/pages/builds' "${WORK}/calls.log"; then pass '显式请求分支构建'; else fail '未请求构建'; fi
+if grep -Fxq 'GET repos/example/apt-hub/pages/builds/123' "${WORK}/calls.log"; then pass '回读构建状态'; else fail '未回读构建状态'; fi
 if cmp -s "${WORK}/tmp/site/state.json" "${WORK}/tmp/public-state.json" \
   && cmp -s "${WORK}/tmp/site/index.html" "${WORK}/tmp/public-index.html" \
   && cmp -s "${WORK}/tmp/site/add_source.sh" "${WORK}/tmp/public-add_source.sh"; then
@@ -199,6 +201,11 @@ fi
 export APT_HUB_PAGES_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 expect pages_branch_other_commit 1 run deploy-pages
 export APT_HUB_PAGES_SHA="${seed_sha}"
+printf '%s\n' '{"status":"built","commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}' >"${WORK}/build-result.json"
+expect pages_other_commit 1 run deploy-pages
+printf '%s\n' "{\"status\":\"errored\",\"commit\":\"${seed_sha}\",\"error\":{\"message\":\"fixture build failure\"}}" >"${WORK}/build-result.json"
+expect pages_build_failed 1 run deploy-pages
+printf '%s\n' "{\"status\":\"built\",\"commit\":\"${seed_sha}\"}" >"${WORK}/build-result.json"
 printf '%s\n' '{"stale":true}' >"${WORK}/public-state.json"
 expect pages_public_state_stale 1 run deploy-pages
 cp "${WORK}/tmp/site/state.json" "${WORK}/public-state.json"
@@ -232,6 +239,30 @@ if cmp -s "${WORK}/tmp/site/state.json" "${WORK}/tmp/public-state.json" \
   pass '三文件重新对齐后部署成功'
 else
   fail '三文件对齐后未成功'
+fi
+printf '%s\n' '{"status":"queued"}' >"${WORK}/build-request.json"
+expect pages_build_url_missing 1 run deploy-pages
+if grep -Fq 'Pages 未返回构建地址: https://packages.example.test' "${WORK}/pages_build_url_missing.log"; then
+  pass '缺构建地址时诊断含公开站点'
+else
+  fail '缺构建地址诊断未含公开站点'
+fi
+printf '%s\n' '{"url":"https://evil.example/repos/example/apt-hub/pages/builds/123"}' >"${WORK}/build-request.json"
+: >"${WORK}/calls.log"
+expect pages_build_url_rejected 1 run deploy-pages
+if grep -Fq 'Pages 构建地址非法: https://packages.example.test https://evil.example/repos/example/apt-hub/pages/builds/123' "${WORK}/pages_build_url_rejected.log" \
+  && ! grep -Fq 'evil.example' "${WORK}/calls.log"; then
+  pass '非法构建地址拒绝且不外请求'
+else
+  fail '非法构建地址被请求或诊断缺公开地址'
+fi
+printf '%s\n' '{"url":"https://api.github.com/repos/example/apt-hub/pages/builds/latest"}' >"${WORK}/build-request.json"
+: >"${WORK}/calls.log"
+expect pages_build_latest 0 run deploy-pages
+if grep -Fxq 'GET repos/example/apt-hub/pages/builds/latest' "${WORK}/calls.log"; then
+  pass 'latest 构建地址按原校验回读'
+else
+  fail 'latest 构建地址未按原校验回读'
 fi
 
 for item in key key-other key-protected; do mkdir -p "${WORK}/${item}"; chmod 700 "${WORK}/${item}"; done
@@ -405,6 +436,26 @@ if [[ "${ok_rc}" -eq 0 \
   pass '回写传版本并移除未部署提示'
 else
   fail "回写未清理未部署提示 rc=${ok_rc} args=${ok_args} log=$(tr '\n' ' ' <"${chain}/ok.log")"
+fi
+main_sha="$(git --git-dir="${chain}.git" rev-parse refs/heads/main)"
+again_rc=0
+again_note=1
+(
+  cd -- "${chain}"
+  env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    APT_HUB_GIT_NAME=fixture-publisher APT_HUB_GIT_EMAIL=fixture-publisher@invalid \
+    APT_HUB_PAGES_SHA="${chain_sha}" GITHUB_REPOSITORY=example/apt-hub RELEASE_TAG=v7.7.7 \
+    bash scripts/publish_apt_site.sh update-readme
+) >"${chain}/again.log" 2>&1 || again_rc=$?
+grep -Fq 'README 与已发布状态已一致' "${chain}/again.log" && again_note=0
+again_readme="$(git --git-dir="${chain}.git" show main:README.md)"
+if [[ "${again_rc}" -eq 0 \
+  && "$(git --git-dir="${chain}.git" rev-parse refs/heads/main)" == "${main_sha}" \
+  && "${again_note}" -eq 0 \
+  && "${again_readme}" != *'尚未部署到 Pages'* ]]; then
+  pass '重复回写幂等'
+else
+  fail "重复回写不幂等 rc=${again_rc}"
 fi
 cleanup
 printf 'RESULT pass=%s fail=%s evidence=%s\n' "${PASS}" "${FAIL}" "${WORK}"

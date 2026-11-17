@@ -381,10 +381,28 @@ save_apt_hub_pages() (
 )
 
 deploy_pages() {
-  local sha="${APT_HUB_PAGES_SHA:?}" remote attempt
-  [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || die "站点提交非法"
-  remote=$(git ls-remote --exit-code origin refs/heads/apt-hub-pages) || die "无法回读 apt-hub-pages"
-  [[ "${remote%%$'\t'*}" == "${sha}" ]] || die "Pages 分支提交已变化，拒绝回读"
+  local sha="${APT_HUB_PAGES_SHA:?}" remote request url endpoint body status commit attempt
+  [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || die "::error::站点提交非法"
+  remote=$(git ls-remote --exit-code origin refs/heads/apt-hub-pages) || die "::error::无法回读 apt-hub-pages"
+  [[ "${remote%%$'\t'*}" == "${sha}" ]] || die "::error::Pages 分支提交已变化，拒绝回读: ${sha}"
+  request=$(gh api --method POST "repos/${GITHUB_REPOSITORY:?}/pages/builds") || die "::error::请求 Pages 分支构建失败"
+  url=$(jq -er '.url' <<<"${request}") || die "::error::Pages 未返回构建地址: ${SITE_URL:?}"
+  endpoint="${url#"${GITHUB_API_URL:?}/"}"
+  [[ "${endpoint}" =~ ^repos/${GITHUB_REPOSITORY}/pages/builds/([0-9]+|latest)$ ]] || die "::error::Pages 构建地址非法: ${SITE_URL:?} ${url}"
+  status=""
+  for ((attempt=0; attempt<60; attempt++)); do
+    body=$(gh api "${endpoint}") || die "::error::读取 Pages 构建失败"
+    status=$(jq -er '.status' <<<"${body}") || die "::error::Pages 构建状态缺失"
+    case "${status}" in
+      built)
+        commit=$(jq -er '.commit' <<<"${body}") || die "::error::Pages 未返回部署提交"
+        [[ "${commit}" == "${sha}" ]] || die "::error::Pages 部署了其他提交，拒绝回写列表: ${commit}"
+        break ;;
+      queued|building) sleep 10 ;;
+      *) die "::error::Pages 构建未成功: ${status}" ;;
+    esac
+  done
+  [[ "${status}" == built ]] || die "::error::Pages 构建超时: ${status}"
   for ((attempt=0; attempt<60; attempt++)); do
     if curl -fsS --proto '=https' --connect-timeout 15 --max-time 30 \
       "${SITE_URL:?}/state.json" -o tmp/public-state.json && cmp -s tmp/site/state.json tmp/public-state.json \
@@ -397,7 +415,7 @@ deploy_pages() {
     fi
     sleep 10
   done
-  die "公网站点尚未同时返回本次 state、index 与 add_source，未回写列表"
+  die "::error::公网站点尚未同时返回本次 state、index 与 add_source，未回写列表: ${SITE_URL:?}"
 }
 
 publish() {
