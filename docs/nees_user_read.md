@@ -27,7 +27,7 @@ site_url='https://packages.example.test/tools' && mkdir -p tmp/apt-hub-add && (c
 ## 部署自己的源
 
 1. 使用公开仓库并启用 Actions；fork 的定时工作流需要手动启用。
-2. 按下节生成专用无口令签名钥，将 `private-key.asc` 完整内容（含首尾标记）保存到 **Settings → Secrets and variables → Actions → Secrets**，名称为 **`APT_HUB_GPG_PRIVATE_KEY`**。不放 Variables、不提交 Git、不发聊天，离线备份密钥目录；`tmp/` 不是备份位置。
+2. 按下节生成专用无口令签名钥，将 `private-key.asc` 完整内容（含首尾标记）保存到 **Settings → Secrets and variables → Actions → Secrets**，名称为 **`APT_HUB_GPG_PRIVATE_KEY`**。不放 Variables、不提交 Git、不发聊天。将 `private-key.asc` 复制到可靠的离线备份位置即可恢复该签名身份，无需保留整个临时密钥目录；`tmp/` 不是备份位置。
 3. **Settings → Pages → Source → Deploy from a branch → `apt-hub-pages` → `/ (root)`**。首次没有该分支时，运行一次 `Release_Build` 准备 `.nojekyll`，按提示选择来源后重跑。独立子域名可直接填入本仓 Pages 的 **Custom domain**，DNS `CNAME` 指向 `<组织或用户名>.github.io`，不含仓库路径；不要求另建组织主站。已有域名变更时须保留旧 APT 地址的可用性。
 4. 提交修改后，在干净仓库执行 `bash git_tag.sh`，自动升版并完成构建、Release assets、签源站点发布。仅重签已有版本时，在 **Actions → Release_Build → Run workflow** 选 `main`，`rotate_from` 留空。
 
@@ -57,7 +57,19 @@ site_url='https://packages.example.test/tools' && mkdir -p tmp && curl -fsSL --p
 
 ### 维护者恢复
 
-**原钥仍可用**：Secret 有效则无需改动；丢失时从离线备份恢复同一私钥，运行 `Release_Build`，`rotate_from` 留空。公钥未变，使用者无需换钥。
+**原钥仍可用**：Secret 有效则无需改动。电脑密钥库或 Actions Secret 丢失，但仍有完整 `private-key.asc` 时：
+
+1. 确认备份以 `-----BEGIN PGP PRIVATE KEY BLOCK-----` 开头；`.asc` 只是文件格式，公钥 `.asc` 或站点 `apt-hub.gpg` 不能恢复私钥。
+2. 在 **Settings → Secrets and variables → Actions → Secrets** 新建或更新同名 **`APT_HUB_GPG_PRIVATE_KEY`**，粘贴备份的完整内容，包含首尾标记。
+3. 在 **Actions → Release_Build → Run workflow** 选择 `main`，`rotate_from` 留空。现有 `publish_apt_site.sh` 自动导入原私钥、导出公钥并签名，不必先恢复本机密钥库。
+
+如果还需要恢复本机专用密钥库，在项目根执行（替换备份路径，不会改默认密钥库）：
+
+```bash
+umask 077 && mkdir -p tmp && key_dir=$(mktemp -d "$(pwd -P)/tmp/k.XXXXXX") && chmod 700 "$key_dir" && test "$(printf '%s' "$key_dir/S.gpg-agent.browser" | wc -c | tr -d '[:space:]')" -lt 104 && gpg --homedir "$key_dir" --batch --import '/备份位置/private-key.asc' && gpg --homedir "$key_dir" --batch --list-secret-keys --with-fingerprint
+```
+
+同一私钥恢复后公钥与指纹不变，使用者无需换钥；正常 `sudo apt update` 即可。这里只恢复签名身份，不恢复仓库、Release 资产或 Pages 历史。如果私钥 `.asc` 和其他私钥副本都丢失，不能从公钥反推，只能按下节换新钥。
 
 **必须换新钥**：疑似泄露先暂停发布，有撤销证书则公告旧钥撤销。读取要恢复的 `apt-hub-pages` 快照的旧公钥指纹：
 

@@ -18,6 +18,7 @@ fingerprint=""
 site_url=""
 releases_arg=""
 package_repository=""
+release_tag=""
 package_release_tag=""
 upstream_dir=""
 go_downloads_json=""
@@ -34,7 +35,7 @@ die() {
 
 usage() {
   cat >&2 <<'EOF'
-用法: scripts/update_sources.sh --catalog <file> --previous <dir> --work-dir <全新/空目录> --gnupghome <dir> --fingerprint <完整指纹> --site-url <https> [--releases <已生成的官方发行版JSON>] [--package-repository <owner/repo>] [--release-tag <vX.Y.Z>] [--upstream-dir <dir>] [--go-downloads-json <file>] [--rotate-from <旧完整指纹>] [--acquire-https-ca <pem>] [--github-https-proxy <http://host:port>]
+用法: scripts/update_sources.sh --catalog <file> --previous <dir> --work-dir <全新/空目录> --gnupghome <dir> --fingerprint <完整指纹> --site-url <https> [--releases <已生成的官方发行版JSON>] [--package-repository <owner/repo>] [--release-tag <页面vX.Y.Z>] [--package-release-tag <包来源vX.Y.Z>] [--upstream-dir <dir>] [--go-downloads-json <file>] [--rotate-from <旧完整指纹>] [--acquire-https-ca <pem>] [--github-https-proxy <http://host:port>]
 EOF
   exit 2
 }
@@ -219,6 +220,9 @@ while [[ $# -gt 0 ]]; do
       package_repository="$2"; shift 2 ;;
     --release-tag)
       [[ $# -ge 2 ]] || usage
+      release_tag="$2"; shift 2 ;;
+    --package-release-tag)
+      [[ $# -ge 2 ]] || usage
       package_release_tag="$2"; shift 2 ;;
     --upstream-dir)
       [[ $# -ge 2 ]] || usage
@@ -268,25 +272,26 @@ if [[ -n "${releases_arg}" ]]; then
   releases="$(assert_allowed_file releases "${releases_arg}")"
 fi
 
-# catalog 含 Go 且未显式给 tag：根 VERSION 派生严格 vX.Y.Z，不从 Go 上游推本仓 tag。
+# 缺省页面版本沿 VERSION，包来源可显式引用旧的准确标签。
 if jq -e '.packages|any((.source_type // "") == "go_official_archive")' "${catalog}" >/dev/null; then
   [[ -n "${package_repository}" ]] || die "catalog 含 go_official_archive 时必须传 --package-repository"
-  if [[ -z "${package_release_tag}" ]]; then
+  if [[ -z "${release_tag}" ]]; then
     ver_file="${PROJECT_ROOT}/VERSION"
     [[ -f "${ver_file}" && ! -L "${ver_file}" ]] || die "缺少 VERSION，无法派生 release-tag"
     raw="$(tr -d '[:space:]' <"${ver_file}")"
     if [[ "${raw}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-      package_release_tag="${raw}"
+      release_tag="${raw}"
     elif [[ "${raw}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-      package_release_tag="v${raw}"
+      release_tag="v${raw}"
     else
       die "VERSION 无法派生严格 vX.Y.Z: ${raw}"
     fi
-    printf 'update_sources.sh: 由 VERSION 派生 release-tag=%s\n' "${package_release_tag}"
-  elif [[ ! "${package_release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    die "release-tag 必须是严格 vX.Y.Z: ${package_release_tag}"
+    printf 'update_sources.sh: 由 VERSION 派生 release-tag=%s\n' "${release_tag}"
   fi
+  package_release_tag="${package_release_tag:-${release_tag}}"
 fi
+[[ -z "${release_tag}" || "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "release-tag 必须是严格 vX.Y.Z"
+[[ -z "${package_release_tag}" || "${package_release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "package-release-tag 必须是严格 vX.Y.Z"
 if [[ -n "${upstream_dir}" ]]; then
   upstream_dir="$(assert_allowed_dir upstream-dir "${upstream_dir}" yes)"
 fi
@@ -408,8 +413,8 @@ render_args=(
   --readme "${readme_copy}"
   --site "${site_dir}"
 )
-if [[ -n "${package_repository}" && -n "${package_release_tag}" ]]; then
-  render_args+=(--repository "${package_repository}" --release-tag "${package_release_tag}")
+if [[ -n "${package_repository}" && -n "${release_tag}" ]]; then
+  render_args+=(--repository "${package_repository}" --release-tag "${release_tag}")
 fi
 "${SCRIPT_DIR}/render.sh" "${render_args[@]}"
 

@@ -1528,10 +1528,13 @@ while IFS= read -r pkgjson; do
     jq -e '.schema_version=="1" and (.upstream|type)=="object" and (.packages|type)=="array"' "${go_prov_path}" >/dev/null \
       || die "provenance 结构非法"
     go_expected_deb_version "${go_prov_path}" >/dev/null
-    derived_rev="$(go_checkout_derived_revision)"
-    got_rev="$(jq -r '.upstream.revision // empty' "${go_prov_path}")"
-    [[ "${got_rev}" == "${derived_rev}" ]] \
-      || die "活跃 Go revision 必须由 config.revision 与 VERSION 派生为 ${derived_rev}"
+    derived_rev="$(jq -r '.upstream.revision // empty' "${go_prov_path}")"
+    if jq -e 'has("build_inputs_sha256")' "${go_prov_path}" >/dev/null; then
+      jq -e '.build_inputs_sha256|type=="string" and test("^[0-9a-f]{64}$")' "${go_prov_path}" >/dev/null || die "构包输入摘要非法"
+      [[ "${derived_rev}" == "$(jq -r '.revision' "${PROJECT_ROOT}/config/go.json")+${package_release_tag#v}" ]] || die "Go 修订与包来源标签不符"
+    else
+      [[ "${derived_rev}" == "$(go_checkout_derived_revision)" ]] || die "旧 Go 来源修订不符"
+    fi
     jq -e --arg pkg "${pkg}" --arg rev "${derived_rev}" '
       . as $root
       | ([.packages[].package]|unique)==[$pkg]

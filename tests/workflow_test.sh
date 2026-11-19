@@ -392,8 +392,9 @@ awk '
   cap && substr($0, 1, 10) == "          " { print substr($0, 11); next }
   cap { exit }
 ' "${WF}" >"${assets_run}"
+# shellcheck disable=SC2016 # 匹配工作流中的原始变量文本
 if [[ -s "${assets_run}" ]] \
-  && grep -Fq 'bash ./build.sh && bash ./build.sh test || exit $?' "${assets_run}" \
+  && grep -Fq 'bash ./build.sh --go-version "${GO_VERSION}" --downloads-json tmp/go-downloads.json && bash ./build.sh test || exit $?' "${assets_run}" \
   && grep -Fq 'local-status --asset-dir ./build/upload_tmp_dir || exit $?' "${assets_run}"; then
   pass '抽出的 assets run 含失败传播与 local-status'
 else
@@ -405,7 +406,9 @@ if [[ -n "${up_n}" && -n "${pub_n}" && "${up_n}" -lt "${pub_n}" ]]; then pass '�
 shim_assets() {
   local name="$1" brc="$2" trc="$3" lrc="$4" want="$5" d="${WORK}/shim-$1" rc=0
   rm -rf -- "${d}"
-  mkdir -p -- "${d}/scripts"
+  mkdir -p -- "${d}/scripts" "${d}/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' >"${d}/bin/curl"
+  chmod 755 "${d}/bin/curl"
   cat >"${d}/build.sh" <<EOF
 #!/bin/bash
 printf '%s\n' "\${1:-release}" >> calls
@@ -416,6 +419,7 @@ EOF
 #!/bin/bash
 printf '%s\n' "\$1" >> calls
 [[ "\$1" == local-status ]] && exit ${lrc}
+if [[ "\$1" == stage-upload ]]; then printf 'upload=1\\nupload_path=tmp/missing-assets/*\\n'; exit 0; fi
 exit 10
 EOF
   : >"${d}/gen_debs.sh"
@@ -425,7 +429,7 @@ EOF
   set +e
   (
     cd -- "${d}"
-    GITHUB_OUTPUT="${d}/github_output" REPOSITORY=example/apt-hub TAG=v0.0.2 bash "${assets_run}"
+    PATH="${d}/bin:${PATH}" GITHUB_OUTPUT="${d}/github_output" REPOSITORY=example/apt-hub TAG=v0.0.2 GO_VERSION=go9.9.9 bash "${assets_run}"
   ) >"${d}.log" 2>&1
   rc=$?
   set -e

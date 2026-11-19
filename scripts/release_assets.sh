@@ -16,7 +16,9 @@ die() {
 usage() {
   cat >&2 <<'EOF'
 用法:
-  scripts/release_assets.sh remote-status --repository <owner/repo> --tag <vX.Y.Z>
+  scripts/release_assets.sh plan --repository <owner/repo> --tag <vX.Y.Z> [--previous-state <state.json>]
+  scripts/release_assets.sh stage-upload --repository <owner/repo> --tag <vX.Y.Z> --asset-dir <目录> --output-dir <全新tmp子目录>
+  scripts/release_assets.sh remote-status --repository <owner/repo> --tag <vX.Y.Z> [--source-tag]
   scripts/release_assets.sh local-status --asset-dir <目录>
 退出: 0 已完整，或 catalog 无需构造；10 远端没有构造包；1 不完整、不一致或查询失败。
 EOF
@@ -56,8 +58,8 @@ read_catalog() {
 
 # 目录内文件与 SHA256SUMS、来源、catalog、go 配置一致则返回，否则 die。不访问远端。
 validate_constructed_dir() {
-  local dl="$1" work="$2"
-  local catalog gocfg cat_id pkg epoch rev prov prov_n prov_base
+  local dl="$1" work="$2" expected_revision="${3:-}"
+  local catalog gocfg cat_id pkg epoch rev prov prov_n prov_base base_rev project_version
   [[ -d "${dl}" && ! -L "${dl}" ]] || die "asset-dir 不是目录"
   if find "${dl}" -mindepth 1 -maxdepth 1 ! -type f -print -quit | grep -q .; then
     die "目录含非构造文件"
@@ -96,7 +98,7 @@ validate_constructed_dir() {
   project_version="$(tr -d '[:space:]' <"${ROOT}/VERSION")" || die "无法读取 VERSION"
   [[ "${base_rev}" =~ ^[0-9]+$ && "${project_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
     || die "VERSION 或 config revision 语法非法"
-  rev="${base_rev}+${project_version}"
+  rev="${expected_revision:-${base_rev}+${project_version}}"
   cat_id="$(jq -r '[.packages[] | select(.source_type=="go_official_archive")][0].id' "${catalog}")"
   [[ "${cat_id}" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || die "catalog id 非法"
   prov="${dl}/${cat_id}.provenance.json"
@@ -159,12 +161,229 @@ prepare_work() {
   trap 'rm -rf -- "${WORK_DIR}"' EXIT
 }
 
+build_inputs_sha256() {
+  (cd "${ROOT}" && sha256sum scripts/gen_deb_golang.sh config/go.json | sha256sum | cut -d' ' -f1)
+}
+
+fetch_release() {
+  local repository="$1" tag="$2" dest="$3" err="${WORK_DIR}/api.err"
+  if gh api "repos/${repository}/releases/tags/${tag}" >"${dest}" 2>"${err}"; then
+    jq -e --arg tag "${tag}" 'type=="object" and .tag_name==$tag and .draft==false and .prerelease!=true and (.assets|type)=="array"' "${dest}" >/dev/null \
+      || die "Release 响应非法: ${tag}"
+    return 0
+  fi
+  if grep -Eq 'HTTP 404|\(404\)' "${err}"; then
+    rm -f -- "${dest}"
+    return 10
+  fi
+  die "读取 Release 失败: ${tag}（非不存在）"
+}
+
+validate_remote_assets() {
+  local body="$1" repository="$2" tag="$3"
+  jq -e --arg prefix "https://github.com/${repository}/releases/download/${tag}/" '
+    ([.assets[].name]|length)==([.assets[].name]|unique|length)
+    and all(.assets[];
+      (.name|type=="string" and test("^[A-Za-z0-9][A-Za-z0-9._+-]*$"))
+      and (.size|type=="number" and .>0)
+      and (.digest|type=="string" and test("^sha256:[0-9a-f]{64}$"))
+      and .state=="uploaded"
+      and .browser_download_url==($prefix+.name))
+  ' "${body}" >/dev/null || die "Release 资产身份、摘要或名称非法: ${tag}"
+}
+
+download_remote_file() {
+  local body="$1" name="$2" dest="$3" url size digest
+  url=$(jq -er --arg n "${name}" '.assets[]|select(.name==$n)|.browser_download_url' "${body}") || die "缺少资产: ${name}"
+  size=$(jq -er --arg n "${name}" '.assets[]|select(.name==$n)|.size' "${body}") || die "缺少 size: ${name}"
+  digest=$(jq -er --arg n "${name}" '.assets[]|select(.name==$n)|.digest' "${body}") || die "缺少 digest: ${name}"
+  curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 600 --retry 2 -o "${dest}" "${url}" \
+    || die "下载资产失败: ${name}"
+  [[ "$(stat -c '%s' "${dest}")" == "${size}" && "sha256:$(sha256sum "${dest}" | cut -d' ' -f1)" == "${digest}" ]] \
+    || die "资产字节与 Release 不符: ${name}"
+}
+
+# 完整来源按其自己的标签修订校验，不把当前页面版本混入包版本。
+verified_release_dir() {
+  local body="$1" tag="$2" dir="$3" name revision
+  mkdir -p "${dir}"
+  while IFS= read -r name; do
+    download_remote_file "${body}" "${name}" "${dir}/${name}"
+  done < <(jq -r '.assets[].name' "${body}")
+  revision=$(jq -er '.upstream.revision' "${dir}/golang.provenance.json") || die "来源修订缺失"
+  [[ "${revision}" == "$(jq -r '.revision' "${ROOT}/config/go.json")+${tag#v}" ]] || die "来源修订与包标签不符: ${tag}"
+  validate_constructed_dir "${dir}" "${WORK_DIR}" "${revision}"
+}
+
+plan_release() {
+  local repository="" tag="" previous_state="" arg
+  while [[ $# -gt 0 ]]; do
+    arg="$1"; [[ $# -ge 2 ]] || usage
+    case "${arg}" in
+      --repository) repository="$2" ;;
+      --tag) tag="$2" ;;
+      --previous-state) previous_state="$2" ;;
+      *) usage ;;
+    esac
+    shift 2
+  done
+  [[ "${repository}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ && "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "计划仓库或标签非法"
+  read_catalog
+  prepare_work
+  if [[ "${CONSTRUCT_N}" -eq 0 ]]; then
+    printf 'build_packages=0\nbump_release=0\npackage_release_tag=%s\ngo_version=\n' "${tag}"
+    return 0
+  fi
+  require_tool gh
+  require_tool curl
+  local index="${WORK_DIR}/downloads.json" latest="" v fingerprint current="${WORK_DIR}/current.json" source_tag="${tag}" source
+  curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 120 --retry 2 -o "${index}" 'https://go.dev/dl/?mode=json&include=all' || die "获取 Go 官方索引失败"
+  jq -er 'if type=="array" and length>0 then .[]|select(.stable==true)|.version else error("bad index") end' "${index}" >"${WORK_DIR}/stable.txt" || die "Go stable 索引非法"
+  while IFS= read -r v; do
+    if [[ "${v}" =~ ^go[0-9]+(\.[0-9]+)?$ ]]; then continue; fi
+    [[ "${v}" =~ ^go[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "Go stable 版本非法"
+    if [[ -z "${latest}" ]] || dpkg --compare-versions "${v#go}" gt "${latest#go}"; then latest="${v}"; fi
+  done <"${WORK_DIR}/stable.txt"
+  [[ -n "${latest}" ]] || die "Go stable 索引为空"
+  fingerprint=$(build_inputs_sha256) || die "计算构包输入失败"
+  local previous_version=""
+  if [[ -n "${previous_state}" ]]; then
+    [[ -f "${previous_state}" && ! -L "${previous_state}" ]] || die "previous-state 不是普通文件"
+    jq -e '.schema_version=="2" and (.packages|type)=="array" and ([.packages[]|select(.id=="golang")]|length)<=1' "${previous_state}" >/dev/null || die "previous-state 结构非法"
+    previous_version=$(jq -r '.packages[]|select(.id=="golang")|.version' "${previous_state}")
+    [[ -z "${previous_version}" ]] || dpkg --validate-version "${previous_version}" || die "previous Go 版本非法"
+  fi
+  local current_count=0
+  if fetch_release "${repository}" "${tag}" "${current}"; then
+    current_count=$(jq '.assets|length' "${current}")
+    validate_remote_assets "${current}" "${repository}" "${tag}"
+  fi
+  source="${current}"
+  if [[ "${current_count}" -eq 0 && -n "${previous_state}" ]]; then
+    [[ -f "${previous_state}" && ! -L "${previous_state}" ]] || die "previous-state 不是普通文件"
+    local old_tag old_repo
+    old_tag=$(jq -er '.packages[]|select(.id=="golang")|.release_tag' "${previous_state}") || old_tag=""
+    old_repo=$(jq -r '.packages[]|select(.id=="golang")|.package_repository // empty' "${previous_state}") || die "previous-state 非法"
+    if [[ -n "${old_tag}" ]]; then
+      [[ "${old_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && "${old_repo}" == "${repository}" ]] || die "previous Go 来源仓库或标签非法"
+      dpkg --compare-versions "${old_tag#v}" le "${tag#v}" || die "previous 来源标签晚于当前版本"
+      source="${WORK_DIR}/previous.json"
+      if fetch_release "${repository}" "${old_tag}" "${source}"; then
+        source_tag="${old_tag}"
+        validate_remote_assets "${source}" "${repository}" "${source_tag}"
+      else
+        source="${current}"
+      fi
+    fi
+  fi
+  local count=0 prov="${WORK_DIR}/provenance.json" upstream="" inputs="" complete=0 pinned="${latest}" bump=0
+  [[ ! -f "${source}" ]] || count=$(jq '.assets|length' "${source}")
+  if [[ "${count}" -gt 0 ]]; then
+    if jq -e '.assets|any(.name=="golang.provenance.json")' "${source}" >/dev/null; then
+      download_remote_file "${source}" golang.provenance.json "${prov}"
+      upstream=$(jq -er '.upstream.version|select(test("^go[0-9]+\\.[0-9]+\\.[0-9]+$"))' "${prov}") || die "来源 Go 版本非法"
+      inputs=$(jq -r '.build_inputs_sha256 // empty' "${prov}") || die "来源构包输入非法"
+      dpkg --compare-versions "${upstream#go}" le "${latest#go}" || die "官方索引版本回退，拒绝替换现有包"
+      local expected_count
+      expected_count=$(jq '.architectures|length+2' "${ROOT}/config/go.json")
+      if [[ "${count}" -eq "${expected_count}" ]] && jq -e '.assets|any(.name=="SHA256SUMS")' "${source}" >/dev/null; then complete=1; fi
+      if [[ "${inputs}" == "${fingerprint}" && "${complete}" -eq 1 && "${upstream}" == "${latest}" ]]; then
+        jq -e --slurpfile p "${prov}" '
+          . as $index | all($p[0].packages[]; . as $pkg |
+            any($index[]; .version==$p[0].upstream.version and
+              any(.files[]; .arch==$pkg.architecture and .os=="linux" and .kind=="archive"
+                and ("https://go.dev/dl/"+.filename)==$pkg.upstream.url
+                and .sha256==$pkg.upstream.sha256 and (.size|tostring)==($pkg.upstream.size|tostring))))
+        ' "${index}" >/dev/null || die "已发布 Go 来源与当前官方归档不符"
+        verified_release_dir "${source}" "${source_tag}" "${WORK_DIR}/verified"
+        local selected_version
+        selected_version=$(jq -er '.packages[0].version' "${prov}") || die "来源包版本缺失"
+        if [[ -n "${previous_version}" ]] && dpkg --compare-versions "${selected_version}" lt "${previous_version}"; then die "拒绝退回已发布的较低 Go 包版本"; fi
+        printf 'build_packages=0\nbump_release=0\npackage_release_tag=%s\ngo_version=%s\n' "${source_tag}" "${upstream}"
+        return 0
+      fi
+      if [[ "${source_tag}" == "${tag}" ]]; then
+        if [[ "${complete}" -eq 1 || "${inputs}" != "${fingerprint}" ]]; then bump=1; else pinned="${upstream}"; fi
+      fi
+    elif [[ "${source_tag}" == "${tag}" ]]; then
+      jq -r '.assets[].name|select(endswith(".deb"))' "${source}" >"${WORK_DIR}/partial-names.txt"
+      if jq -e '.assets|any(.name=="SHA256SUMS")' "${source}" >/dev/null; then
+        download_remote_file "${source}" SHA256SUMS "${WORK_DIR}/partial-SHA256SUMS"
+        awk '$1 ~ /^[0-9a-f]+$/ && length($1)==64 {print $2}' "${WORK_DIR}/partial-SHA256SUMS" >>"${WORK_DIR}/partial-names.txt"
+      fi
+      sed -n 's/^golang_\([0-9][0-9.]*\)-[0-9][0-9]*+.*_\(amd64\|arm64\)\.deb$/go\1/p' "${WORK_DIR}/partial-names.txt" | sort -u >"${WORK_DIR}/partial-versions.txt"
+      [[ "$(wc -l <"${WORK_DIR}/partial-versions.txt")" -eq 1 ]] || die "部分资产无法唯一确定 Go 版本"
+      pinned=$(<"${WORK_DIR}/partial-versions.txt")
+    fi
+  fi
+  if [[ -n "${previous_version}" ]]; then
+    local candidate_version
+    candidate_version="$(jq -r '.epoch' "${ROOT}/config/go.json"):${pinned#go}-$(jq -r '.revision' "${ROOT}/config/go.json")+${tag#v}"
+    if dpkg --compare-versions "${candidate_version}" lt "${previous_version}"; then die "拒绝构造低于已发布的 Go 包版本"; fi
+  fi
+  printf 'build_packages=1\nbump_release=%s\npackage_release_tag=%s\ngo_version=%s\n' "${bump}" "${tag}" "${pinned}"
+}
+
+stage_upload() {
+  local repository="" tag="" asset_dir="" output=""
+  while [[ $# -gt 0 ]]; do
+    [[ $# -ge 2 ]] || usage
+    case "$1" in
+      --repository) repository="$2" ;;
+      --tag) tag="$2" ;;
+      --asset-dir) asset_dir="$2" ;;
+      --output-dir) output="$2" ;;
+      *) usage ;;
+    esac
+    shift 2
+  done
+  [[ "${repository}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ && "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "上传仓库或标签非法"
+  read_catalog
+  prepare_work
+  validate_constructed_dir "${asset_dir}" "${WORK_DIR}"
+  local resolved name remote sha size body="${WORK_DIR}/release.json" part prefix=""
+  [[ -n "${output}" && "${output}" != *$'\n'* ]] || die "上传目录为空或非法"
+  case "/${output}/" in */../*|*/./*) die "上传目录不能含 . 或 .." ;; esac
+  resolved=$(realpath -m "${output}") || die "上传目录非法"
+  [[ "${resolved}" == "${ROOT}/tmp/"* && "${resolved}" != "${ROOT}/tmp/" && ! -e "${resolved}" && ! -L "${resolved}" ]] || die "上传目录必须是未存在的项目 tmp 子目录"
+  local -a components
+  IFS=/ read -r -a components <<<"${resolved#/}"
+  for part in "${components[@]}"; do
+    prefix="${prefix}/${part}"
+    [[ ! -L "${prefix}" ]] || die "上传目录含符号链接"
+  done
+  [[ "${resolved}" != "$(realpath -e "${asset_dir}")" && "${resolved}" != "$(realpath -e "${asset_dir}")/"* && "$(realpath -e "${asset_dir}")" != "${resolved}/"* ]] || die "上传目录与构包目录重叠"
+  fetch_release "${repository}" "${tag}" "${body}" || die "上传目标 Release 尚未创建"
+  validate_remote_assets "${body}" "${repository}" "${tag}"
+  while IFS= read -r name; do
+    [[ -f "${asset_dir}/${name}" && ! -L "${asset_dir}/${name}" ]] || die "远端含候选外资产，拒绝覆盖: ${name}"
+    remote=$(jq -c --arg n "${name}" '.assets[]|select(.name==$n)' "${body}")
+    sha=$(sha256sum "${asset_dir}/${name}" | cut -d' ' -f1)
+    size=$(stat -c '%s' "${asset_dir}/${name}")
+    jq -e --arg d "sha256:${sha}" --argjson s "${size}" '.digest==$d and .size==$s' <<<"${remote}" >/dev/null || die "远端同名资产冲突，拒绝覆盖: ${name}"
+    download_remote_file "${body}" "${name}" "${WORK_DIR}/${name}"
+  done < <(jq -r '.assets[].name' "${body}")
+  mkdir -- "${resolved}"
+  while IFS= read -r -d '' name; do
+    name="${name##*/}"
+    if ! jq -e --arg n "${name}" '.assets|any(.name==$n)' "${body}" >/dev/null; then
+      cp -- "${asset_dir}/${name}" "${resolved}/${name}"
+    fi
+  done < <(find "${asset_dir}" -mindepth 1 -maxdepth 1 -type f -print0)
+  if [[ -n "$(find "${resolved}" -mindepth 1 -maxdepth 1 -type f -print -quit)" ]]; then
+    printf 'upload=1\nupload_path=%s/*\n' "${resolved}"
+  else
+    printf 'upload=0\n'
+  fi
+}
+
 remote_status() {
-  local repository="" tag=""
+  local repository="" tag="" source_tag=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --repository) [[ $# -ge 2 ]] || usage; repository="$2"; shift 2 ;;
       --tag) [[ $# -ge 2 ]] || usage; tag="$2"; shift 2 ;;
+      --source-tag) source_tag=1; shift ;;
       *) die "未知参数: $1" ;;
     esac
   done
@@ -241,7 +460,14 @@ remote_status() {
     [[ "${got_size}" == "${want_size}" ]] || die "size 不一致: ${name}"
     [[ "${got_digest}" == "${want_digest}" ]] || die "digest 不一致: ${name}"
   done < <(jq -c '.assets[]' "${body}")
-  validate_constructed_dir "${dl}" "${WORK_DIR}"
+  if [[ "${source_tag}" -eq 1 ]]; then
+    local revision
+    revision=$(jq -er '.upstream.revision' "${dl}/golang.provenance.json") || die "来源修订缺失"
+    [[ "${revision}" == "$(jq -r '.revision' "${ROOT}/config/go.json")+${tag#v}" ]] || die "来源修订与标签不符"
+    validate_constructed_dir "${dl}" "${WORK_DIR}" "${revision}"
+  else
+    validate_constructed_dir "${dl}" "${WORK_DIR}"
+  fi
   printf 'release_assets.sh: complete %s\n' "${tag}"
   exit 0
 }
@@ -271,6 +497,8 @@ local_status() {
 mode="$1"
 shift
 case "${mode}" in
+  plan) plan_release "$@" ;;
+  stage-upload) stage_upload "$@" ;;
   remote-status) remote_status "$@" ;;
   local-status) local_status "$@" ;;
   *) usage ;;

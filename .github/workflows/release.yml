@@ -30,6 +30,10 @@ jobs:
     outputs:
       release_tag: ${{ steps.tag.outputs.release_tag }}
       build_packages: ${{ steps.tag.outputs.build_packages }}
+      package_release_tag: ${{ steps.tag.outputs.package_release_tag }}
+      go_version: ${{ steps.tag.outputs.go_version }}
+      source_sha: ${{ steps.tag.outputs.source_sha }}
+      cleanup_release: ${{ steps.tag.outputs.cleanup_release }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -41,44 +45,80 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates curl jq
+            ca-certificates curl jq gh dpkg-dev
 
       - name: 解析本次或既有 vtag
         id: tag
         env:
           EVENT_NAME: ${{ github.event_name }}
           REF: ${{ github.ref }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
           got="$(tr -d '[:space:]' <VERSION)"
           [[ "${got}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "VERSION 非法" >&2; exit 1; }
-          if [[ "${EVENT_NAME}" == "push" && "${REF}" =~ ^refs/tags/(v[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-            tag="${BASH_REMATCH[1]}"
-            [[ "v${got}" == "${tag}" ]] || { echo "VERSION 与 tag 不符" >&2; exit 1; }
-            echo "release_tag=${tag}" >>"$GITHUB_OUTPUT"
-            echo "build_packages=1" >>"$GITHUB_OUTPUT"
-            exit 0
+          tag="v${got}"
+          if [[ "${EVENT_NAME}" == "push" ]]; then
+            [[ "${REF}" == "refs/tags/${tag}" ]] || { echo "VERSION 与 tag 不符" >&2; exit 1; }
+          else
+            [[ "${EVENT_NAME}" == schedule || "${EVENT_NAME}" == workflow_dispatch ]] || exit 1
           fi
-          if [[ "${EVENT_NAME}" == "workflow_dispatch" || "${EVENT_NAME}" == "schedule" ]]; then
-            tag="v${got}"
-            git rev-parse -q --verify "refs/tags/${tag}" >/dev/null \
-              || { echo "缺少既有 tag ${tag}" >&2; exit 1; }
-            echo "release_tag=${tag}" >>"$GITHUB_OUTPUT"
-            echo "build_packages=0" >>"$GITHUB_OUTPUT"
-            exit 0
+          git fetch origin refs/heads/main:refs/remotes/origin/main
+          source_sha=$(git rev-parse HEAD)
+          [[ "${source_sha}" == "$(git rev-parse origin/main)" ]] || { echo "拒绝过时运行，不回退已发布版本" >&2; exit 1; }
+          remote_tag=$(git ls-remote origin "refs/tags/${tag}")
+          if [[ -z "${remote_tag}" ]]; then
+            [[ "$(git log -1 --format=%s)" == "Release:--: ${tag}_"* && -f "changelog/${tag}.md" ]] || { echo "缺少可恢复的原版本提交" >&2; exit 1; }
+            git push origin "${source_sha}:refs/tags/${tag}"
+          else
+            [[ "${remote_tag%%$'\t'*}" == "$(git rev-parse "${tag}^{commit}")" ]] || exit 1
           fi
-          echo "不支持的事件: ${EVENT_NAME}" >&2
-          exit 1
+          mkdir -p tmp
+          plan_args=(--repository "${REPOSITORY}" --tag "${tag}")
+          git ls-remote --heads origin refs/heads/apt-hub-pages >tmp/previous-refs
+          if [[ -s tmp/previous-refs ]]; then
+            git fetch origin refs/heads/apt-hub-pages
+            if git cat-file -e FETCH_HEAD:state.json 2>/dev/null; then
+              git show FETCH_HEAD:state.json >tmp/previous-state.json
+              plan_args+=(--previous-state tmp/previous-state.json)
+            else
+              [[ "$(git ls-tree --name-only FETCH_HEAD)" == .nojekyll ]] || { echo "Pages 产物缺少state且不是首次骨架" >&2; exit 1; }
+            fi
+          fi
+          bash scripts/release_assets.sh plan "${plan_args[@]}" >tmp/release-plan
+          build_packages=$(awk -F= '$1=="build_packages"{print $2}' tmp/release-plan)
+          bump_release=$(awk -F= '$1=="bump_release"{print $2}' tmp/release-plan)
+          package_tag=$(awk -F= '$1=="package_release_tag"{print $2}' tmp/release-plan)
+          go_version=$(awk -F= '$1=="go_version"{print $2}' tmp/release-plan)
+          [[ "${build_packages}" =~ ^[01]$ && "${bump_release}" =~ ^[01]$ && "${package_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+          cleanup=0
+          if [[ "${bump_release}" == 1 ]]; then
+            actor=$(gh api "users/${GITHUB_ACTOR}")
+            login=$(jq -er '.login' <<<"${actor}")
+            actor_id=$(jq -er '.id|tostring' <<<"${actor}")
+            jq -e '.type=="User"' <<<"${actor}" >/dev/null
+            [[ "${login,,}" == "${GITHUB_ACTOR,,}" && "${actor_id}" == "${GITHUB_ACTOR_ID}" && "${actor_id}" =~ ^[1-9][0-9]*$ && "${login}" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] || exit 1
+            git checkout -B main "${source_sha}"
+            GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0="${login}" GIT_CONFIG_KEY_1=user.email GIT_CONFIG_VALUE_1="${actor_id}+${login}@users.noreply.github.com" bash git_tag.sh
+            tag="v$(tr -d '[:space:]' <VERSION)"
+            package_tag="${tag}"
+            source_sha=$(git rev-parse HEAD)
+            cleanup=1
+          elif [[ "${EVENT_NAME}" == push ]]; then
+            cleanup=1
+          fi
+          printf 'release_tag=%s\npackage_release_tag=%s\ngo_version=%s\nbuild_packages=%s\nsource_sha=%s\ncleanup_release=%s\n' "${tag}" "${package_tag}" "${go_version}" "${build_packages}" "${source_sha}" "${cleanup}" >>"$GITHUB_OUTPUT"
 
 
       - name: 本仓 vtag Release
-        if: steps.tag.outputs.build_packages == '1'
         uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1
         with:
           skipIfReleaseExists: true
           tag: ${{ steps.tag.outputs.release_tag }}
           name: ${{ steps.tag.outputs.release_tag }}
           bodyFile: changelog/${{ steps.tag.outputs.release_tag }}.md
+          commit: ${{ steps.tag.outputs.source_sha }}
 
   Build:
     name: Build
@@ -93,6 +133,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          ref: ${{ needs.release.outputs.source_sha }}
 
       - name: 安装构包与签源依赖
         run: |
@@ -113,35 +154,34 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-          TAG: ${{ needs.release.outputs.release_tag }}
+          TAG: ${{ needs.release.outputs.package_release_tag }}
+          GO_VERSION: ${{ needs.release.outputs.go_version }}
         run: |
           set -euo pipefail
           chmod a+x scripts/release_assets.sh build.sh gen_debs.sh scripts/gen_deb_golang.sh
-          set +e
-          scripts/release_assets.sh remote-status --repository "${REPOSITORY}" --tag "${TAG}"
-          st=$?
-          set -e
-          if [[ "${st}" -eq 0 ]]; then
-            echo "upload=0" >>"$GITHUB_OUTPUT"
-            echo "已有完整构造包，跳过构建与上传"
-            exit 0
-          fi
-          if [[ "${st}" -ne 10 ]]; then
-            echo "构造包不完整或冲突，拒绝覆盖" >&2
-            exit "${st}"
-          fi
-          bash ./build.sh && bash ./build.sh test || exit $?
+          [[ "${GO_VERSION}" =~ ^go[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+          mkdir -p tmp
+          curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 120 --retry 2 'https://go.dev/dl/?mode=json&include=all' -o tmp/go-downloads.json
+          bash ./build.sh --go-version "${GO_VERSION}" --downloads-json tmp/go-downloads.json && bash ./build.sh test || exit $?
           scripts/release_assets.sh local-status --asset-dir ./build/upload_tmp_dir || exit $?
-          echo "upload=1" >>"$GITHUB_OUTPUT"
+          scripts/release_assets.sh stage-upload --repository "${REPOSITORY}" --tag "${TAG}" --asset-dir ./build/upload_tmp_dir --output-dir tmp/missing-assets >>"$GITHUB_OUTPUT"
 
       - name: 上传构造包
         if: steps.assets.outputs.upload == '1'
         uses: george012/upload_github_release_assets_action@b56f61e7a10692c6ee2d7482b451911393479030
         with:
-          path: ./build/upload_tmp_dir/*
-          tag_name: ${{ needs.release.outputs.release_tag }}
+          path: ${{ steps.assets.outputs.upload_path }}
+          tag_name: ${{ needs.release.outputs.package_release_tag }}
           token: ${{ github.token }}
           fail_on_unmatched_files: true
+
+      - name: 核验已上传包来源
+        if: needs.release.outputs.go_version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ needs.release.outputs.package_release_tag }}
+        run: bash scripts/release_assets.sh remote-status --repository "${REPOSITORY}" --tag "${TAG}" --source-tag
 
       - name: 生成并发布 Pages 产物分支
         env:
@@ -152,6 +192,7 @@ jobs:
           SITE_URL: ${{ steps.config.outputs.site_url }}
           PAGES_CNAME: ${{ steps.config.outputs.cname }}
           RELEASE_TAG: ${{ needs.release.outputs.release_tag }}
+          PACKAGE_RELEASE_TAG: ${{ needs.release.outputs.package_release_tag }}
           ROTATE_FROM: ${{ inputs.rotate_from }}
         run: bash scripts/publish_apt_site.sh publish
 
@@ -160,7 +201,7 @@ jobs:
     needs:
       - release
       - Build
-    if: needs.release.outputs.build_packages == '1'
+    if: needs.release.outputs.cleanup_release == '1'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -170,6 +211,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          ref: ${{ needs.release.outputs.source_sha }}
 
       - name: 安装临时依赖
         run: |
@@ -181,8 +223,8 @@ jobs:
       - name: 清理两代前 Release
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT_NAME: ${{ github.event_name }}
-          REF: ${{ github.ref }}
+          EVENT_NAME: push
+          REF: refs/tags/${{ needs.release.outputs.release_tag }}
         run: |
           set -euo pipefail
           chmod a+x scripts/publish_apt_site.sh

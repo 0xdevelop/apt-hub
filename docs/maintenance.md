@@ -54,12 +54,12 @@
 Actions 和本地维护共用 `scripts/update_sources.sh`。本地运行时提供已有签名密钥目录和公开指纹；指纹不是 Secret，Actions 会从导入的签名私钥取得。
 
 ```bash
-bash scripts/update_sources.sh --catalog config/packages.json --previous tmp/previous --work-dir tmp/update-001 --gnupghome '<签名密钥目录>' --fingerprint '<公开指纹>' --site-url 'https://packages.example.test/tools' --package-repository '<自己的owner/repo>' --release-tag '<已上传资产的本仓vX.Y.Z>'
+bash scripts/update_sources.sh --catalog config/packages.json --previous tmp/previous --work-dir tmp/update-001 --gnupghome '<签名密钥目录>' --fingerprint '<公开指纹>' --site-url 'https://packages.example.test/tools' --package-repository '<自己的owner/repo>' --release-tag '<本次页面vX.Y.Z>' --package-release-tag '<实际包来源vX.Y.Z>'
 ```
 
 其余参数是候选目录、站点和发行版数据输入；入口只生成候选，不上传、不推送、不部署。
 
-以上地址、版本和指纹均需替换；`tmp/previous` 须为已有发布快照或首次使用的空目录，工作目录必须是新建或空目录。本仓 `vX.Y.Z` 必须已有该版的构造包与来源记录，不能仅凭本地产物声称已发布。Go 每个架构只发布一个完整 `golang` 包，控制字段为 `2:上游版本-基础修订+本仓版本`；本仓版本从 `VERSION` 自动取得，不手填包修订，避免同版替换已发布字节。
+以上地址、版本和指纹均需替换；`tmp/previous` 须为已有发布快照或首次使用的空目录，工作目录必须是新建或空目录。`--release-tag` 是页面维护版本；`--package-release-tag` 必须指向实际存在且通过核验的包资产，省略时与页面版本相同。Go 每个架构只发布一个完整 `golang` 包，控制字段为 `2:上游版本-基础修订+构包时的本仓版本`；包版本不随页面重签而变化，不手填修订，不替换已发布字节。
 
 `git_tag.sh`（无参数默认为 `auto`）触发同一条三段式发布链；`build.sh` 调用 `gen_debs.sh` 按清单处理软件，Go 专用格式转换位于 `scripts/gen_deb_golang.sh`。官方已有 `.deb` 只发现和核验官方发布，不转存；构造包、`<软件id>.provenance.json` 与 `SHA256SUMS` 才进入 `build/upload_tmp_dir/`，直接上传到对应本仓版本的 assets。归档、内部索引、日志和测试不进入发布成果。Pages 复用 `apt-hub-pages` 产物分支发布，只保存公开站点与签名索引，不走 Actions Artifacts，也不再另建站点副本。
 
@@ -74,7 +74,7 @@ bash scripts/update_sources.sh --catalog config/packages.json --previous tmp/pre
 执行完整既有测试：
 
 ```bash
-bash tests/sync_test.sh && bash tests/render_test.sh && bash tests/workflow_test.sh && bash tests/add_source_test.sh && bash tests/update_sources_test.sh && bash tests/go_deb_test.sh && bash tests/go_source_test.sh && bash tests/release_test.sh && bash tests/ubuntu_test.sh
+bash tests/sync_test.sh && bash tests/render_test.sh && bash tests/workflow_test.sh && bash tests/auto_update_test.sh && bash tests/add_source_test.sh && bash tests/update_sources_test.sh && bash tests/go_deb_test.sh && bash tests/go_source_test.sh && bash tests/release_test.sh && bash tests/ubuntu_test.sh
 ```
 
 测试密钥只用于本地 `tmp/`，不放进生产 Actions Secret；测试目录不要混放用户文件。
@@ -87,7 +87,7 @@ bash tests/sync_test.sh && bash tests/render_test.sh && bash tests/workflow_test
 bash git_tag.sh
 ```
 
-首次脚本标签为 `v0.0.1`；以后末段逐次加 1，超过 `999` 向前进位。不手填版本、不重写已有标签。Actions 沿母版三段式，仅适配构包扩展、依赖和产物路径；软件源日常更新不递增维护脚本版本。真实发版须经用户明确授权。
+首次脚本标签为 `v0.0.1`；以后末段逐次加 1，超过 `999` 向前进位。不手填版本、不重写已有标签。Actions 沿母版三段式，仅适配构包扩展、依赖和产物路径；软件源日常扫描、RustDesk 更新和签名续期不递增维护版本；Go 上游或构包输入变化且当前标签已有包时，原 Release job 调用同一无参 `git_tag.sh` 自动进位，并在同一次运行构包发布。无变化复用已核验的包来源，空 Release 补构包，部分上传只补字节一致的缺项。真实发版须经用户明确授权。
 
 ## 上游与历史索引
 

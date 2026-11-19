@@ -897,6 +897,29 @@ if [[ -f "${TMP}/work-derived/site/state.json" ]]; then
 fi
 GO_TAG="${saved_tag}"
 
+# 新页面复用既有来源标签，真实签源和 APT 消费保持包身份不变。
+GO_TAG="${DERIVED}"
+write_provenance "${TMP}/api/provenance.json"
+jq --arg h "$(cd "${ROOT}" && sha256sum scripts/gen_deb_golang.sh config/go.json | sha256sum | cut -d' ' -f1)" '.build_inputs_sha256=$h' "${TMP}/api/provenance.json" >"${TMP}/api/provenance-new.json"
+mv "${TMP}/api/provenance-new.json" "${TMP}/api/provenance.json"
+write_release_json "${TMP}/api/go-release-derived.json"
+rc="$(capture_rc "${TMP}/run-reuse-source.log" "${UPD}" \
+  --catalog "${TMP}/catalog-go-amd64.json" --previous "${TMP}/work-derived/site" \
+  --work-dir "${TMP}/work-reuse-source" --gnupghome "${GNUPG}" --fingerprint "${FP}" \
+  --site-url "${SITE_URL}" --releases "${TMP}/releases.json" --package-repository "${PKG_REPO}" \
+  --release-tag v8.0.0 --package-release-tag "${DERIVED}" \
+  --go-downloads-json "${TMP}/api/go-downloads.json" --acquire-https-ca "${TMP}/tls/cert.pem" \
+  --github-https-proxy "${PROXY_URL}")"
+record_rc update_reuse_source_tag "${rc}" 0 || true
+if [[ "${rc}" -eq 0 ]]; then
+  rc=0
+  jq -e --arg t "${DERIVED}" --arg v "${VER_FULL}" '.packages[0].release_tag==$t and .packages[0].version==$v' "${TMP}/work-reuse-source/site/state.json" >/dev/null || rc=1
+  grep -Fq '/releases/tag/v8.0.0' "${TMP}/work-reuse-source/site/index.html" || rc=1
+  jq -e 'all(.results[]; .ok==true and .verify_downloads==true)' "${TMP}/work-reuse-source/verify/summary.json" >/dev/null || rc=1
+  record_rc update_page_new_package_old_apt_verified "${rc}" 0 || true
+fi
+GO_TAG="${saved_tag}"
+
 # 精确 pid 清理
 if [[ -n "${SERVER_PID}" ]]; then
   kill "${SERVER_PID}" 2>/dev/null || true

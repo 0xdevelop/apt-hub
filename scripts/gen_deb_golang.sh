@@ -786,6 +786,11 @@ done
 [[ -n "${generated_epoch}" ]] || die "generated_at 未从 SOURCE_DATE_EPOCH 派生"
 generated_at="$(date -u -d "@${generated_epoch}" +%Y-%m-%dT%H:%M:%SZ)" \
   || die "无法从 max(SOURCE_DATE_EPOCH) 派生 generated_at"
+builder_sha256=$(hex_sha256 "${SCRIPT_DIR}/gen_deb_golang.sh") || die "无法读取构包脚本摘要"
+config_sha256=$(hex_sha256 "${config}") || die "无法读取构包配置摘要"
+build_inputs_sha256=$(printf '%s  scripts/gen_deb_golang.sh\n%s  config/go.json\n' \
+  "${builder_sha256}" "${config_sha256}" | sha256sum | cut -d' ' -f1) || die "无法计算构包输入摘要"
+[[ "${build_inputs_sha256}" =~ ${HEX64} ]] || die "构包输入摘要非法"
 jq -nc \
   --arg schema_version "1" \
   --arg generated_at_utc "${generated_at}" \
@@ -793,10 +798,12 @@ jq -nc \
   --arg upstream_version_debian "${upstream_ver}" \
   --arg upstream_epoch "${pkg_epoch}" \
   --arg revision "${revision}" \
+  --arg build_inputs_sha256 "${build_inputs_sha256}" \
   --argjson packages "$(jq -s '.' "${prov_rows}")" \
   '{
     schema_version:$schema_version,
     generated_at_utc:$generated_at_utc,
+    build_inputs_sha256:$build_inputs_sha256,
     upstream:{
       version:$upstream_version,
       version_debian:$upstream_version_debian,

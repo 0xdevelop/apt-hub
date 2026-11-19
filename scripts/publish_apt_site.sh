@@ -292,6 +292,7 @@ build_site() {
     --site-url "${site}"
     --package-repository "${repo}"
     --release-tag "${tag}"
+    --package-release-tag "${PACKAGE_RELEASE_TAG:-${tag}}"
   )
   if [[ -d tmp/debs/upstream ]]; then
     update_args+=(--upstream-dir tmp/debs/upstream)
