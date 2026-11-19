@@ -72,6 +72,7 @@ if [[ "${mode}" == "test" ]]; then
     && bash tests/render_test.sh \
     && bash tests/workflow_test.sh \
     && bash tests/ci_dependencies_test.sh \
+    && bash tests/git_tag_test.sh \
     && bash tests/auto_update_test.sh \
     && bash tests/add_source_test.sh \
     && bash tests/update_sources_test.sh \

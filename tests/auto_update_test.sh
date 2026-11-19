@@ -191,7 +191,7 @@ printf 'PASS 原git_tag在同一次运行推进维护分支、标签和准确构
 # 分支推送已成功而标签失败：下轮只补同一标签，不再递增。
 cat >"${BASE}/tmp/origin.git/hooks/update" <<'EOF'
 #!/usr/bin/env bash
-case "$1" in refs/tags/*) exit 1 ;; esac
+case "$1" in refs/tags/v*) exit 1 ;; esac
 EOF
 chmod 755 "${BASE}/tmp/origin.git/hooks/update"
 rc=0
@@ -199,6 +199,9 @@ rc=0
 [[ "${rc}" -ne 0 ]]
 recover_tag="v$(tr -d '[:space:]' <"${BASE}/VERSION")"
 recover_sha=$(git -C "${BASE}" rev-parse HEAD)
+interrupted_main=$(git -C "${BASE}" ls-remote origin refs/heads/main)
+interrupted_latest=$(git -C "${BASE}" ls-remote origin refs/tags/latest)
+[[ "${interrupted_main%%$'\t'*}" == "${recover_sha}" && "${interrupted_latest%%$'\t'*}" == "${recover_sha}" ]]
 [[ -z "$(git -C "${BASE}" ls-remote origin "refs/tags/${recover_tag}")" ]]
 printf '#!/usr/bin/env bash\nexit 0\n' >"${BASE}/tmp/origin.git/hooks/update"
 git clone -q -b main "${BASE}/tmp/origin.git" "${BASE}/tmp/recovery"

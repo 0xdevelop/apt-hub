@@ -44,7 +44,7 @@
 - `data/published.json` 只记录成功部署后回写的状态，不手动填入尚未生效的软件。
 - Pages 提交只沿上一份产物追加，首次创建独立产物历史；不追加源码父提交。站点文件未变时复用原产物提交，版本对应关系由发布记录和页面链接表达。
 - `templates/readme_packages.md`、`templates/readme_empty.md` 控制列表表头与空态；`templates/index.html` 控制首页。页面显示用途、当前站点版本、源根地址、加源与安装命令和软件短表，随同一次发布自动生成。
-- 站点版本使用本次本仓 `vX.Y.Z`，不是 Go 或 RustDesk 的软件版本。当前发行版和变更记录链接固定到该标签；“最新发行版”链接使用 GitHub `releases/latest`，不维护另一个 `latest` 标签。变更记录沿用 `changelog/vX.Y.Z.md` 的 GitHub 渲染页，不另建前端或 Markdown 解析器。
+- 站点版本使用本次本仓 `vX.Y.Z`，不是 Go 或 RustDesk 的软件版本。当前发行版和变更记录链接固定到该标签；“最新发行版”链接使用 GitHub `releases/latest`，不依赖脚本维护的 `latest` 标签。变更记录沿用 `changelog/vX.Y.Z.md` 的 GitHub 渲染页，不另建前端或 Markdown 解析器。
 - `scripts/render.sh` 只替换 README 中 `APT-HUB:PACKAGES:BEGIN` / `END` 两条独占行之间的区域，区域外正文由人维护。缺失或重复标记会拒绝写入。
 
 签名与候选元数据每日续期，软件的 `updated_at` 不因扫描、重签而变化。Pages 部署失败不能更新主分支为“已生效”；回写失败也不强推覆盖同事提交，修复后重跑使状态收敛。
@@ -74,7 +74,7 @@ bash scripts/update_sources.sh --catalog config/packages.json --previous tmp/pre
 执行完整既有测试：
 
 ```bash
-bash tests/sync_test.sh && bash tests/render_test.sh && bash tests/workflow_test.sh && bash tests/auto_update_test.sh && bash tests/add_source_test.sh && bash tests/update_sources_test.sh && bash tests/go_deb_test.sh && bash tests/go_source_test.sh && bash tests/release_test.sh && bash tests/ubuntu_test.sh
+bash tests/sync_test.sh && bash tests/render_test.sh && bash tests/workflow_test.sh && bash tests/git_tag_test.sh && bash tests/auto_update_test.sh && bash tests/add_source_test.sh && bash tests/update_sources_test.sh && bash tests/go_deb_test.sh && bash tests/go_source_test.sh && bash tests/release_test.sh && bash tests/ubuntu_test.sh
 ```
 
 测试密钥只用于本地 `tmp/`，不放进生产 Actions Secret；测试目录不要混放用户文件。
@@ -87,7 +87,9 @@ bash tests/sync_test.sh && bash tests/render_test.sh && bash tests/workflow_test
 bash git_tag.sh
 ```
 
-首次脚本标签为 `v0.0.1`；以后末段逐次加 1，超过 `999` 向前进位。不手填版本、不重写已有标签。Actions 沿母版三段式，仅适配构包扩展、依赖和产物路径；软件源日常扫描、RustDesk 更新和签名续期不递增维护版本；Go 上游或构包输入变化且当前标签已有包时，原 Release job 调用同一无参 `git_tag.sh` 自动进位，并在同一次运行构包发布。无变化复用已核验的包来源，空 Release 补构包，部分上传只补字节一致的缺项。真实发版须经用户明确授权。
+脚本沿用 `project_template_go/git_tag.sh`，只适配根目录 `VERSION` 和本仓变更记录，不生成 Go API 文档。无参数与 `auto` 等价；`-get_pre_del_tag_name` 仅查询前一版本。发版保留母版的分支、`latest` 与版本标签推送，以及本地旧标签清理；首次没有 `latest` 或本地旧标签时不会因此失败，历史变更记录保留。
+
+首次脚本标签为 `v0.0.1`；以后末段逐次加 1，超过 `999` 向前进位。不手填版本、不重写已有 `vX.Y.Z` 标签；`latest` 是随发版更新的浮动标签。Actions 沿母版三段式，仅适配构包扩展、依赖和产物路径；软件源日常扫描、RustDesk 更新和签名续期不递增维护版本；Go 上游或构包输入变化且当前标签已有包时，原 Release job 调用同一无参 `git_tag.sh` 自动进位，并在同一次运行构包发布。无变化复用已核验的包来源，空 Release 补构包，部分上传只补字节一致的缺项。真实发版须经用户明确授权。
 
 ## 上游与历史索引
 

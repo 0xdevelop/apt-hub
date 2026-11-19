@@ -878,15 +878,15 @@ run_expect "git_tag_unknown" 1 bash -c "cd \"$tag_repo\" && \"$GIT_TAG\" bogus-m
 
 if awk '
   /^[[:space:]]*#/ { next }
-  /tag[[:space:]]+-f[[:space:]]+latest/ || /git[[:space:]]+push[[:space:]].*--delete/ || /(^|[[:space:]])git[[:space:]]+add[[:space:]]+-A/ { found = 1 }
+  /(^|[[:space:]])git[[:space:]]+add[[:space:]]+(-A|\.)($|[[:space:]])/ { found = 1 }
   END { exit !found }
 ' "$GIT_TAG"; then
-  fail "git_tag.sh 仍含 latest 强移/删远端/add -A"
+  fail "git_tag.sh 仍含全量暂存"
 else
-  pass "git_tag.sh 无 latest 强移与 add -A"
+  pass "git_tag.sh 不使用全量暂存"
 fi
 if grep -E -q -- 'git[[:space:]]+push|git[[:space:]]+add --' "$GIT_TAG"; then
-  pass "git_tag.sh 含受控 push/精确 add（新契约）"
+  pass "git_tag.sh 沿母版 push 并精确暂存"
 else
   fail "git_tag.sh 缺少 push/精确 add"
 fi
