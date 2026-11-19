@@ -91,7 +91,13 @@ EOF
   dpkg-deb --build --root-owner-group -- "${root}" "${dest}" >/dev/null
 }
 
-map_add() { printf '%s\t%s\n' "$1" "$2" >>"${TMP}/curl-map.tsv"; }
+map_add() {
+  printf '%s\t%s\n' "$1" "$2" >>"${TMP}/curl-map.tsv"
+  if [[ "$1" == *+* ]]; then
+    local encoded="${1//+/%2B}"
+    printf '%s\t%s\n' "${encoded}" "$2" >>"${TMP}/curl-map.tsv"
+  fi
+}
 
 cat >"${TMP}/bin/curl" <<'EOF'
 #!/usr/bin/env bash
@@ -193,8 +199,8 @@ write_release_json() {
     '{
       tag_name:$tag, html_url:$html, draft:false, prerelease:false,
       assets:[
-        {name:$fn_amd,size:$s1,browser_download_url:($base+"/"+$fn_amd),digest:$d1},
-        {name:$fn_arm,size:$s3,browser_download_url:($base+"/"+$fn_arm),digest:$d3},
+        {name:$fn_amd,size:$s1,browser_download_url:($base+"/"+($fn_amd|@uri)),digest:$d1},
+        {name:$fn_arm,size:$s3,browser_download_url:($base+"/"+($fn_arm|@uri)),digest:$d3},
         {name:$pname,size:$sp,browser_download_url:($base+"/"+$pname),digest:$dp}
       ]
     }' >"${dest}"
@@ -408,6 +414,19 @@ jq -e --arg ver "${VER_FULL}" '
   and all(.packages[0].assets[]; (.upstream.sha256|type)=="string")
 ' "${TMP}/site-go1/state.json" >/dev/null || rc=$?
 record_rc go_state_single_golang "${rc}" 0 || true
+rc=0
+jq -e 'all(.packages[0].assets[]; (.url|contains("%2B")) and (.filename|contains("+")) and (.filename|contains("%")|not))' \
+  "${TMP}/site-go1/state.json" >/dev/null || rc=1
+record_rc go_encoded_url_raw_filename "${rc}" 0 || true
+rc=0
+grep -Fq "${DEB_AMD}" "${TMP}/site-go1/repos/golang/dists/jammy/main/binary-amd64/Packages" || rc=1
+if grep -Fq '%2B' "${TMP}/site-go1/repos/golang/dists/jammy/main/binary-amd64/Packages"; then rc=1; fi
+record_rc go_apt_filename_not_url_encoded "${rc}" 0 || true
+jq '.assets[].browser_download_url |= gsub("%2B";"+")' "${TMP}/api/go-release.json" >"${TMP}/api/go-release-raw.json"
+cp -- "${TMP}/api/go-release-raw.json" "${TMP}/api/go-release.json"
+rc="$(capture_rc "${TMP}/run-raw-url.log" run_sync_go "${TMP}/empty-prev" "${TMP}/site-raw-url")"
+record_rc go_legacy_raw_plus_url "${rc}" 0 || true
+write_release_json "${TMP}/api/go-release.json"
 rc=0
 grep -c '^Package: ' "${TMP}/site-go1/repos/golang/dists/jammy/main/binary-amd64/Packages" | grep -qx 1 || rc=1
 record_rc go_packages_one_stanza_amd64 "${rc}" 0 || true

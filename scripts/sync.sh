@@ -287,6 +287,7 @@ assert_retained_github_asset_url() {
   name="${rest#*/}"
   [[ -n "${tag}" && -n "${name}" && "${name}" != */* ]] || die "存量 asset.url 非法: ${url}"
   assert_github_tag "${tag}"
+  name="${name//%2B/+}"
   assert_github_asset_url "${repo}" "${tag}" "${name}" "${url}"
 }
 
@@ -596,8 +597,10 @@ assert_github_asset_url() {
   case "${name}" in
     *$'\n'*|*$'\r'*|*$'\t'*|*' '*) die "非法资产名: ${name}" ;;
   esac
-  local expected="https://github.com/${repo}/releases/download/${tag}/${name}"
-  [[ "${url}" == "${expected}" ]] || die "browser_download_url 未锚定到清单仓库 asset: ${url}"
+  local prefix="https://github.com/${repo}/releases/download/${tag}/" encoded_name
+  encoded_name="$(jq -nr --arg name "${name}" '$name|@uri')" || die "资产名编码失败"
+  [[ "${url}" == "${prefix}${name}" || "${url}" == "${prefix}${encoded_name}" ]] \
+    || die "browser_download_url 未锚定到清单仓库 asset: ${url}"
 }
 
 https_origin_of() {
@@ -614,6 +617,7 @@ origin_relative_path() {
   origin="$(https_origin_of "${url}")"
   path="${url#"${origin}/"}"
   [[ "${path}" != "${url}" ]] || die "资产 URL 缺少 origin 相对路径: ${url}"
+  path="${path//%2B/+}"
   assert_origin_relative_filename "${path}" "官方相对路径"
   printf '%s\n' "${path}"
 }

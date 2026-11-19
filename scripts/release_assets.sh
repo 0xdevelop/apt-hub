@@ -188,7 +188,8 @@ validate_remote_assets() {
       and (.size|type=="number" and .>0)
       and (.digest|type=="string" and test("^sha256:[0-9a-f]{64}$"))
       and .state=="uploaded"
-      and .browser_download_url==($prefix+.name))
+      and (.browser_download_url==($prefix+.name)
+        or .browser_download_url==($prefix+(.name|@uri))))
   ' "${body}" >/dev/null || die "Release 资产身份、摘要或名称非法: ${tag}"
 }
 

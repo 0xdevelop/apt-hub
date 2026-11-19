@@ -33,7 +33,6 @@ jobs:
       package_release_tag: ${{ steps.tag.outputs.package_release_tag }}
       go_version: ${{ steps.tag.outputs.go_version }}
       source_sha: ${{ steps.tag.outputs.source_sha }}
-      cleanup_release: ${{ steps.tag.outputs.cleanup_release }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -89,7 +88,6 @@ jobs:
           package_tag=$(awk -F= '$1=="package_release_tag"{print $2}' tmp/release-plan)
           go_version=$(awk -F= '$1=="go_version"{print $2}' tmp/release-plan)
           [[ "${build_packages}" =~ ^[01]$ && "${bump_release}" =~ ^[01]$ && "${package_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
-          cleanup=0
           if [[ "${bump_release}" == 1 ]]; then
             actor=$(gh api "users/${GITHUB_ACTOR}")
             login=$(jq -er '.login' <<<"${actor}")
@@ -101,12 +99,8 @@ jobs:
             tag="v$(tr -d '[:space:]' <VERSION)"
             package_tag="${tag}"
             source_sha=$(git rev-parse HEAD)
-            cleanup=1
-          elif [[ "${EVENT_NAME}" == push ]]; then
-            cleanup=1
           fi
-          printf 'release_tag=%s\npackage_release_tag=%s\ngo_version=%s\nbuild_packages=%s\nsource_sha=%s\ncleanup_release=%s\n' "${tag}" "${package_tag}" "${go_version}" "${build_packages}" "${source_sha}" "${cleanup}" >>"$GITHUB_OUTPUT"
-
+          printf 'release_tag=%s\npackage_release_tag=%s\ngo_version=%s\nbuild_packages=%s\nsource_sha=%s\n' "${tag}" "${package_tag}" "${go_version}" "${build_packages}" "${source_sha}" >>"$GITHUB_OUTPUT"
 
       - name: 本仓 vtag Release
         uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1
@@ -195,7 +189,6 @@ jobs:
     needs:
       - release
       - Build
-    if: needs.release.outputs.cleanup_release == '1'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:

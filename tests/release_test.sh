@@ -673,6 +673,21 @@ run_old() {
 }
 # gh fixture name is gh-old; put it on PATH as gh
 ln -sfn gh-old "${EVIDENCE}/bin/gh"
+awk '/^get_pre_del_tag\(\)/{copy=1} copy{print} copy && /^}/{exit}' "${PUBLISH}" >"${EVIDENCE}/get-pre-del.sh"
+printf '\nget_pre_del_tag v0.0.0\n' >>"${EVIDENCE}/get-pre-del.sh"
+rc=0
+bash "${EVIDENCE}/get-pre-del.sh" >"${EVIDENCE}/runs/decrement-zero.out" 2>&1 || rc=$?
+record "version_decrement_zero_rejected" "${rc}" 1
+printf '1\n' >"${OLD_STATE}/v0.0.0.present"
+for initial_tag in v0.0.0 v0.0.1; do
+  rc="$(run_old "initial-${initial_tag}" EVENT_NAME=push REF="refs/tags/${initial_tag}" APT_HUB_VIEW_MODE=present APT_HUB_TAG_EXISTS=1)"
+  record "remove_old_${initial_tag}_no_predecessors" "${rc}" 0
+  if [[ ! -s "${OLD_STATE}/deleted.log" ]] && [[ ! -s "${EVIDENCE}/runs/old-initial-${initial_tag}.log" ]]; then
+    pass "${initial_tag} 无两代前版本，不查询或删除 Release/tag"
+  else
+    fail "${initial_tag} 缺少两代前版本仍执行远端操作"
+  fi
+done
 printf '1\n' >"${OLD_STATE}/v0.0.3.present"
 rc="$(run_old hit EVENT_NAME=push REF=refs/tags/v0.0.5 APT_HUB_VIEW_MODE=present APT_HUB_TAG_REFERENCED=0 APT_HUB_TAG_EXISTS=1)"
 record "remove_old_two_gen" "${rc}" 0

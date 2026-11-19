@@ -37,7 +37,7 @@ while [[ $# -gt 0 ]]; do
 done
 case "$url" in
   'https://go.dev/dl/?mode=json'|'https://go.dev/dl/?mode=json&include=all') src="${FIXTURE}/downloads.json" ;;
-  *) src="${FIXTURE}/assets/${url##*/}" ;;
+  *) name="${url##*/}"; src="${FIXTURE}/assets/${name//%2B/+}" ;;
 esac
 [[ -f "$src" ]] || exit 22
 if [[ -n "$out" ]]; then cp "$src" "$out"; else cat "$src"; fi
@@ -120,11 +120,25 @@ release_from_assets() {
   local release_tag="$1" file
   : >"${BASE}/asset-rows.jsonl"
   for file in "${BASE}/assets/"*; do
-    jq -nc --arg name "${file##*/}" --arg sha "sha256:$(sha256sum "$file" | cut -d' ' -f1)" --argjson size "$(stat -c '%s' "$file")" --arg tag "$release_tag" '{name:$name,size:$size,digest:$sha,state:"uploaded",browser_download_url:("https://github.com/example/apt-hub/releases/download/"+$tag+"/"+$name)}' >>"${BASE}/asset-rows.jsonl"
+    jq -nc --arg name "${file##*/}" --arg sha "sha256:$(sha256sum "$file" | cut -d' ' -f1)" --argjson size "$(stat -c '%s' "$file")" --arg tag "$release_tag" '{name:$name,size:$size,digest:$sha,state:"uploaded",browser_download_url:("https://github.com/example/apt-hub/releases/download/"+$tag+"/"+($name|@uri))}' >>"${BASE}/asset-rows.jsonl"
   done
   jq -n --arg tag "$release_tag" --slurpfile rows "${BASE}/asset-rows.jsonl" '{tag_name:$tag,html_url:("https://github.com/example/apt-hub/releases/tag/"+$tag),draft:false,assets:$rows}' >"${BASE}/api/${release_tag}.json"
 }
 release_from_assets "$tag"
+cp "${BASE}/api/${tag}.json" "${BASE}/url-valid.json"
+for bad_url in \
+  "https://github.com/other/apt-hub/releases/download/${tag}/golang.deb" \
+  "https://github.com/example/apt-hub/releases/download/v99.0.0/golang.deb" \
+  "https://github.com/example/apt-hub/releases/download/${tag}/golang_9.9.9-1%252B0.0.8_amd64.deb" \
+  "https://github.com/example/apt-hub/releases/download/${tag}/golang%2Famd64.deb"; do
+  jq --arg url "$bad_url" '(.assets[] | select(.name|endswith(".deb")) | .browser_download_url)=$url' "${BASE}/url-valid.json" >"${BASE}/api/${tag}.json"
+  rc=0
+  GH_TOKEN=fixture bash "${BASE}/scripts/release_assets.sh" plan --repository example/apt-hub --tag "$tag" >"${BASE}/bad-url.out" 2>&1 || rc=$?
+  [[ "$rc" -eq 1 ]] && grep -Fq 'Release 资产身份、摘要或名称非法' "${BASE}/bad-url.out"
+done
+cp "${BASE}/url-valid.json" "${BASE}/api/${tag}.json"
+rm -- "${BASE}/url-valid.json"
+printf 'PASS URL编码兼容不放宽仓库、标签、资产名或路径身份\n'
 for round in 1 2; do
   GH_TOKEN=fixture bash "${BASE}/scripts/release_assets.sh" plan --repository example/apt-hub --tag "$tag" >"${BASE}/repeat-${round}.out"
   grep -Fxq build_packages=0 "${BASE}/repeat-${round}.out"
@@ -220,4 +234,4 @@ rc=0
 [[ "${rc}" -ne 0 && ! -s "${BASE}/tmp/stale-output" ]]
 grep -Fq '拒绝过时运行' "${BASE}/tmp/stale.log"
 printf 'PASS 过时tag事件拒绝且无发布成功输出\n'
-printf 'RESULT pass=12 fail=0 evidence=%s\n' "$BASE"
+printf 'RESULT pass=13 fail=0 evidence=%s\n' "$BASE"

@@ -135,8 +135,8 @@ get_pre_del_tag() {
       if ((base > 0)); then
         base=$((base - 1))
       else
-        printf '%s\n' "v0.0.0"
-        return 0
+        echo "版本不能再递减: ${v_str}" >&2
+        return 1
       fi
     fi
   fi
@@ -154,6 +154,10 @@ remove_old() {
     exit 0
   fi
   tag="${BASH_REMATCH[1]}"
+  if [[ "${tag}" == v0.0.0 || "${tag}" == v0.0.1 ]]; then
+    echo "没有两代前版本，跳过清理"
+    exit 0
+  fi
   old="$(get_pre_del_tag "$(get_pre_del_tag "${tag}")")"
   echo "Old version to remove: ${old}"
   case "${old}" in

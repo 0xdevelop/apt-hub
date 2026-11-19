@@ -383,6 +383,12 @@ WF="${ROOT}/.github/workflows/release.yml"
 if [[ ! -e "${ROOT}/.github/workflows/ubuntu-publish.yml" && ! -e "${ROOT}/.github/workflows/ubuntu-test.yml" ]]; then pass '无影子工作流'; else fail '仍有额外工作流'; fi
 if ! grep -Eq 'upload-pages-artifact|deploy-pages@|upload-artifact|download-artifact|id-token:' "${WF}"; then pass '无 Actions Artifact 与 OIDC 部署链'; else fail 'Artifact 影子链残留'; fi
 if grep -q '^  release:' "${WF}" && grep -q '^  Build:' "${WF}" && grep -q '^  RemoveOldRelease:' "${WF}"; then pass '母版三段保留'; else fail '三段缺失'; fi
+if ! grep -Fq cleanup_release "${WF}" \
+  && ! awk '/^  RemoveOldRelease:/{job=1} job && /^    if:/{found=1} END{exit !found}' "${WF}"; then
+  pass '成功 Build 后执行清理，不漏同版本恢复'
+else
+  fail '同版本恢复仍可能跳过母版清理'
+fi
 if grep -Fq 'george012/upload_github_release_assets_action@' "${WF}" && grep -Fq 'bash ./build.sh test' "${WF}"; then pass '母版构建检验与直传 assets'; else fail '母版调用链缺失'; fi
 assets_run="${WORK}/assets-run.sh"
 awk '
