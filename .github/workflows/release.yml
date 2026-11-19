@@ -41,11 +41,8 @@ jobs:
           fetch-depth: 0
 
       - name: 安装临时依赖
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates curl jq gh dpkg-dev
+        timeout-minutes: 10
+        run: bash scripts/ci_dependencies.sh release
 
       - name: 解析本次或既有 vtag
         id: tag
@@ -136,11 +133,8 @@ jobs:
           ref: ${{ needs.release.outputs.source_sha }}
 
       - name: 安装构包与签源依赖
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates curl jq gh gnupg dpkg-dev apt-utils binutils shellcheck xxd
+        timeout-minutes: 10
+        run: bash scripts/ci_dependencies.sh build
 
       - name: 读取 Pages 来源和发布者
         id: config
@@ -214,11 +208,8 @@ jobs:
           ref: ${{ needs.release.outputs.source_sha }}
 
       - name: 安装临时依赖
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates curl jq gh
+        timeout-minutes: 10
+        run: bash scripts/ci_dependencies.sh cleanup
 
       - name: 清理两代前 Release
         env:
