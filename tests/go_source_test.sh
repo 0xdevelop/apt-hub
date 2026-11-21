@@ -19,7 +19,16 @@ TMP="${ROOT}/tmp/b-consumer/go-source"
 EVIDENCE="${TMP}/evidence.log"
 SITE_URL='https://apt-hub.example.test'
 PKG_REPO='fixture/apt-hub'
-GO_TAG='v0.0.9'
+# 夹具 GitHub 标签独立于本仓 VERSION，避免与「由 VERSION 派生」的来源标签共用 tags API 映射。
+# 夹具 curl 按首条命中；若 GO_TAG==v${VERSION}，复用来源时会读到过期 release JSON，与已改写的 provenance size 不符。
+# 包修订仍用上方 GO_REV=${BASE_REV}+${PROJ_VER}，不把夹具标签写进 deb 版本。
+case "${PROJ_VER}" in
+  v[0-9]*.[0-9]*.[0-9]*) VERSION_TAG="${PROJ_VER}" ;;
+  *) VERSION_TAG="v${PROJ_VER}" ;;
+esac
+GO_TAG='v9.8.7'
+GO_CROSS_TAG='v9.8.8'
+PAGE_TAG='v8.0.0'
 PROV_ASSET='golang.provenance.json'
 LEGACY_TAG='golang-9.9.9-1'
 PASS=0
@@ -59,6 +68,32 @@ record_rc() {
     return 1
   fi
 }
+
+# 夹具标签不得等于本仓 VERSION 派生标签，也不得彼此相同；VERSION 以后无论升到哪一档都应在此失败而不是静默撞车。
+assert_fixture_distinct() {
+  local name="$1" tag="$2"
+  [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { log "非法夹具标签 ${name}=${tag}"; return 1; }
+  if [[ "${tag}" == "${VERSION_TAG}" ]]; then
+    log "FAIL ${name}=${tag} 与 VERSION 派生标签 ${VERSION_TAG} 碰撞"
+    return 1
+  fi
+  return 0
+}
+
+rc=0
+assert_fixture_distinct GO_TAG "${GO_TAG}" || rc=1
+assert_fixture_distinct GO_CROSS_TAG "${GO_CROSS_TAG}" || rc=1
+assert_fixture_distinct PAGE_TAG "${PAGE_TAG}" || rc=1
+assert_fixture_distinct stub_empty_tag 'v9.9.9' || rc=1
+if [[ "${GO_TAG}" == "${GO_CROSS_TAG}" || "${GO_TAG}" == "${PAGE_TAG}" || "${GO_CROSS_TAG}" == "${PAGE_TAG}" || "${GO_TAG}" == "v9.9.9" || "${GO_CROSS_TAG}" == "v9.9.9" || "${PAGE_TAG}" == "v9.9.9" ]]; then
+  log "FAIL 夹具标签之间碰撞 GO_TAG=${GO_TAG} GO_CROSS_TAG=${GO_CROSS_TAG} PAGE_TAG=${PAGE_TAG}"
+  rc=1
+fi
+record_rc fixture_tags_distinct_from_version "${rc}" 0 || true
+if [[ "${rc}" -ne 0 ]]; then
+  log "go_source_test 失败"
+  exit 1
+fi
 
 capture_rc() {
   local logf="$1" rc=0
@@ -401,14 +436,14 @@ rc="$(capture_rc "${TMP}/run-ok.log" run_sync_go "${TMP}/empty-prev" "${TMP}/sit
 cat "${TMP}/run-ok.log" >>"${EVIDENCE}"
 record_rc go_first_sync "${rc}" 0 || true
 rc=0
-jq -e --arg ver "${VER_FULL}" '
+jq -e --arg ver "${VER_FULL}" --arg tag "${GO_TAG}" '
   .schema_version=="2"
   and (.packages|length==1)
   and .packages[0].id=="golang"
   and .packages[0].package=="golang"
   and .packages[0].source_type=="go_official_archive"
   and .packages[0].version==$ver
-  and .packages[0].release_tag=="v0.0.9"
+  and .packages[0].release_tag==$tag
   and (.packages[0].assets|length==2)
   and ([.packages[0].assets[].package]|unique)==["golang"]
   and all(.packages[0].assets[]; (.upstream.sha256|type)=="string")
@@ -470,7 +505,7 @@ reset_curl_map
 
 # 跨 tag 同版换字节：URL 不同也必须拒
 saved_tag="${GO_TAG}"
-GO_TAG='v0.0.10'
+GO_TAG="${GO_CROSS_TAG}"
 write_provenance "${TMP}/api/provenance-cross-bad.json" \
   "${REPL_SHA}" "${META_ARM_SHA}" \
   "${UP_AMD_SHA}" "${UP_ARM_SHA}" \
@@ -494,7 +529,7 @@ rc=0
 record_rc go_cross_tag_byte_no_output "${rc}" 0 || true
 
 # 跨 tag 同字节换址：允许，并保留 previous by-hash
-GO_TAG='v0.0.10'
+GO_TAG="${GO_CROSS_TAG}"
 write_provenance "${TMP}/api/provenance.json"
 write_release_json "${TMP}/api/go-release.json"
 reset_curl_map
@@ -926,14 +961,14 @@ rc="$(capture_rc "${TMP}/run-reuse-source.log" "${UPD}" \
   --catalog "${TMP}/catalog-go-amd64.json" --previous "${TMP}/work-derived/site" \
   --work-dir "${TMP}/work-reuse-source" --gnupghome "${GNUPG}" --fingerprint "${FP}" \
   --site-url "${SITE_URL}" --releases "${TMP}/releases.json" --package-repository "${PKG_REPO}" \
-  --release-tag v8.0.0 --package-release-tag "${DERIVED}" \
+  --release-tag "${PAGE_TAG}" --package-release-tag "${DERIVED}" \
   --go-downloads-json "${TMP}/api/go-downloads.json" --acquire-https-ca "${TMP}/tls/cert.pem" \
   --github-https-proxy "${PROXY_URL}")"
 record_rc update_reuse_source_tag "${rc}" 0 || true
 if [[ "${rc}" -eq 0 ]]; then
   rc=0
   jq -e --arg t "${DERIVED}" --arg v "${VER_FULL}" '.packages[0].release_tag==$t and .packages[0].version==$v' "${TMP}/work-reuse-source/site/state.json" >/dev/null || rc=1
-  grep -Fq '/releases/tag/v8.0.0' "${TMP}/work-reuse-source/site/index.html" || rc=1
+  grep -Fq "/releases/tag/${PAGE_TAG}" "${TMP}/work-reuse-source/site/index.html" || rc=1
   jq -e 'all(.results[]; .ok==true and .verify_downloads==true)' "${TMP}/work-reuse-source/verify/summary.json" >/dev/null || rc=1
   record_rc update_page_new_package_old_apt_verified "${rc}" 0 || true
 fi
