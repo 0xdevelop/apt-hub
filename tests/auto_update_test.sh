@@ -193,19 +193,15 @@ done
 export FIXTURE="${BASE}/tmp/fixture"
 export PATH="${FIXTURE}/bin:${PATH}"
 rc=0
-before_sha=$(git -C "${BASE}" rev-parse HEAD)
-before_tags=$(git -C "${BASE}" ls-remote --tags origin)
 (cd "${BASE}" && GH_TOKEN=fixture EVENT_NAME=schedule REF=refs/heads/main REPOSITORY=example/apt-hub GITHUB_ACTOR=fixture GITHUB_ACTOR_ID=1 GITHUB_OUTPUT="${BASE}/tmp/version-output" bash "${FIXTURE}/release-run.sh") >"${BASE}/tmp/auto-version.log" 2>&1 || rc=$?
-if [[ "${rc}" -eq 0 ]]; then printf 'FAIL 定时任务不应自动升版 rc=0 evidence=%s\n' "$BASE"; exit 1; fi
-if ! grep -Fq '请授权后在本地执行 bash git_tag.sh' "${BASE}/tmp/auto-version.log"; then
-  printf 'FAIL 需进位时未提示本地授权 git_tag.sh evidence=%s\n' "$BASE"
-  exit 1
-fi
-[[ "v$(tr -d '[:space:]' <"${BASE}/VERSION")" == "${tag}" ]]
-[[ "$(git -C "${BASE}" rev-parse HEAD)" == "${before_sha}" ]]
-[[ "$(git -C "${BASE}" ls-remote --tags origin)" == "${before_tags}" ]]
-[[ ! -s "${BASE}/tmp/version-output" ]]
-printf 'PASS 定时任务需进位时不自动 git_tag，须本地授权发版\n'
+if [[ "${rc}" -ne 0 ]]; then printf 'FAIL 原版本入口自动发版 rc=%s evidence=%s\n' "$rc" "$BASE"; exit 1; fi
+new_tag="v$(tr -d '[:space:]' <"${BASE}/VERSION")"
+[[ "${new_tag}" != "${tag}" ]]
+remote_main=$(git -C "${BASE}" ls-remote origin refs/heads/main)
+remote_new_tag=$(git -C "${BASE}" ls-remote origin "refs/tags/${new_tag}")
+[[ "${remote_main%%$'\t'*}" == "${remote_new_tag%%$'\t'*}" && "${remote_main%%$'\t'*}" == "$(git -C "${BASE}" rev-parse HEAD)" ]]
+grep -Fxq "source_sha=${remote_main%%$'\t'*}" "${BASE}/tmp/version-output"
+printf 'PASS 原git_tag在同一次运行推进维护分支、标签和准确构包SHA\n'
 # 分支推送已成功而标签失败：下轮只补同一标签，不再递增。
 cat >"${BASE}/tmp/origin.git/hooks/update" <<'EOF'
 #!/usr/bin/env bash
