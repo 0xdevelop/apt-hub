@@ -89,16 +89,8 @@ jobs:
           go_version=$(awk -F= '$1=="go_version"{print $2}' tmp/release-plan)
           [[ "${build_packages}" =~ ^[01]$ && "${bump_release}" =~ ^[01]$ && "${package_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
           if [[ "${bump_release}" == 1 ]]; then
-            actor=$(gh api "users/${GITHUB_ACTOR}")
-            login=$(jq -er '.login' <<<"${actor}")
-            actor_id=$(jq -er '.id|tostring' <<<"${actor}")
-            jq -e '.type=="User"' <<<"${actor}" >/dev/null
-            [[ "${login,,}" == "${GITHUB_ACTOR,,}" && "${actor_id}" == "${GITHUB_ACTOR_ID}" && "${actor_id}" =~ ^[1-9][0-9]*$ && "${login}" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] || exit 1
-            git checkout -B main "${source_sha}"
-            GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0="${login}" GIT_CONFIG_KEY_1=user.email GIT_CONFIG_VALUE_1="${actor_id}+${login}@users.noreply.github.com" bash git_tag.sh
-            tag="v$(tr -d '[:space:]' <VERSION)"
-            package_tag="${tag}"
-            source_sha=$(git rev-parse HEAD)
+            echo "需要进位发版：请授权后在本地执行 bash git_tag.sh，由新 tag 联动构包与上传。Actions 不自动升版。" >&2
+            exit 1
           fi
           printf 'release_tag=%s\npackage_release_tag=%s\ngo_version=%s\nbuild_packages=%s\nsource_sha=%s\n' "${tag}" "${package_tag}" "${go_version}" "${build_packages}" "${source_sha}" >>"$GITHUB_OUTPUT"
 

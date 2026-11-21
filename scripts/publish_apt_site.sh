@@ -154,11 +154,10 @@ remove_old() {
     exit 0
   fi
   tag="${BASH_REMATCH[1]}"
-  if [[ "${tag}" == v0.0.0 || "${tag}" == v0.0.1 ]]; then
+  if ! old="$(get_pre_del_tag "$(get_pre_del_tag "${tag}")")"; then
     echo "没有两代前版本，跳过清理"
     exit 0
   fi
-  old="$(get_pre_del_tag "$(get_pre_del_tag "${tag}")")"
   echo "Old version to remove: ${old}"
   case "${old}" in
     golang-*|latest)
