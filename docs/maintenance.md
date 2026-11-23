@@ -47,6 +47,8 @@
 - 站点版本使用本次本仓 `vX.Y.Z`，不是 Go 或 RustDesk 的软件版本。当前发行版和变更记录链接固定到该标签；“最新发行版”链接使用 GitHub `releases/latest`，不依赖脚本维护的 `latest` 标签。变更记录沿用 `changelog/vX.Y.Z.md` 的 GitHub 渲染页，不另建前端或 Markdown 解析器。
 - `scripts/render.sh` 只替换 README 中 `APT-HUB:PACKAGES:BEGIN` / `END` 两条独占行之间的区域，区域外正文由人维护。缺失或重复标记会拒绝写入。
 
+旧 Release 默认保留。`RemoveOldRelease` 阶段仅在获明确删除授权、手动运行并勾选 `cleanup_release` 后执行；不会随 tag 发布或定时运行自动删除历史版本。
+
 签名与候选元数据每日续期，软件的 `updated_at` 不因扫描、重签而变化。Pages 部署失败不能更新主分支为“已生效”；回写失败也不强推覆盖同事提交，修复后重跑使状态收敛。
 
 ## 一条命令检查并更新候选

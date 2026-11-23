@@ -8,6 +8,11 @@ on:
     - cron: "17 4 * * *"
   workflow_dispatch:
     inputs:
+      cleanup_release:
+        description: 明确授权后才清理两代前 Release（默认保留）
+        required: false
+        type: boolean
+        default: false
       rotate_from:
         description: 旧公钥完整 40hex 指纹（可选，换钥时传入）
         required: false
@@ -186,6 +191,7 @@ jobs:
 
   RemoveOldRelease:
     name: RemoveOldRelease
+    if: github.event_name == 'workflow_dispatch' && inputs.cleanup_release == true
     needs:
       - release
       - Build
