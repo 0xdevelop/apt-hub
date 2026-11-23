@@ -202,7 +202,7 @@ remote_new_tag=$(git -C "${BASE}" ls-remote origin "refs/tags/${new_tag}")
 [[ "${remote_main%%$'\t'*}" == "${remote_new_tag%%$'\t'*}" && "${remote_main%%$'\t'*}" == "$(git -C "${BASE}" rev-parse HEAD)" ]]
 grep -Fxq "source_sha=${remote_main%%$'\t'*}" "${BASE}/tmp/version-output"
 printf 'PASS 原git_tag在同一次运行推进维护分支、标签和准确构包SHA\n'
-# 分支推送已成功而标签失败：下轮只补同一标签，不再递增。
+# 版本标签被远端 hook 拒绝：新的 atomic 发布必须全部拒绝，不留下半发布。
 cat >"${BASE}/tmp/origin.git/hooks/update" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in refs/tags/v*) exit 1 ;; esac
@@ -215,8 +215,12 @@ recover_tag="v$(tr -d '[:space:]' <"${BASE}/VERSION")"
 recover_sha=$(git -C "${BASE}" rev-parse HEAD)
 interrupted_main=$(git -C "${BASE}" ls-remote origin refs/heads/main)
 interrupted_latest=$(git -C "${BASE}" ls-remote origin refs/tags/latest)
-[[ "${interrupted_main%%$'\t'*}" == "${recover_sha}" && "${interrupted_latest%%$'\t'*}" == "${recover_sha}" ]]
+[[ "${interrupted_main%%$'\t'*}" == "${remote_main%%$'\t'*}" && "${interrupted_latest%%$'\t'*}" == "${remote_main%%$'\t'*}" ]]
 [[ -z "$(git -C "${BASE}" ls-remote origin "refs/tags/${recover_tag}")" ]]
+printf 'PASS 远端拒绝版本标签时分支与latest也原子保留，不制造半发布\n'
+# 仍保留旧版非原子发布遗留状态的恢复覆盖；只在本机 bare 夹具中构造历史状态。
+git --git-dir="${BASE}/tmp/origin.git" update-ref refs/heads/main "${recover_sha}" "${remote_main%%$'\t'*}"
+git --git-dir="${BASE}/tmp/origin.git" update-ref refs/tags/latest "${recover_sha}" "${remote_main%%$'\t'*}"
 printf '#!/usr/bin/env bash\nexit 0\n' >"${BASE}/tmp/origin.git/hooks/update"
 git clone -q -b main "${BASE}/tmp/origin.git" "${BASE}/tmp/recovery"
 : >"${BASE}/tmp/recovery-output"
@@ -234,4 +238,4 @@ rc=0
 [[ "${rc}" -ne 0 && ! -s "${BASE}/tmp/stale-output" ]]
 grep -Fq '拒绝过时运行' "${BASE}/tmp/stale.log"
 printf 'PASS 过时tag事件拒绝且无发布成功输出\n'
-printf 'RESULT pass=13 fail=0 evidence=%s\n' "$BASE"
+printf 'RESULT pass=14 fail=0 evidence=%s\n' "$BASE"

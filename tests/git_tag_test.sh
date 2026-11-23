@@ -47,6 +47,58 @@ assert_rejected() {
   if grep -Eq 'Complated|Completed' "${BASE}/run.log"; then fail '失败后输出完成'; fi
 }
 
+# 两个发布者从同一基线交错：赢家全部 refs 不得被输家部分删除。
+new_repo overlap 0.0.7
+winner_repo="${REPO}"
+loser_repo="${BASE}/overlap-loser"
+git init -q -b main "${loser_repo}"
+git -C "${loser_repo}" remote add origin "${BASE}/overlap.git"
+git -C "${loser_repo}" fetch -q origin main --tags
+git -C "${loser_repo}" reset -q --soft FETCH_HEAD
+git -C "${loser_repo}" checkout HEAD -- .
+printf 'winner\n' >"${winner_repo}/change"
+git -C "${winner_repo}" add change
+git_identity -C "${winner_repo}" commit -qm winner
+printf 'loser\n' >"${loser_repo}/change"
+git -C "${loser_repo}" add change
+git_identity -C "${loser_repo}" commit -qm loser
+run_tag
+assert_release 0.0.8
+winner_refs="$(git --git-dir="${BASE}/overlap.git" show-ref)"
+REPO="${loser_repo}"
+run_tag
+assert_rejected
+[[ "$(git --git-dir="${BASE}/overlap.git" show-ref)" == "${winner_refs}" ]] || fail '竞争失败改变赢家 refs（包括 latest）'
+pass '自动/手动同版本交错失败不改变赢家任何 refs'
+
+# 读到 latest 后发生 TOCTOU：pre-push hook 在协商后推进 bare 远端 latest。
+new_repo lease-race 0.0.7
+git -C "${REPO}" tag latest
+git -C "${REPO}" push -q origin latest
+race_remote="${BASE}/lease-race.git"
+race_tree="$(git --git-dir="${race_remote}" rev-parse 'main^{tree}')"
+race_commit="$(git_identity --git-dir="${race_remote}" commit-tree "${race_tree}" -p "${BEFORE}" -m rival)"
+cat >"${REPO}/.git/hooks/pre-push" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+git --git-dir='${race_remote}' update-ref refs/tags/latest '${race_commit}'
+EOF
+chmod 755 "${REPO}/.git/hooks/pre-push"
+run_tag
+assert_rejected
+[[ "$(git --git-dir="${race_remote}" rev-parse main)" == "${BEFORE}" \
+  && "$(git --git-dir="${race_remote}" rev-parse refs/tags/latest)" == "${race_commit}" \
+  && -z "$(git --git-dir="${race_remote}" tag -l v0.0.8)" ]] || fail 'latest TOCTOU 导致部分 ref 发布'
+pass 'latest 在读取后被抢占，原子事务全部拒绝且保留竞争方值'
+
+new_repo no-atomic 0.0.7
+git --git-dir="${BASE}/no-atomic.git" config receive.advertiseAtomic false
+before_refs="$(git --git-dir="${BASE}/no-atomic.git" show-ref)"
+run_tag
+assert_rejected
+[[ "$(git --git-dir="${BASE}/no-atomic.git" show-ref)" == "${before_refs}" ]] || fail '不支持 atomic 时降级或部分推送'
+pass '远端不支持 atomic 则明确失败，绝不降级拆分推送'
+
 new_repo query 0.0.7
 run_tag -get_pre_del_tag_name
 [[ "$rc" -eq 0 ]] || fail '缺少母版 -get_pre_del_tag_name 入口'

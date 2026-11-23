@@ -148,7 +148,8 @@ function gen_changelog_if_possible() {
 function git_handle_push() {
     local current_version_no=${CURRENT_VERSION//v/}
     local next_version_no=${NEXT_VERSION//v/}
-    local pre_del_version_no=""
+    local pre_del_version_no="" branch_ref remote_latest remote_latest_sha
+    branch_ref=$(git symbolic-ref --quiet HEAD) || { echo "拒绝 detached HEAD 发版" >&2; return 1; }
     if [[ "$current_version_no" != "0.0.0" ]]; then
         pre_del_version_no=$(get_pre_del_version_no "$current_version_no") || return
     fi
@@ -164,18 +165,20 @@ function git_handle_push() {
     for remote in $(git remote)
     do
         echo "Pushing to ${remote}..."
-        local remote_latest
         remote_latest=$(git ls-remote --exit-code "$remote" refs/tags/latest) || {
             local rc=$?
             [[ "$rc" -eq 2 ]] || return "$rc"
         }
-        if [[ -n "$remote_latest" ]]; then
-            git push --delete "$remote" latest || return
-        fi
-        git push "$remote" HEAD \
-        && git push "$remote" latest \
-        && git push "$remote" "v${next_version_no}" \
-        || return
+        remote_latest_sha="${remote_latest%%$'\t'*}"
+        # 原子更新三个 refs；latest 仅允许替换刚读到的旧值，新版本 tag 仅允许创建。
+        # 分支仍受普通 fast-forward 保护；服务不支持 atomic 或任一 ref 竞争则全部失败，不降级拆推。
+        git push --atomic \
+            --force-with-lease="refs/tags/latest:${remote_latest_sha}" \
+            --force-with-lease="refs/tags/v${next_version_no}:" \
+            "$remote" "HEAD:${branch_ref}" \
+            refs/tags/latest:refs/tags/latest \
+            "refs/tags/v${next_version_no}:refs/tags/v${next_version_no}" \
+            || return
     done
     if [[ -n "$pre_del_version_no" ]] && git show-ref --verify --quiet "refs/tags/v${pre_del_version_no}"; then
         git tag -d "v${pre_del_version_no}" || return

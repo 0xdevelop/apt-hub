@@ -482,7 +482,7 @@ publish() {
 }
 
 update_readme() (
-  local name="${APT_HUB_GIT_NAME:-}" email="${APT_HUB_GIT_EMAIL:-}" sha="${APT_HUB_PAGES_SHA:-}" work saved remote repo tag
+  local name="${APT_HUB_GIT_NAME:-}" email="${APT_HUB_GIT_EMAIL:-}" sha="${APT_HUB_PAGES_SHA:-}" work saved remote repo tag source_sha expected_tree main_sha
   [[ -n "${name}" && -n "${email}" ]] || die "缺少已核验发布者身份"
   [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || die "缺少已保存 apt-hub-pages SHA"
   repo="${GITHUB_REPOSITORY:-}"
@@ -490,11 +490,13 @@ update_readme() (
   [[ "${repo}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*\/[A-Za-z0-9_][A-Za-z0-9._-]*$ && "${repo}" != *..* ]] \
     || die "GITHUB_REPOSITORY 非法"
   [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "RELEASE_TAG 非法"
+  source_sha=$(git rev-parse HEAD) || die "读取本次源码 SHA 失败"
   git fetch origin refs/heads/main:refs/remotes/origin/main || die "读取 main 失败"
+  main_sha=$(git rev-parse refs/remotes/origin/main) || die "读取 main SHA 失败"
   work=$(mktemp -d "${ROOT}/tmp/readme.XXXXXX")
   rmdir "${work}"
   trap 'git worktree remove --force "${work}" >/dev/null 2>&1 || true' EXIT
-  git worktree add --detach "${work}" refs/remotes/origin/main
+  git worktree add --detach "${work}" "${source_sha}"
   mkdir -p tmp/readme-site "${work}/data"
   git fetch origin refs/heads/apt-hub-pages:refs/remotes/origin/apt-hub-pages
   git cat-file -e "${sha}^{commit}" || die "已部署 SHA 不在 apt-hub-pages 历史中"
@@ -511,7 +513,21 @@ update_readme() (
     mv -- "${work}/README.md.next" "${work}/README.md"
     git -C "${work}" add -- README.md
   fi
+  expected_tree=$(git -C "${work}" write-tree) || die "读取预期回写树失败"
+  if [[ "${main_sha}" != "${source_sha}" ]]; then
+    # 唯一可接受的后继是本次源码的精确生成结果；不放行新业务、VERSION 或 README 正文变化。
+    if ! git merge-base --is-ancestor "${source_sha}" "${main_sha}" \
+      || [[ "$(git rev-parse "${main_sha}^{tree}")" != "${expected_tree}" ]]; then
+      die "main 已推进且不等于本次精确回写结果，拒绝旧源码回写；后续新发版继续，当前运行不清理"
+    fi
+    remote=$(git ls-remote --exit-code origin refs/heads/main) || die "无法回读 main"
+    [[ "${remote%%$'\t'*}" == "${main_sha}" ]] || die "main 在幂等核验期间变化，拒绝旧源码回写"
+    echo "README 与已发布状态已一致（本次源码的精确生成后继）"
+    exit 0
+  fi
   if git -C "${work}" diff --cached --quiet; then
+    remote=$(git ls-remote --exit-code origin refs/heads/main) || die "无法回读 main"
+    [[ "${remote%%$'\t'*}" == "${main_sha}" ]] || die "main 在幂等核验期间变化，拒绝旧源码回写"
     echo "README 与已发布状态已一致"
     exit 0
   fi

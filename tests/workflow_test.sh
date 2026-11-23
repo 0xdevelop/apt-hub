@@ -502,6 +502,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ -n "${repo}" && -n "${tag}" && -n "${site}" ]] || exit 3
+if [[ -n "${RACE_MAIN_SHA:-}" ]]; then
+  git --git-dir="${RACE_REMOTE:?}" update-ref refs/heads/main "${RACE_MAIN_SHA}"
+fi
 mkdir -p -- "${site}"
 printf '%s\n' '<html>capture</html>' >"${site}/index.html"
 exit 0
@@ -579,10 +582,56 @@ if [[ "${again_rc}" -eq 0 \
   && "$(git --git-dir="${chain}.git" rev-parse refs/heads/main)" == "${main_sha}" \
   && "${again_note}" -eq 0 \
   && "${again_readme}" != *'尚未部署到 Pages'* ]]; then
-  pass '重复回写幂等'
+  pass '原源码重跑接受精确自动回写后继，重复回写幂等'
 else
   fail "重复回写不幂等 rc=${again_rc}"
 fi
+# 旧维护运行在 Pages 后，新发版推进 main：旧 run 不得在新源码上追加 README。
+git -C "${chain}" checkout -q main
+git -C "${chain}" fetch -q origin main
+git -C "${chain}" merge -q --ff-only FETCH_HEAD
+printf 'new business release\n' >"${chain}/new-business"
+git -C "${chain}" add new-business
+git -C "${chain}" -c user.name=fixture-publisher -c user.email=fixture-publisher@invalid commit -qm 'new release source'
+new_release_sha="$(git -C "${chain}" rev-parse HEAD)"
+git -C "${chain}" push -q origin main
+git -C "${chain}" checkout -q --detach "${main_sha}"
+stale_rc=0
+(cd -- "${chain}"; APT_HUB_GIT_NAME=fixture-publisher APT_HUB_GIT_EMAIL=fixture-publisher@invalid \
+ APT_HUB_PAGES_SHA="${chain_sha}" GITHUB_REPOSITORY=example/apt-hub RELEASE_TAG=v7.7.7 \
+ bash scripts/publish_apt_site.sh update-readme) >"${chain}/stale-source.log" 2>&1 || stale_rc=$?
+if [[ "${stale_rc}" -ne 0 && "$(git --git-dir="${chain}.git" rev-parse main)" == "${new_release_sha}" ]]; then
+  pass '旧维护遇新源码安全失败，不在新发版上追加回写；失败传播阻止 cleanup'
+else
+  fail "旧维护未拒绝新源码 rc=${stale_rc}"
+fi
+# 后继新 run 检出新发版：现有已一致状态应正常完成，不被旧回写产生的提交挡住。
+git -C "${chain}" checkout -q --detach "${new_release_sha}"
+new_rc=0
+(cd -- "${chain}"; APT_HUB_GIT_NAME=fixture-publisher APT_HUB_GIT_EMAIL=fixture-publisher@invalid \
+ APT_HUB_PAGES_SHA="${chain_sha}" GITHUB_REPOSITORY=example/apt-hub RELEASE_TAG=v7.7.7 \
+ bash scripts/publish_apt_site.sh update-readme) >"${chain}/new-source.log" 2>&1 || new_rc=$?
+if [[ "${new_rc}" -eq 0 && "$(git --git-dir="${chain}.git" rev-parse main)" == "${new_release_sha}" ]]; then
+  pass '较新源码的后继运行正常幂等，不受旧维护影响'
+else
+  fail "后继新源码运行失败 rc=${new_rc}"
+fi
+
+# fetch 到生成结果之间 main 又推进，即便本次无文件可写，也必须失败而非进入 cleanup。
+race_tree="$(git -C "${chain}" rev-parse 'HEAD^{tree}')"
+race_main_sha="$(git -C "${chain}" -c user.name=fixture-publisher -c user.email=fixture-publisher@invalid commit-tree "${race_tree}" -p "${new_release_sha}" -m 'concurrent source successor')"
+git -C "${chain}" push -q origin "${race_main_sha}:refs/fixture/race-source"
+race_rc=0
+(cd -- "${chain}"; RACE_MAIN_SHA="${race_main_sha}" RACE_REMOTE="${chain}.git" \
+ APT_HUB_GIT_NAME=fixture-publisher APT_HUB_GIT_EMAIL=fixture-publisher@invalid \
+ APT_HUB_PAGES_SHA="${chain_sha}" GITHUB_REPOSITORY=example/apt-hub RELEASE_TAG=v7.7.7 \
+ bash scripts/publish_apt_site.sh update-readme) >"${chain}/race-source.log" 2>&1 || race_rc=$?
+if [[ "${race_rc}" -ne 0 && "$(git --git-dir="${chain}.git" rev-parse main)" == "${race_main_sha}" ]]; then
+  pass 'main在fetch后推进，即使无变化回写也重新核对并安全失败'
+else
+  fail "main在幂等核验中变化未拒绝 rc=${race_rc}"
+fi
+
 cleanup
 printf 'RESULT pass=%s fail=%s evidence=%s\n' "${PASS}" "${FAIL}" "${WORK}"
 [[ "${FAIL}" -eq 0 ]]
