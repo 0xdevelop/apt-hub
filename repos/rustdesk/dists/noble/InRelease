@@ -5,11 +5,11 @@ Acquire-By-Hash: yes
 Architectures: amd64 arm64
 Codename: noble
 Components: main
-Date: Mon, 23 Nov 2026 08:35:57 +0000
+Date: Mon, 23 Nov 2026 10:29:33 +0000
 Label: apt-hub
 Origin: apt-hub
 Suite: noble
-Valid-Until: Mon, 07 Dec 2026 08:35:57 +0000
+Valid-Until: Mon, 07 Dec 2026 10:29:33 +0000
 SHA256:
  cd73027cf51ed597197d4545d2e8a2231c076e8a42102ae047bafc8e71ddbf64              652 main/binary-amd64/Packages
  792168b923563b82ea5686021290e8669c702cc8fece454a17539c5e6bedeb39              413 main/binary-amd64/Packages.gz
@@ -17,8 +17,8 @@ SHA256:
  548df5346a11bb4358c41b1785ee2a6dcef5e29f838caccd8df3e6aef873aa27              410 main/binary-arm64/Packages.gz
 -----BEGIN PGP SIGNATURE-----
 
-iHUEARYKAB0WIQRbXv4gXjqovXW/tXIyLsbFU1aH2wUCawP67QAKCRAyLsbFU1aH
-2+4VAQCUZfEgXEARwjpLxsET/MIpvm8+jnVOW+dJol9sTxLWTQEAjk/tJx3Rjdwp
-QIt8CWQXjIAFR7nfX5Qr4UFcf661pAU=
-=7F23
+iHUEARYKAB0WIQRbXv4gXjqovXW/tXIyLsbFU1aH2wUCawQVjQAKCRAyLsbFU1aH
+2yU2AP9F+7tVW4QkU0iyCwWOfFVK5v/DFdHw25fx94Ph749ofAD+PVvVIXxLBdp4
+6N8/M+V3SEY7acaSGJSxMBczmj9sWgw=
+=1NZ4
 -----END PGP SIGNATURE-----
