@@ -5,11 +5,11 @@ Acquire-By-Hash: yes
 Architectures: amd64 arm64
 Codename: jammy
 Components: main
-Date: Mon, 23 Nov 2026 03:55:17 +0000
+Date: Mon, 23 Nov 2026 08:35:59 +0000
 Label: apt-hub
 Origin: apt-hub
 Suite: jammy
-Valid-Until: Mon, 07 Dec 2026 03:55:17 +0000
+Valid-Until: Mon, 07 Dec 2026 08:35:59 +0000
 SHA256:
  fe61f966e575d1cd38eb5197f35f8ca3d0a261d0d5a6f4a7438b2756cf93436c              610 main/binary-amd64/Packages
  6ce9077bbbfafa5c85cfa4d14219a01731e55f4a7f53c7fa840e6119e42ba4f9              396 main/binary-amd64/Packages.gz
@@ -17,8 +17,8 @@ SHA256:
  db7f2c0cecdb42ff6f73e645fefdee04203b44b22122c12af1e0d864fa28b73b              398 main/binary-arm64/Packages.gz
 -----BEGIN PGP SIGNATURE-----
 
-iHUEARYKAB0WIQRbXv4gXjqovXW/tXIyLsbFU1aH2wUCawO5JQAKCRAyLsbFU1aH
-20JbAP9ce0Cx91MiwyjS9escU4tFdXHVXQ1id7s0kutQXa/TbAEA3cfch48/BvGt
-v+imPu5lluK6J/99BhcaYwyj+a6QfAo=
-=jjbU
+iHUEARYKAB0WIQRbXv4gXjqovXW/tXIyLsbFU1aH2wUCawP67wAKCRAyLsbFU1aH
+29AZAP0TB/PgtW0X2PqKYu5pVQ4bKj0Azs2P18L3z0Z+zUBuxQD6A0srgEXPER4E
+xjX3uCwNrDDaA17stEDQGMQ5TX9YOQA=
+=SpV0
 -----END PGP SIGNATURE-----
