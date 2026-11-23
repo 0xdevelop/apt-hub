@@ -7,18 +7,18 @@
       "repository": "golang/go",
       "package_repository": "0xdevelop/apt-hub",
       "description": "Go 官方 Linux 归档构建的工具链",
-      "version": "2:1.27.4-1",
-      "release_url": "https://github.com/0xdevelop/apt-hub/releases/tag/v0.0.5",
+      "version": "2:1.27.4-1+0.0.10",
+      "release_url": "https://github.com/0xdevelop/apt-hub/releases/tag/v0.0.10",
       "source_url": "https://go.dev",
       "license": "BSD-3-Clause",
-      "updated_at": "2026-11-17T06:43:43Z",
+      "updated_at": "2026-11-23T03:55:14Z",
       "apt_source_uri": "mirror+https://apt-hub.m-b-crazy.com/repos/golang/mirror.list",
       "source_type": "go_official_archive",
-      "release_tag": "v0.0.5",
+      "release_tag": "v0.0.10",
       "upstream": {
         "version": "go1.27.4",
         "version_debian": "1.27.4",
-        "revision": "1",
+        "revision": "1+0.0.10",
         "epoch": "2"
       },
       "ubuntu_series": [
@@ -35,10 +35,10 @@
         {
           "package": "golang",
           "architecture": "amd64",
-          "filename": "0xdevelop/apt-hub/releases/download/v0.0.5/golang_1.27.4-1_amd64.deb",
-          "sha256": "52e0884d27c30cd6ec34208f46261ff1e201286ec79b105dbcc8f457218f992c",
-          "size": "1554",
-          "url": "https://github.com/0xdevelop/apt-hub/releases/download/v0.0.5/golang_1.27.4-1_amd64.deb",
+          "filename": "0xdevelop/apt-hub/releases/download/v0.0.10/golang_1.27.4-1+0.0.10_amd64.deb",
+          "sha256": "f18faac93ab02621666cfdb5aa307d22a4859dddad505d37bda9f8dd3e868b67",
+          "size": "69931590",
+          "url": "https://github.com/0xdevelop/apt-hub/releases/download/v0.0.10/golang_1.27.4-1%2B0.0.10_amd64.deb",
           "upstream": {
             "url": "https://go.dev/dl/go1.27.4.linux-amd64.tar.gz",
             "sha256": "7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840",
@@ -48,36 +48,10 @@
         {
           "package": "golang",
           "architecture": "arm64",
-          "filename": "0xdevelop/apt-hub/releases/download/v0.0.5/golang_1.27.4-1_arm64.deb",
-          "sha256": "0fa88cc2f4a5516415223602bc2b0542722b2790d43584fd8f12c8ec7802bcc7",
-          "size": "1554",
-          "url": "https://github.com/0xdevelop/apt-hub/releases/download/v0.0.5/golang_1.27.4-1_arm64.deb",
-          "upstream": {
-            "url": "https://go.dev/dl/go1.27.4.linux-arm64.tar.gz",
-            "sha256": "3392582988a273a87ab5043ee1b2c9c17a2c3c00580bf9326c47a2e0aaaeac92",
-            "size": "67129258"
-          }
-        },
-        {
-          "package": "golang-go",
-          "architecture": "amd64",
-          "filename": "0xdevelop/apt-hub/releases/download/v0.0.5/golang-go_1.27.4-1_amd64.deb",
-          "sha256": "8fb6845e14180c498210c0a2eaf87cbdf70b9b603dbe3a5e1b6abc5c737139d4",
-          "size": "69931570",
-          "url": "https://github.com/0xdevelop/apt-hub/releases/download/v0.0.5/golang-go_1.27.4-1_amd64.deb",
-          "upstream": {
-            "url": "https://go.dev/dl/go1.27.4.linux-amd64.tar.gz",
-            "sha256": "7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840",
-            "size": "70680823"
-          }
-        },
-        {
-          "package": "golang-go",
-          "architecture": "arm64",
-          "filename": "0xdevelop/apt-hub/releases/download/v0.0.5/golang-go_1.27.4-1_arm64.deb",
-          "sha256": "00ec5bd67e889a5634b35f899d74f7771e0f517946815148bc4091a8f2b376fd",
-          "size": "66328618",
-          "url": "https://github.com/0xdevelop/apt-hub/releases/download/v0.0.5/golang-go_1.27.4-1_arm64.deb",
+          "filename": "0xdevelop/apt-hub/releases/download/v0.0.10/golang_1.27.4-1+0.0.10_arm64.deb",
+          "sha256": "e577f1bc22fc209ba761dce2242d8dd9bb7f7ec5dd82517fc4070823df14fe71",
+          "size": "66328640",
+          "url": "https://github.com/0xdevelop/apt-hub/releases/download/v0.0.10/golang_1.27.4-1%2B0.0.10_arm64.deb",
           "upstream": {
             "url": "https://go.dev/dl/go1.27.4.linux-arm64.tar.gz",
             "sha256": "3392582988a273a87ab5043ee1b2c9c17a2c3c00580bf9326c47a2e0aaaeac92",

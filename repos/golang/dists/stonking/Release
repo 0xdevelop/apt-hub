@@ -2,13 +2,13 @@ Acquire-By-Hash: yes
 Architectures: amd64 arm64
 Codename: stonking
 Components: main
-Date: Tue, 17 Nov 2026 06:43:51 +0000
+Date: Mon, 23 Nov 2026 03:55:17 +0000
 Label: apt-hub
 Origin: apt-hub
 Suite: stonking
-Valid-Until: Tue, 01 Dec 2026 06:43:51 +0000
+Valid-Until: Mon, 07 Dec 2026 03:55:17 +0000
 SHA256:
- 6adc49f142f0dd87d756ee4c93379e5c1f845c85bedad708587ea04b63537e40              937 main/binary-amd64/Packages
- 5d091225d4d7a2be06a2270acd4b3bfc0cb5e866029dc26f0d33c1f91121aeec              467 main/binary-amd64/Packages.gz
- 8b6bf21e4ea0480a1669a5a961cd38b7d3fa762ef80fb2b0c5a7f36741344ff7              937 main/binary-arm64/Packages
- 8734db40ad51b2c662d1c1bf4801da5b2b22278f895d2d5529ef1781cb2a1276              466 main/binary-arm64/Packages.gz
+ fe61f966e575d1cd38eb5197f35f8ca3d0a261d0d5a6f4a7438b2756cf93436c              610 main/binary-amd64/Packages
+ 6ce9077bbbfafa5c85cfa4d14219a01731e55f4a7f53c7fa840e6119e42ba4f9              396 main/binary-amd64/Packages.gz
+ ec56da7fc68a21b66b8cd93f44fa5710e7f9dd88f2266064dee3f5910160ff27              610 main/binary-arm64/Packages
+ db7f2c0cecdb42ff6f73e645fefdee04203b44b22122c12af1e0d864fa28b73b              398 main/binary-arm64/Packages.gz

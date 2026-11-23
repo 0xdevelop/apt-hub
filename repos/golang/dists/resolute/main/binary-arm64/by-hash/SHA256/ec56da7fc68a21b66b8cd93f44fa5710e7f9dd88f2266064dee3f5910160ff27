@@ -1,0 +1,18 @@
+Package: golang
+Architecture: arm64
+Version: 2:1.27.4-1+0.0.10
+Priority: optional
+Section: devel
+Maintainer: apt-hub <apt-hub@invalid>
+Installed-Size: 243380
+Provides: golang-go (= 2:1.27.4-1+0.0.10)
+Conflicts: gccgo-go, golang-go (<< 2:1.27.4-1+0.0.10)
+Replaces: golang-go (<< 2:1.27.4-1+0.0.10)
+Filename: 0xdevelop/apt-hub/releases/download/v0.0.10/golang_1.27.4-1+0.0.10_arm64.deb
+Size: 66328640
+SHA256: e577f1bc22fc209ba761dce2242d8dd9bb7f7ec5dd82517fc4070823df14fe71
+Homepage: https://go.dev/
+Description: Go programming language compiler
+ Official Go toolchain archive packaged for apt-hub (go1.27.4).
+
+
