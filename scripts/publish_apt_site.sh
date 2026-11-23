@@ -408,22 +408,22 @@ pages_http_note() {
 }
 
 deploy_pages() {
-  local sha="${APT_HUB_PAGES_SHA:?}" remote request url endpoint body status commit attempt
+  local sha="${APT_HUB_PAGES_SHA:?}" repo="${GITHUB_REPOSITORY:-}" remote endpoint body status commit attempt
   local matched=0 err note post_cmd
   [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || die "::error::站点提交非法"
+  [[ "${repo}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*/[A-Za-z0-9_][A-Za-z0-9._-]*$ && "${repo}" != *..* ]] \
+    || die "::error::GITHUB_REPOSITORY 非法"
   remote=$(git ls-remote --exit-code origin refs/heads/apt-hub-pages) || die "::error::无法回读 apt-hub-pages"
   [[ "${remote%%$'\t'*}" == "${sha}" ]] || die "::error::Pages 分支提交已变化，拒绝回读: ${sha}"
-  post_cmd="gh api --method POST repos/${GITHUB_REPOSITORY:?}/pages/builds"
+  post_cmd="gh api --method POST repos/${repo}/pages/builds"
   err=$(mktemp "${ROOT}/tmp/pages-http.XXXXXX")
-  if ! request=$(gh api --method POST "repos/${GITHUB_REPOSITORY}/pages/builds" 2>"${err}"); then
+  if ! gh api --method POST "repos/${repo}/pages/builds" >/dev/null 2>"${err}"; then
     note=$(pages_http_note "${err}")
     rm -f -- "${err}"
     die "阶段=deploy-pages 命令=${post_cmd} ${note}"
   fi
   rm -f -- "${err}"
-  url=$(jq -er '.url' <<<"${request}") || die "::error::Pages 未返回构建地址: ${SITE_URL:?}"
-  endpoint="${url#"${GITHUB_API_URL:?}/"}"
-  [[ "${endpoint}" =~ ^repos/${GITHUB_REPOSITORY}/pages/builds/([0-9]+|latest)$ ]] || die "::error::Pages 构建地址非法: ${SITE_URL:?} ${url}"
+  endpoint="repos/${repo}/pages/builds/latest"
   status=""
   for ((attempt=0; attempt<60; attempt++)); do
     err=$(mktemp "${ROOT}/tmp/pages-http.XXXXXX")

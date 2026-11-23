@@ -220,7 +220,7 @@ git -C "${WORK}" remote set-url origin "${WORK}/origin.git"
 
 expect explicit_pages_build 0 run deploy-pages
 if grep -Fxq 'POST repos/example/apt-hub/pages/builds' "${WORK}/calls.log"; then pass '显式请求分支构建'; else fail '未请求构建'; fi
-if grep -Fxq 'GET repos/example/apt-hub/pages/builds/123' "${WORK}/calls.log"; then pass '回读构建状态'; else fail '未回读构建状态'; fi
+if grep -Fxq 'GET repos/example/apt-hub/pages/builds/latest' "${WORK}/calls.log"; then pass '回读构建状态'; else fail '未回读构建状态'; fi
 if cmp -s "${WORK}/tmp/site/state.json" "${WORK}/tmp/public-state.json" \
   && cmp -s "${WORK}/tmp/site/index.html" "${WORK}/tmp/public-index.html" \
   && cmp -s "${WORK}/tmp/site/add_source.sh" "${WORK}/tmp/public-add_source.sh"; then
@@ -275,30 +275,37 @@ if cmp -s "${WORK}/tmp/site/state.json" "${WORK}/tmp/public-state.json" \
 else
   fail '三文件对齐后未成功'
 fi
-printf '%s\n' '{"status":"queued"}' >"${WORK}/build-request.json"
-expect pages_build_url_missing 1 run deploy-pages
-if grep -Fq 'Pages 未返回构建地址: https://packages.example.test' "${WORK}/pages_build_url_missing.log"; then
-  pass '缺构建地址时诊断含公开站点'
-else
-  fail '缺构建地址诊断未含公开站点'
-fi
-printf '%s\n' '{"url":"https://evil.example/repos/example/apt-hub/pages/builds/123"}' >"${WORK}/build-request.json"
-: >"${WORK}/calls.log"
-expect pages_build_url_rejected 1 run deploy-pages
-if grep -Fq 'Pages 构建地址非法: https://packages.example.test https://evil.example/repos/example/apt-hub/pages/builds/123' "${WORK}/pages_build_url_rejected.log" \
-  && ! grep -Fq 'evil.example' "${WORK}/calls.log"; then
-  pass '非法构建地址拒绝且不外请求'
-else
-  fail '非法构建地址被请求或诊断缺公开地址'
-fi
-printf '%s\n' '{"url":"https://api.github.com/repos/example/apt-hub/pages/builds/latest"}' >"${WORK}/build-request.json"
-: >"${WORK}/calls.log"
-expect pages_build_latest 0 run deploy-pages
-if grep -Fxq 'GET repos/example/apt-hub/pages/builds/latest' "${WORK}/calls.log"; then
-  pass 'latest 构建地址按原校验回读'
-else
-  fail 'latest 构建地址未按原校验回读'
-fi
+# 不跟随 POST 返回的 .url，始终只对可信 GITHUB_REPOSITORY 轮询 builds/latest。
+run_with_repo() {
+  local repo_val="$1"
+  shift
+  GITHUB_REPOSITORY="${repo_val}" run "$@"
+}
+for bad_repo in '../bad/repo' 'example/apt-hub?x=1' 'onlyowner'; do
+  : >"${WORK}/calls.log"
+  expect pages_bad_repo_rejected 1 run_with_repo "${bad_repo}" deploy-pages
+  if [[ ! -s "${WORK}/calls.log" ]] && grep -Fq 'GITHUB_REPOSITORY 非法' "${WORK}/pages_bad_repo_rejected.log"; then
+    pass "非法 GITHUB_REPOSITORY(${bad_repo}) 被拒绝且不发 API 请求"
+  else
+    fail "非法 GITHUB_REPOSITORY(${bad_repo}) 仍发出了 API 请求"
+  fi
+done
+for resp_body in \
+  '{"status":"queued"}' \
+  '{"url":"https://evil.example/repos/example/apt-hub/pages/builds/123"}' \
+  '{"url":"https://api.github.com/repositories/1442432901/pages/builds/latest"}' \
+  '{"url":"https://api.github.com/repositories/999999/pages/builds/123?redirect=evil"}'; do
+  printf '%s\n' "${resp_body}" >"${WORK}/build-request.json"
+  : >"${WORK}/calls.log"
+  expect pages_ignore_response_url 0 run deploy-pages
+  if grep -Fxq 'POST repos/example/apt-hub/pages/builds' "${WORK}/calls.log" \
+    && grep -Fxq 'GET repos/example/apt-hub/pages/builds/latest' "${WORK}/calls.log" \
+    && ! grep -Eq 'evil\.example|repositories/|builds/123' "${WORK}/calls.log"; then
+    pass '忽略 POST 响应 url，固定按 GITHUB_REPOSITORY 轮询 latest'
+  else
+    fail "跟随了响应 url: $(cat "${WORK}/calls.log")"
+  fi
+done
 old_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 printf '%s\n' \
   "{\"status\":\"built\",\"commit\":\"${old_sha}\"}" \
@@ -316,14 +323,14 @@ else
   fail '旧 built 被当成成功，或未等到预期提交'
 fi
 rm -f -- "${WORK}/build-steps.jsonl" "${WORK}/build-steps.next"
-printf '%s\n' '{"url":"https://api.github.com/repos/example/apt-hub/pages/builds/123"}' >"${WORK}/build-request.json"
+printf '%s\n' '{"url":"https://api.github.com/repositories/1442432901/pages/builds/latest"}' >"${WORK}/build-request.json"
 rm -f -- "${WORK}/build-queue-left" "${WORK}/post-fail.txt"
 printf '%s\n' '1' >"${WORK}/build-queue-left"
 printf '%s\n' "{\"status\":\"built\",\"commit\":\"${seed_sha}\"}" >"${WORK}/build-result.json"
 : >"${WORK}/calls.log"
 expect pages_queued_then_built 0 run deploy-pages
 if grep -Fxq 'POST repos/example/apt-hub/pages/builds' "${WORK}/calls.log" \
-  && [[ "$(grep -c 'GET repos/example/apt-hub/pages/builds/123' "${WORK}/calls.log")" -eq 2 ]] \
+  && [[ "$(grep -c 'GET repos/example/apt-hub/pages/builds/latest' "${WORK}/calls.log")" -eq 2 ]] \
   && grep -Fq 'Pages 已部署并回读提交' "${WORK}/pages_queued_then_built.log"; then
   pass 'queued 后再 built 且提交一致才成功'
 else
