@@ -390,12 +390,25 @@ WF="${ROOT}/.github/workflows/release.yml"
 if [[ ! -e "${ROOT}/.github/workflows/ubuntu-publish.yml" && ! -e "${ROOT}/.github/workflows/ubuntu-test.yml" ]]; then pass '无影子工作流'; else fail '仍有额外工作流'; fi
 if ! grep -Eq 'upload-pages-artifact|deploy-pages@|upload-artifact|download-artifact|id-token:' "${WF}"; then pass '无 Actions Artifact 与 OIDC 部署链'; else fail 'Artifact 影子链残留'; fi
 if grep -q '^  release:' "${WF}" && grep -q '^  Build:' "${WF}" && grep -q '^  RemoveOldRelease:' "${WF}"; then pass '母版三段保留'; else fail '三段缺失'; fi
-if grep -Fq '        default: false' "${WF}" \
-  && awk '/^      cleanup_release:/{input=1} input && /^        type: boolean$/{typed=1} input && /^        default: false$/{disabled=1} END{exit !(typed && disabled)}' "${WF}" \
-  && grep -Fq "    if: github.event_name == 'workflow_dispatch' && inputs.cleanup_release == true" "${WF}"; then
-  pass '旧 Release 清理默认关闭，仅显式授权的手动运行可执行'
+# 成功依赖由 GitHub Actions 执行；不得用构包、事件或手动输入门禁漏掉同版恢复。
+if ! grep -Fq cleanup_release "${WF}" \
+  && awk '/^  RemoveOldRelease:/{job=1;next} job && /^    if:/{bad=1} job && /^      - release$/{release=1} job && /^      - Build$/{build=1} END{exit (bad || !release || !build)}' "${WF}"; then
+  pass '成功 Release/Build 后自动清理，同版本恢复不漏；前序失败按 needs 阻止清理'
 else
-  fail '未授权运行可能删除旧 Release'
+  fail '母版清理存在事件/构包门禁或缺少成功依赖'
+fi
+if awk '/^  Build:/{job=1;next} /^  RemoveOldRelease:/{job=0} job && /^    if:/{bad=1} job && /^    needs: release$/{needs=1} /^      - name: /{step=($0 ~ /生成并发布 Pages/)} step && /^        if:/{bad=1} step && /run: bash scripts\/publish_apt_site.sh publish$/{publish=1} END{exit (bad || !needs || !publish)}' "${WF}"; then
+  pass '有变构包与无变复用都进入 Pages/README 发布链，不被 build_packages 门禁跳过'
+else
+  fail 'Build 或 Pages 发布被条件跳过，或缺少 Release 成功依赖'
+fi
+# shellcheck disable=SC2016 # 匹配工作流原始表达式，不在测试进程展开
+if grep -Fq '          EVENT_NAME: push' "${WF}" \
+  && grep -Fq '          REF: refs/tags/${{ needs.release.outputs.release_tag }}' "${WF}" \
+  && grep -Fq 'run: bash scripts/release_assets.sh remote-status' "${WF}"; then
+  pass '清理沿用本次解析标签和生产 remove-old；复用包也校验远端来源'
+else
+  fail '清理标签或来源核验接线缺失'
 fi
 if grep -Fq 'george012/upload_github_release_assets_action@' "${WF}" && grep -Fq 'bash ./build.sh test' "${WF}"; then pass '母版构建检验与直传 assets'; else fail '母版调用链缺失'; fi
 assets_run="${WORK}/assets-run.sh"

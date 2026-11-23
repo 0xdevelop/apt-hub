@@ -39,7 +39,7 @@ curl -fsSL --proto '=https' --proto-redir '=https' -o add_source.sh 'https://apt
 bash git_tag.sh
 ```
 
-默认自动升版。同一工作流完成 `Release → Build → RemoveOldRelease`：构造包上传对应本仓 `vX.Y.Z` assets，签名站点保存到 `apt-hub-pages` 并发布，成功后回写列表。日常检查与索引续签也由该工作流定时执行。旧 Release 默认保留；清理须在手动运行时显式选择 `cleanup_release`，并先取得删除授权。
+默认自动升版。同一工作流完成 `Release → Build → RemoveOldRelease`：构造包上传对应本仓 `vX.Y.Z` assets，签名站点保存到 `apt-hub-pages` 并发布，成功后回写列表。日常检查与索引续签也由该工作流定时执行。`Release` 与 `Build`（含 Pages 部署及列表回写）全部成功后，自动调用既有两代清理；不足两代或有效索引仍引用的资产不删除。
 
 ## 文档
 
