@@ -87,7 +87,7 @@ jobs:
           bump_release=$(awk -F= '$1=="bump_release"{print $2}' tmp/release-plan)
           package_tag=$(awk -F= '$1=="package_release_tag"{print $2}' tmp/release-plan)
           go_version=$(awk -F= '$1=="go_version"{print $2}' tmp/release-plan)
-          [[ "${build_packages}" =~ ^[01]$ && "${bump_release}" =~ ^[01]$ && "${package_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+          [[ "${build_packages}" =~ ^[01]$ && "${bump_release}" =~ ^[01]$ && "${package_tag}" == "${tag}" && "${package_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
           if [[ "${bump_release}" == 1 ]]; then
             actor=$(gh api "users/${GITHUB_ACTOR}")
             login=$(jq -er '.login' <<<"${actor}")
@@ -136,21 +136,31 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/publish_apt_site.sh preflight
 
+      - name: 缓存上游 Go 归档载荷
+        if: needs.release.outputs.build_packages == '1' && needs.release.outputs.go_version != ''
+        uses: actions/cache@a7833574556fa59680c1b7cb190c1735db73ebf0 # v5.0.0
+        with:
+          path: tmp/go-archives
+          key: go-archives-${{ needs.release.outputs.go_version }}-${{ hashFiles('config/go.json') }}
+
       - name: 构包或跳过已完成 vtag
         id: assets
         if: needs.release.outputs.build_packages == '1'
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-          TAG: ${{ needs.release.outputs.package_release_tag }}
+          TAG: ${{ needs.release.outputs.release_tag }}
+          PACKAGE_RELEASE_TAG: ${{ needs.release.outputs.package_release_tag }}
           GO_VERSION: ${{ needs.release.outputs.go_version }}
         run: |
           set -euo pipefail
           chmod a+x scripts/release_assets.sh build.sh gen_debs.sh scripts/gen_deb_golang.sh
+          [[ "${PACKAGE_RELEASE_TAG}" == "${TAG}" ]] || exit 1
           [[ "${GO_VERSION}" =~ ^go[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
-          mkdir -p tmp
+          mkdir -p tmp tmp/go-archives
           curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 120 --retry 2 'https://go.dev/dl/?mode=json&include=all' -o tmp/go-downloads.json
-          bash ./build.sh --go-version "${GO_VERSION}" --downloads-json tmp/go-downloads.json && bash ./build.sh test || exit $?
+          scripts/release_assets.sh prepare-archives --go-version "${GO_VERSION}" --downloads-json tmp/go-downloads.json --archive-dir tmp/go-archives || exit $?
+          bash ./build.sh --go-version "${GO_VERSION}" --downloads-json tmp/go-downloads.json --archive-dir tmp/go-archives && bash ./build.sh test || exit $?
           scripts/release_assets.sh local-status --asset-dir ./build/upload_tmp_dir || exit $?
           scripts/release_assets.sh stage-upload --repository "${REPOSITORY}" --tag "${TAG}" --asset-dir ./build/upload_tmp_dir --output-dir tmp/missing-assets >>"$GITHUB_OUTPUT"
 
@@ -159,7 +169,7 @@ jobs:
         uses: george012/upload_github_release_assets_action@b56f61e7a10692c6ee2d7482b451911393479030
         with:
           path: ${{ steps.assets.outputs.upload_path }}
-          tag_name: ${{ needs.release.outputs.package_release_tag }}
+          tag_name: ${{ needs.release.outputs.release_tag }}
           token: ${{ github.token }}
           fail_on_unmatched_files: true
 
@@ -168,7 +178,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-          TAG: ${{ needs.release.outputs.package_release_tag }}
+          TAG: ${{ needs.release.outputs.release_tag }}
         run: bash scripts/release_assets.sh remote-status --repository "${REPOSITORY}" --tag "${TAG}" --source-tag
 
       - name: 生成并发布 Pages 产物分支

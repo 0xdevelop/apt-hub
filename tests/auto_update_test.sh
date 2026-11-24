@@ -146,10 +146,33 @@ for round in 1 2; do
 done
 printf 'PASS 连续两轮未变化均不重构、不升版\n'
 jq --arg tag "$tag" --arg ver "2:9.9.9-${fixture_revision}" '{schema_version:"2",packages:[{id:"golang",release_tag:$tag,package_repository:"example/apt-hub",version:$ver}]}' <<<null >"${BASE}/previous-state.json"
-GH_TOKEN=fixture bash "${BASE}/scripts/release_assets.sh" plan --repository example/apt-hub --tag v8.0.0 --previous-state "${BASE}/previous-state.json" >"${BASE}/page-only.out"
-grep -Fxq build_packages=0 "${BASE}/page-only.out"
-grep -Fxq "package_release_tag=${tag}" "${BASE}/page-only.out"
-printf 'PASS 页面维护版变化复用旧包来源，不构包\n'
+GH_TOKEN=fixture bash "${BASE}/scripts/release_assets.sh" plan --repository example/apt-hub --tag v8.0.0 --previous-state "${BASE}/previous-state.json" >"${BASE}/new-target.out"
+grep -Fxq build_packages=1 "${BASE}/new-target.out"
+grep -Fxq bump_release=0 "${BASE}/new-target.out"
+grep -Fxq package_release_tag=v8.0.0 "${BASE}/new-target.out"
+grep -Fxq go_version=go9.9.9 "${BASE}/new-target.out"
+printf 'PASS 新目标版即使同Go同输入也要求产本版资产，不跨版本复用旧tag\n'
+
+# 假改名拒绝：只改 deb 文件名并重算 SHA256SUMS，不改包内 control/provenance，local-status 必须拒绝
+cp -a "${BASE}/assets" "${BASE}/tmp/assets-fake-rename"
+mv "${BASE}/tmp/assets-fake-rename/golang_9.9.9-${fixture_revision}_amd64.deb" "${BASE}/tmp/assets-fake-rename/golang_9.9.9-1+8.0.0_amd64.deb"
+(cd "${BASE}/tmp/assets-fake-rename" && sha256sum golang_*.deb golang.provenance.json >SHA256SUMS)
+rc=0
+bash "${BASE}/scripts/release_assets.sh" local-status --asset-dir "${BASE}/tmp/assets-fake-rename" >"${BASE}/fake-rename.out" 2>&1 || rc=$?
+[[ "$rc" -eq 1 ]] && grep -Eq '来源列出的 deb 不在资产中|来源文件名非法|来源与 deb 字节不一致' "${BASE}/fake-rename.out"
+# 即使连 provenance.packages[].filename 也伪造改名，但 deb 内部 DEBIAN/control Version 仍为旧版，也必须拒绝
+jq --arg fn "golang_9.9.9-1+8.0.0_amd64.deb" '(.packages[] | select(.architecture=="amd64") | .filename)=$fn | (.packages[] | select(.architecture=="amd64") | .version)="2:9.9.9-1+8.0.0"' "${BASE}/tmp/assets-fake-rename/golang.provenance.json" >"${BASE}/tmp/assets-fake-rename/golang.provenance.json.tmp"
+mv "${BASE}/tmp/assets-fake-rename/golang.provenance.json.tmp" "${BASE}/tmp/assets-fake-rename/golang.provenance.json"
+(cd "${BASE}/tmp/assets-fake-rename" && sha256sum golang_*.deb golang.provenance.json >SHA256SUMS)
+rc=0
+bash "${BASE}/scripts/release_assets.sh" local-status --asset-dir "${BASE}/tmp/assets-fake-rename" >"${BASE}/fake-rename2.out" 2>&1 || rc=$?
+[[ "$rc" -eq 1 ]]
+# stage-upload 用当前 VERSION 资产上传到另一个 tag (v8.0.0) 也必须拒绝
+jq -n '{tag_name:"v8.0.0",html_url:"https://github.com/example/apt-hub/releases/tag/v8.0.0",draft:false,prerelease:false,assets:[]}' >"${BASE}/api/v8.0.0.json"
+rc=0
+GH_TOKEN=fixture bash "${BASE}/scripts/release_assets.sh" stage-upload --repository example/apt-hub --tag v8.0.0 --asset-dir "${BASE}/assets" --output-dir "${BASE}/tmp/upload-wrong-tag" >"${BASE}/wrong-tag-upload.out" 2>&1 || rc=$?
+[[ "$rc" -eq 1 && ! -e "${BASE}/tmp/upload-wrong-tag" ]]
+printf 'PASS 假改名、包内control不匹配及跨tag staged上传均被拒绝\n' 
 
 jq '.assets=[.assets[]|select(.name=="golang.provenance.json")]' "${BASE}/api/${tag}.json" >"${BASE}/partial.json"
 cp "${BASE}/api/${tag}.json" "${BASE}/complete.json"

@@ -421,7 +421,8 @@ awk '
 ' "${WF}" >"${assets_run}"
 # shellcheck disable=SC2016 # 匹配工作流中的原始变量文本
 if [[ -s "${assets_run}" ]] \
-  && grep -Fq 'bash ./build.sh --go-version "${GO_VERSION}" --downloads-json tmp/go-downloads.json && bash ./build.sh test || exit $?' "${assets_run}" \
+  && grep -Fq 'scripts/release_assets.sh prepare-archives --go-version "${GO_VERSION}" --downloads-json tmp/go-downloads.json --archive-dir tmp/go-archives || exit $?' "${assets_run}" \
+  && grep -Fq 'bash ./build.sh --go-version "${GO_VERSION}" --downloads-json tmp/go-downloads.json --archive-dir tmp/go-archives && bash ./build.sh test || exit $?' "${assets_run}" \
   && grep -Fq 'local-status --asset-dir ./build/upload_tmp_dir || exit $?' "${assets_run}"; then
   pass '抽出的 assets run 含失败传播与 local-status'
 else
@@ -430,6 +431,15 @@ fi
 up_n="$(grep -n "steps.assets.outputs.upload == '1'" "${WF}" | cut -d: -f1)"
 pub_n="$(grep -n 'publish_apt_site.sh publish' "${WF}" | cut -d: -f1)"
 if [[ -n "${up_n}" && -n "${pub_n}" && "${up_n}" -lt "${pub_n}" ]]; then pass '上传门在 Pages 之前'; else fail '上传与 Pages 次序不对'; fi
+# shellcheck disable=SC2016 # 匹配工作流原始表达式，不在测试进程展开
+if grep -Fq 'actions/cache@' "${WF}" \
+  && grep -Fq 'path: tmp/go-archives' "${WF}" \
+  && grep -Fq 'tag_name: ${{ needs.release.outputs.release_tag }}' "${WF}" \
+  && grep -Fq 'TAG: ${{ needs.release.outputs.release_tag }}' "${WF}"; then
+  pass '构包使用上游载荷缓存且上传/远端核验严格绑定目标 release_tag'
+else
+  fail '上游载荷缓存或目标 release_tag 绑定缺失'
+fi
 shim_assets() {
   local name="$1" brc="$2" trc="$3" lrc="$4" want="$5" d="${WORK}/shim-$1" rc=0
   rm -rf -- "${d}"
@@ -445,6 +455,7 @@ EOF
   cat >"${d}/scripts/release_assets.sh" <<EOF
 #!/bin/bash
 printf '%s\n' "\$1" >> calls
+[[ "\$1" == prepare-archives ]] && exit 0
 [[ "\$1" == local-status ]] && exit ${lrc}
 if [[ "\$1" == stage-upload ]]; then printf 'upload=1\\nupload_path=tmp/missing-assets/*\\n'; exit 0; fi
 exit 10
@@ -456,7 +467,7 @@ EOF
   set +e
   (
     cd -- "${d}"
-    PATH="${d}/bin:${PATH}" GITHUB_OUTPUT="${d}/github_output" REPOSITORY=example/apt-hub TAG=v0.0.2 GO_VERSION=go9.9.9 bash "${assets_run}"
+    PATH="${d}/bin:${PATH}" GITHUB_OUTPUT="${d}/github_output" REPOSITORY=example/apt-hub TAG=v0.0.2 PACKAGE_RELEASE_TAG="${SHIM_PKG_TAG:-v0.0.2}" GO_VERSION=go9.9.9 bash "${assets_run}"
   ) >"${d}.log" 2>&1
   rc=$?
   set -e
@@ -476,11 +487,13 @@ EOF
     fail "${name} 调用了 local-status"
   fi
   if [[ "${name}" == build23 ]] && grep -qx test "${d}/calls"; then fail 'build23 仍跑了 test'; fi
+  if [[ "${name}" == mismatch ]] && [[ -e "${d}/calls" ]]; then fail 'mismatch 仍调用了 build.sh'; fi
 }
 shim_assets build23 23 0 0 23
 shim_assets test24 0 24 0 24
 shim_assets local1 0 0 1 1
 shim_assets ok 0 0 0 0
+SHIM_PKG_TAG=v0.0.1 shim_assets mismatch 0 0 0 1
 
 chain="${WORK}/version-chain"
 rm -rf -- "${chain}"
@@ -630,6 +643,22 @@ if [[ "${race_rc}" -ne 0 && "$(git --git-dir="${chain}.git" rev-parse main)" == 
   pass 'main在fetch后推进，即使无变化回写也重新核对并安全失败'
 else
   fail "main在幂等核验中变化未拒绝 rc=${race_rc}"
+fi
+
+mismatch_site_rc=0
+(
+  cd -- "${chain}"
+  mkdir -p tmp/gnupg tmp/previous
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 99' >tmp/bad-update-marker
+  env GITHUB_TOKEN=fixture APT_HUB_FINGERPRINT=0123456789ABCDEF0123456789ABCDEF01234567 \
+    SITE_URL=https://example.github.io/apt-hub PACKAGE_REPOSITORY=example/apt-hub \
+    RELEASE_TAG=v7.7.7 PACKAGE_RELEASE_TAG=v7.7.6 \
+    bash scripts/publish_apt_site.sh build-site
+) >"${chain}/pkg-tag-mismatch.log" 2>&1 || mismatch_site_rc=$?
+if [[ "${mismatch_site_rc}" -ne 0 ]] && grep -Fq '必须与 RELEASE_TAG' "${chain}/pkg-tag-mismatch.log"; then
+  pass 'build-site 拒绝 PACKAGE_RELEASE_TAG 与 RELEASE_TAG 不一致'
+else
+  fail "build-site 未拒绝标签不一致 rc=${mismatch_site_rc}"
 fi
 
 cleanup

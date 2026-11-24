@@ -845,6 +845,74 @@ if grep -Fq '未知 source_type: made_up' "${EVIDENCE}/runs/unknown.err" && [[ !
 else
   fail "未知 source_type 未拒绝"
 fi
+# ---------- prepare-archives 缓存命中/缺失/损坏拒信 ----------
+pa_dir="${EVIDENCE}/tmp/pa-cache"
+mkdir -p -- "${EVIDENCE}/tmp" "${EVIDENCE}/pa-bin"
+pa_amd_sha="$(sha256sum -- "${FIX_ARCH}/go7.7.7.linux-amd64.tar.gz" | awk '{print $1}')"
+pa_amd_sz="$(stat -c '%s' -- "${FIX_ARCH}/go7.7.7.linux-amd64.tar.gz")"
+pa_arm_sha="$(sha256sum -- "${FIX_ARCH}/go7.7.7.linux-arm64.tar.gz" | awk '{print $1}')"
+pa_arm_sz="$(stat -c '%s' -- "${FIX_ARCH}/go7.7.7.linux-arm64.tar.gz")"
+pa_json="${EVIDENCE}/pa-downloads.json"
+jq -nc \
+  --arg v "go7.7.7" \
+  --arg af "go7.7.7.linux-amd64.tar.gz" --arg asha "${pa_amd_sha}" --argjson asz "${pa_amd_sz}" \
+  --arg rf "go7.7.7.linux-arm64.tar.gz" --arg rsha "${pa_arm_sha}" --argjson rsz "${pa_arm_sz}" \
+  '[{version:$v,stable:true,files:[{os:"linux",arch:"amd64",kind:"archive",filename:$af,sha256:$asha,size:$asz},{os:"linux",arch:"arm64",kind:"archive",filename:$rf,sha256:$rsha,size:$rsz}]}]' >"${pa_json}"
+cat >"${EVIDENCE}/pa-bin/curl" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+out="" url=""
+while [[ \$# -gt 0 ]]; do
+  case "\$1" in
+    -o|--output) out="\$2"; shift 2 ;;
+    https://*) url="\$1"; shift ;;
+    *) shift ;;
+  esac
+done
+printf '%s\n' "\${url}" >>"${EVIDENCE}/pa-curl.log"
+fn="\${url##*/}"
+cp -- "${FIX_ARCH}/\${fn}" "\${out}"
+EOF
+chmod a+x -- "${EVIDENCE}/pa-bin/curl"
+: >"${EVIDENCE}/pa-curl.log"
+set +e
+PATH="${EVIDENCE}/pa-bin:${PATH}" "${ASSETS}" prepare-archives --go-version "go7.7.7" --downloads-json "${pa_json}" --archive-dir "${pa_dir}" >"${EVIDENCE}/runs/pa-miss.out" 2>"${EVIDENCE}/runs/pa-miss.err"
+rc=$?
+set -e
+record "prepare_archives_miss" "${rc}" 0
+if [[ "$(wc -l <"${EVIDENCE}/pa-curl.log")" -eq 2 ]] \
+  && cmp -s -- "${FIX_ARCH}/go7.7.7.linux-amd64.tar.gz" "${pa_dir}/go7.7.7.linux-amd64.tar.gz" \
+  && cmp -s -- "${FIX_ARCH}/go7.7.7.linux-arm64.tar.gz" "${pa_dir}/go7.7.7.linux-arm64.tar.gz"; then
+  pass "prepare-archives 未命中下载并写入校验归档"
+else
+  fail "prepare-archives 未命中行为异常"
+fi
+: >"${EVIDENCE}/pa-curl.log"
+set +e
+PATH="${EVIDENCE}/pa-bin:${PATH}" "${ASSETS}" prepare-archives --go-version "go7.7.7" --downloads-json "${pa_json}" --archive-dir "${pa_dir}" >"${EVIDENCE}/runs/pa-hit.out" 2>"${EVIDENCE}/runs/pa-hit.err"
+rc=$?
+set -e
+record "prepare_archives_hit" "${rc}" 0
+if [[ ! -s "${EVIDENCE}/pa-curl.log" ]] && grep -Fq "cache hit go7.7.7.linux-amd64.tar.gz" "${EVIDENCE}/runs/pa-hit.out"; then
+  pass "prepare-archives 命中复用且零下载"
+else
+  fail "prepare-archives 命中仍触发下载"
+fi
+printf 'corrupt\n' >"${pa_dir}/go7.7.7.linux-amd64.tar.gz"
+: >"${EVIDENCE}/pa-curl.log"
+set +e
+PATH="${EVIDENCE}/pa-bin:${PATH}" "${ASSETS}" prepare-archives --go-version "go7.7.7" --downloads-json "${pa_json}" --archive-dir "${pa_dir}" >"${EVIDENCE}/runs/pa-corrupt.out" 2>"${EVIDENCE}/runs/pa-corrupt.err"
+rc=$?
+set -e
+record "prepare_archives_corrupt_refetch" "${rc}" 0
+if [[ "$(wc -l <"${EVIDENCE}/pa-curl.log")" -eq 1 ]] \
+  && cmp -s -- "${FIX_ARCH}/go7.7.7.linux-amd64.tar.gz" "${pa_dir}/go7.7.7.linux-amd64.tar.gz"; then
+  pass "prepare-archives 损坏缓存不信任，重新下载并校验覆盖"
+else
+  fail "prepare-archives 损坏缓存处理异常"
+fi
+rm -rf -- "${pa_dir}"
+
 if [[ "$(sha256sum -- "${ROOT}/config/packages.json" "${ROOT}/config/go.json")" == "${cfg_before}" ]]; then
   pass "主配置未被测试改写"
 else

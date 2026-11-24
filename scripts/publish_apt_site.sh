@@ -276,13 +276,15 @@ restore_previous() {
 
 build_site() {
   local fpr="${APT_HUB_FINGERPRINT:-}" site="${SITE_URL:-}" tag="${RELEASE_TAG:-}" repo="${PACKAGE_REPOSITORY:-}"
+  local pkg_tag="${PACKAGE_RELEASE_TAG:-${tag}}"
+  [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "release-tag 非法"
+  [[ "${pkg_tag}" == "${tag}" ]] || die "PACKAGE_RELEASE_TAG(${pkg_tag}) 必须与 RELEASE_TAG(${tag}) 一致"
   [[ -n "${GITHUB_TOKEN:-}" ]] || die "缺少 GITHUB_TOKEN"
   export GNUPGHOME="${PWD}/tmp/gnupg"
   chmod a+x scripts/update_sources.sh scripts/ubuntu_releases.sh scripts/sync.sh scripts/render.sh scripts/verify_ubuntu.sh scripts/add_source.sh
   fpr="$(printf '%s' "${fpr}" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')"
   [[ "${fpr}" =~ ^[A-F0-9]{40}$ ]] || die "fingerprint 非法"
   [[ -n "${site}" ]] || die "缺少 Pages site_url"
-  [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "release-tag 非法"
   [[ "${repo}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || die "package-repository 非法"
   [[ ! -e tmp/update-candidate && ! -e tmp/site ]] || die "候选输出已存在，拒绝覆盖"
   local -a update_args
@@ -295,7 +297,7 @@ build_site() {
     --site-url "${site}"
     --package-repository "${repo}"
     --release-tag "${tag}"
-    --package-release-tag "${PACKAGE_RELEASE_TAG:-${tag}}"
+    --package-release-tag "${pkg_tag}"
   )
   if [[ -d tmp/debs/upstream ]]; then
     update_args+=(--upstream-dir tmp/debs/upstream)

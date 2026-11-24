@@ -272,7 +272,7 @@ if [[ -n "${releases_arg}" ]]; then
   releases="$(assert_allowed_file releases "${releases_arg}")"
 fi
 
-# 缺省页面版本沿 VERSION，包来源可显式引用旧的准确标签。
+# 页面版本与 go_official_archive 包来源标签必须一致。
 if jq -e '.packages|any((.source_type // "") == "go_official_archive")' "${catalog}" >/dev/null; then
   [[ -n "${package_repository}" ]] || die "catalog 含 go_official_archive 时必须传 --package-repository"
   if [[ -z "${release_tag}" ]]; then
@@ -289,6 +289,7 @@ if jq -e '.packages|any((.source_type // "") == "go_official_archive")' "${catal
     printf 'update_sources.sh: 由 VERSION 派生 release-tag=%s\n' "${release_tag}"
   fi
   package_release_tag="${package_release_tag:-${release_tag}}"
+  [[ "${package_release_tag}" == "${release_tag}" ]] || die "package-release-tag(${package_release_tag}) 必须与 release-tag(${release_tag}) 一致"
 fi
 [[ -z "${release_tag}" || "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "release-tag 必须是严格 vX.Y.Z"
 [[ -z "${package_release_tag}" || "${package_release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "package-release-tag 必须是严格 vX.Y.Z"

@@ -771,7 +771,8 @@ else
   fail "缺少 apt_hub_pages_sha 输出"
 fi
 if grep -Fq "git show \"\${sha}:state.json\"" "$SITE" \
-  && grep -Fq "git worktree add --detach \"\${work}\" refs/remotes/origin/main" "$SITE" \
+  && grep -Fq "git worktree add --detach \"\${work}\" \"\${source_sha}\"" "$SITE" \
+  && grep -Fq "git merge-base --is-ancestor \"\${source_sha}\" \"\${main_sha}\"" "$SITE" \
   && grep -Fq 'push origin HEAD:refs/heads/main' "$SITE"; then
   pass "README 从指定 SHA 取 state，并在 main 上提交"
 else
@@ -1339,6 +1340,29 @@ git -C "$readme_work" -c "user.name=$GIT_NAME" -c "user.email=$GIT_EMAIL" commit
 apt_sha=$(git -C "$readme_work" rev-parse HEAD)
 git -C "$readme_work" push -q origin apt-hub-pages
 git -C "$readme_work" checkout -q --detach v0.0.9
+diverge_rc=0
+(
+  cd "$readme_work"
+  env GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 \
+    APT_HUB_GIT_NAME="$GIT_NAME" \
+    APT_HUB_GIT_EMAIL="$GIT_EMAIL" \
+    APT_HUB_PAGES_SHA="$apt_sha" \
+    GITHUB_REPOSITORY="example/apt-hub" \
+    RELEASE_TAG="v7.7.7" \
+    bash scripts/publish_apt_site.sh update-readme
+) >"$readme_root/diverge.log" 2>&1 || diverge_rc=$?
+diverge_main=$(git --git-dir="$readme_origin" show main:README.md 2>/dev/null || true)
+if [[ "$diverge_rc" -ne 0 && "$(git --git-dir="$readme_origin" rev-parse v0.0.9 2>/dev/null || true)" == "$tag_sha" && "$diverge_main" == *MAIN_ONLY_SENTINEL* && "$diverge_main" != *alpha-app* ]]; then
+  pass "偏离 main 的 detached tag 拒绝篡改 main"
+else
+  fail "偏离 main 的 detached tag 未被拒绝 rc=$diverge_rc"
+fi
+git -C "$readme_work" checkout -q main
+git -C "$readme_work" tag -f v0.0.10 >/dev/null
+git -C "$readme_work" push -q origin refs/tags/v0.0.10
+main_tag_sha=$(git -C "$readme_work" rev-parse v0.0.10)
+git -C "$readme_work" checkout -q --detach v0.0.10
 readme_rc=0
 (
   cd "$readme_work"
@@ -1352,13 +1376,13 @@ readme_rc=0
     bash scripts/publish_apt_site.sh update-readme
 ) >"$readme_root/update.log" 2>&1 || readme_rc=$?
 main_readme=$(git --git-dir="$readme_origin" show main:README.md 2>/dev/null || true)
-tag_now=$(git --git-dir="$readme_origin" rev-parse v0.0.9 2>/dev/null || true)
+tag_now=$(git --git-dir="$readme_origin" rev-parse v0.0.10 2>/dev/null || true)
 if [[ "$readme_rc" -eq 0 \
-  && "$tag_now" == "$tag_sha" \
+  && "$tag_now" == "$main_tag_sha" \
   && "$main_readme" == *MAIN_ONLY_SENTINEL* \
   && "$main_readme" == *alpha-app* \
   && "$main_readme" != *TAG_ONLY_SENTINEL* ]]; then
-  pass "detached tag 回写读当前 main，不推 tag HEAD"
+  pass "detached tag 回写推进 main，不推 tag HEAD"
 else
   fail "README 回写未落在 main rc=$readme_rc log=$(cat "$readme_root/update.log" 2>/dev/null || true)"
 fi

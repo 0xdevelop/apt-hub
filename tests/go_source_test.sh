@@ -951,26 +951,34 @@ if [[ -f "${TMP}/work-derived/site/state.json" ]]; then
 fi
 GO_TAG="${saved_tag}"
 
-# 新页面复用既有来源标签，真实签源和 APT 消费保持包身份不变。
+# 跨版本 release-tag 与 package-release-tag 不一致必须拒绝；同版重刷签源和 APT 消费保持同版一致。
 GO_TAG="${DERIVED}"
 write_provenance "${TMP}/api/provenance.json"
 jq --arg h "$(cd "${ROOT}" && sha256sum scripts/gen_deb_golang.sh config/go.json | sha256sum | cut -d' ' -f1)" '.build_inputs_sha256=$h' "${TMP}/api/provenance.json" >"${TMP}/api/provenance-new.json"
 mv "${TMP}/api/provenance-new.json" "${TMP}/api/provenance.json"
 write_release_json "${TMP}/api/go-release-derived.json"
-rc="$(capture_rc "${TMP}/run-reuse-source.log" "${UPD}" \
+rc="$(capture_rc "${TMP}/run-mismatch-source.log" "${UPD}" \
   --catalog "${TMP}/catalog-go-amd64.json" --previous "${TMP}/work-derived/site" \
-  --work-dir "${TMP}/work-reuse-source" --gnupghome "${GNUPG}" --fingerprint "${FP}" \
+  --work-dir "${TMP}/work-mismatch-source" --gnupghome "${GNUPG}" --fingerprint "${FP}" \
   --site-url "${SITE_URL}" --releases "${TMP}/releases.json" --package-repository "${PKG_REPO}" \
   --release-tag "${PAGE_TAG}" --package-release-tag "${DERIVED}" \
   --go-downloads-json "${TMP}/api/go-downloads.json" --acquire-https-ca "${TMP}/tls/cert.pem" \
   --github-https-proxy "${PROXY_URL}")"
-record_rc update_reuse_source_tag "${rc}" 0 || true
+record_rc update_mismatch_source_tag_rejected "${rc}" 1 || true
+rc="$(capture_rc "${TMP}/run-same-source.log" "${UPD}" \
+  --catalog "${TMP}/catalog-go-amd64.json" --previous "${TMP}/work-derived/site" \
+  --work-dir "${TMP}/work-same-source" --gnupghome "${GNUPG}" --fingerprint "${FP}" \
+  --site-url "${SITE_URL}" --releases "${TMP}/releases.json" --package-repository "${PKG_REPO}" \
+  --release-tag "${DERIVED}" --package-release-tag "${DERIVED}" \
+  --go-downloads-json "${TMP}/api/go-downloads.json" --acquire-https-ca "${TMP}/tls/cert.pem" \
+  --github-https-proxy "${PROXY_URL}")"
+record_rc update_same_source_tag "${rc}" 0 || true
 if [[ "${rc}" -eq 0 ]]; then
   rc=0
-  jq -e --arg t "${DERIVED}" --arg v "${VER_FULL}" '.packages[0].release_tag==$t and .packages[0].version==$v' "${TMP}/work-reuse-source/site/state.json" >/dev/null || rc=1
-  grep -Fq "/releases/tag/${PAGE_TAG}" "${TMP}/work-reuse-source/site/index.html" || rc=1
-  jq -e 'all(.results[]; .ok==true and .verify_downloads==true)' "${TMP}/work-reuse-source/verify/summary.json" >/dev/null || rc=1
-  record_rc update_page_new_package_old_apt_verified "${rc}" 0 || true
+  jq -e --arg t "${DERIVED}" --arg v "${VER_FULL}" '.packages[0].release_tag==$t and .packages[0].version==$v' "${TMP}/work-same-source/site/state.json" >/dev/null || rc=1
+  grep -Fq "/releases/tag/${DERIVED}" "${TMP}/work-same-source/site/index.html" || rc=1
+  jq -e 'all(.results[]; .ok==true and .verify_downloads==true)' "${TMP}/work-same-source/verify/summary.json" >/dev/null || rc=1
+  record_rc update_page_and_package_same_tag_verified "${rc}" 0 || true
 fi
 GO_TAG="${saved_tag}"
 
