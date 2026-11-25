@@ -27,7 +27,7 @@ curl -fsSL --proto '=https' --proto-redir '=https' -o add_source.sh 'https://apt
 
 | 软件 | 版本 | 支持环境 | 说明 |
 | --- | --- | --- | --- |
-| [golang](https://github.com/0xdevelop/apt-hub/releases/tag/v0.0.10) | 2:1.27.4-1+0.0.10 | jammy, noble, resolute, stonking · amd64, arm64 | Go 官方 Linux 归档构建的工具链 |
+| [golang](https://github.com/0xdevelop/apt-hub/releases/tag/v0.0.12) | 2:1.27.4-1+0.0.12 | jammy, noble, resolute, stonking · amd64, arm64 | Go 官方 Linux 归档构建的工具链 |
 | [rustdesk](https://github.com/rustdesk/rustdesk/releases/tag/1.5.3) | 1.5.3 | jammy, noble, resolute, stonking · amd64, arm64 | 开源远程桌面 |
 <!-- APT-HUB:PACKAGES:END -->
 
