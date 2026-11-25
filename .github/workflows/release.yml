@@ -30,6 +30,7 @@ jobs:
     outputs:
       release_tag: ${{ steps.tag.outputs.release_tag }}
       build_packages: ${{ steps.tag.outputs.build_packages }}
+      reuse_from_tag: ${{ steps.tag.outputs.reuse_from_tag }}
       package_release_tag: ${{ steps.tag.outputs.package_release_tag }}
       go_version: ${{ steps.tag.outputs.go_version }}
       source_sha: ${{ steps.tag.outputs.source_sha }}
@@ -87,7 +88,12 @@ jobs:
           bump_release=$(awk -F= '$1=="bump_release"{print $2}' tmp/release-plan)
           package_tag=$(awk -F= '$1=="package_release_tag"{print $2}' tmp/release-plan)
           go_version=$(awk -F= '$1=="go_version"{print $2}' tmp/release-plan)
+          reuse_from_tag=$(awk -F= '$1=="reuse_from_tag"{print $2}' tmp/release-plan)
           [[ "${build_packages}" =~ ^[01]$ && "${bump_release}" =~ ^[01]$ && "${package_tag}" == "${tag}" && "${package_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+          if [[ -n "${reuse_from_tag}" ]]; then
+            [[ "${build_packages}" == 0 && "${bump_release}" == 0 && "${reuse_from_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+            dpkg --compare-versions "${reuse_from_tag#v}" lt "${tag#v}" || exit 1
+          fi
           if [[ "${bump_release}" == 1 ]]; then
             actor=$(gh api "users/${GITHUB_ACTOR}")
             login=$(jq -er '.login' <<<"${actor}")
@@ -98,9 +104,10 @@ jobs:
             GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0="${login}" GIT_CONFIG_KEY_1=user.email GIT_CONFIG_VALUE_1="${actor_id}+${login}@users.noreply.github.com" bash git_tag.sh
             tag="v$(tr -d '[:space:]' <VERSION)"
             package_tag="${tag}"
+            reuse_from_tag=""
             source_sha=$(git rev-parse HEAD)
           fi
-          printf 'release_tag=%s\npackage_release_tag=%s\ngo_version=%s\nbuild_packages=%s\nsource_sha=%s\n' "${tag}" "${package_tag}" "${go_version}" "${build_packages}" "${source_sha}" >>"$GITHUB_OUTPUT"
+          printf 'release_tag=%s\npackage_release_tag=%s\ngo_version=%s\nbuild_packages=%s\nreuse_from_tag=%s\nsource_sha=%s\n' "${tag}" "${package_tag}" "${go_version}" "${build_packages}" "${reuse_from_tag}" "${source_sha}" >>"$GITHUB_OUTPUT"
 
       - name: 本仓 vtag Release
         uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1
@@ -164,11 +171,34 @@ jobs:
           scripts/release_assets.sh local-status --asset-dir ./build/upload_tmp_dir || exit $?
           scripts/release_assets.sh stage-upload --repository "${REPOSITORY}" --tag "${TAG}" --asset-dir ./build/upload_tmp_dir --output-dir tmp/missing-assets >>"$GITHUB_OUTPUT"
 
+      - name: 复用已核验旧 Release 资产
+        id: reuse
+        if: needs.release.outputs.build_packages == '0' && needs.release.outputs.reuse_from_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ needs.release.outputs.release_tag }}
+          PACKAGE_RELEASE_TAG: ${{ needs.release.outputs.package_release_tag }}
+          REUSE_FROM_TAG: ${{ needs.release.outputs.reuse_from_tag }}
+          GO_VERSION: ${{ needs.release.outputs.go_version }}
+        run: |
+          set -euo pipefail
+          chmod a+x scripts/release_assets.sh
+          [[ "${PACKAGE_RELEASE_TAG}" == "${TAG}" ]] || exit 1
+          [[ "${REUSE_FROM_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+          [[ "${GO_VERSION}" =~ ^go[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+          dpkg --compare-versions "${REUSE_FROM_TAG#v}" lt "${TAG#v}" || exit 1
+          mkdir -p tmp
+          curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 120 --retry 2 'https://go.dev/dl/?mode=json&include=all' -o tmp/go-downloads.json
+          scripts/release_assets.sh prepare-reuse --repository "${REPOSITORY}" --source-tag "${REUSE_FROM_TAG}" --tag "${TAG}" --downloads-json tmp/go-downloads.json --asset-dir ./build/upload_tmp_dir || exit $?
+          scripts/release_assets.sh local-status --repository "${REPOSITORY}" --tag "${TAG}" --asset-dir ./build/upload_tmp_dir || exit $?
+          scripts/release_assets.sh stage-upload --repository "${REPOSITORY}" --tag "${TAG}" --asset-dir ./build/upload_tmp_dir --output-dir tmp/missing-assets >>"$GITHUB_OUTPUT"
+
       - name: 上传构造包
-        if: steps.assets.outputs.upload == '1'
+        if: steps.assets.outputs.upload == '1' || steps.reuse.outputs.upload == '1'
         uses: george012/upload_github_release_assets_action@b56f61e7a10692c6ee2d7482b451911393479030
         with:
-          path: ${{ steps.assets.outputs.upload_path }}
+          path: ${{ steps.assets.outputs.upload_path || steps.reuse.outputs.upload_path }}
           tag_name: ${{ needs.release.outputs.release_tag }}
           token: ${{ github.token }}
           fail_on_unmatched_files: true

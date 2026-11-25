@@ -17,9 +17,10 @@ usage() {
   cat >&2 <<'EOF'
 用法:
   scripts/release_assets.sh plan --repository <owner/repo> --tag <vX.Y.Z> [--previous-state <state.json>]
+  scripts/release_assets.sh prepare-reuse --repository <owner/repo> --source-tag <vX.Y.Z> --tag <vX.Y.Z> --downloads-json <文件> --asset-dir <目录>
   scripts/release_assets.sh stage-upload --repository <owner/repo> --tag <vX.Y.Z> --asset-dir <目录> --output-dir <全新tmp子目录>
   scripts/release_assets.sh remote-status --repository <owner/repo> --tag <vX.Y.Z> [--source-tag]
-  scripts/release_assets.sh local-status --asset-dir <目录>
+  scripts/release_assets.sh local-status --asset-dir <目录> [--repository <owner/repo> --tag <vX.Y.Z>]
   scripts/release_assets.sh prepare-archives --go-version <goX.Y.Z> --downloads-json <文件> --archive-dir <目录>
 退出: 0 已完整，或 catalog 无需构造；10 远端没有构造包；1 不完整、不一致或查询失败。
 EOF
@@ -64,9 +65,39 @@ expected_go_revision() {
   printf '%s\n' "${rev}"
 }
 
+validate_provenance_reuse_json() {
+  local prov="$1" expected_repo="${2:-}" expected_target_tag="${3:-}"
+  if ! jq -e 'has("reused_from")' "${prov}" >/dev/null; then
+    return 0
+  fi
+  jq -e '
+    (.reused_from | type=="object")
+    and ((.reused_from | keys | sort) == ["origin_release_tag","repository","source_provenance_sha256","source_release_tag","target_release_tag"])
+    and (.reused_from.repository | type=="string" and test("^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$"))
+    and (.reused_from.origin_release_tag | type=="string" and test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+    and (.reused_from.source_release_tag | type=="string" and test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+    and (.reused_from.target_release_tag | type=="string" and test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+    and (.reused_from.source_provenance_sha256 | type=="string" and test("^[0-9a-f]{64}$"))
+  ' "${prov}" >/dev/null || die "来源 reused_from 结构非法"
+  local reuse_repo origin_tag source_tag target_tag
+  reuse_repo="$(jq -r '.reused_from.repository' "${prov}")"
+  origin_tag="$(jq -r '.reused_from.origin_release_tag' "${prov}")"
+  source_tag="$(jq -r '.reused_from.source_release_tag' "${prov}")"
+  target_tag="$(jq -r '.reused_from.target_release_tag' "${prov}")"
+  dpkg --compare-versions "${origin_tag#v}" le "${source_tag#v}" || die "来源 reused_from origin_release_tag 晚于 source_release_tag"
+  dpkg --compare-versions "${source_tag#v}" lt "${target_tag#v}" || die "来源 reused_from source_release_tag 必须早于 target_release_tag"
+  if [[ -n "${expected_repo}" && "${reuse_repo}" != "${expected_repo}" ]]; then
+    die "来源 reused_from.repository 与发布仓库不符: ${reuse_repo}"
+  fi
+  if [[ -n "${expected_target_tag}" && "${target_tag}" != "${expected_target_tag}" ]]; then
+    die "来源 reused_from.target_release_tag 与目标标签不符: ${target_tag}"
+  fi
+}
+
 # 目录内文件与 SHA256SUMS、来源、catalog、go 配置一致则返回，否则 die。不访问远端。
+# match_current_config=1（默认）对齐当前 config/go.json；0 仅校验历史来源自身一致性。
 validate_constructed_dir() {
-  local dl="$1" work="$2" expected_revision="${3:-}"
+  local dl="$1" work="$2" expected_revision="${3:-}" expected_repo="${4:-}" expected_tag="${5:-}" match_current_config="${6:-1}"
   local catalog gocfg cat_id pkg epoch rev prov prov_n prov_base base_rev
   [[ -d "${dl}" && ! -L "${dl}" ]] || die "asset-dir 不是目录"
   if find "${dl}" -mindepth 1 -maxdepth 1 ! -type f -print -quit | grep -q .; then
@@ -90,19 +121,6 @@ validate_constructed_dir() {
   catalog="${ROOT}/config/packages.json"
   gocfg="${ROOT}/config/go.json"
   [[ -f "${catalog}" && ! -L "${catalog}" && -f "${gocfg}" && ! -L "${gocfg}" ]] || die "缺少 catalog 或 go 配置"
-  jq -e --slurpfile go "${gocfg}" '
-    ([.packages[] | select(.source_type=="go_official_archive")] | length) == 1
-    and (([.packages[] | select(.source_type=="go_official_archive")][0].package) == $go[0].package)
-    and (([.packages[] | select(.source_type=="go_official_archive")][0].architectures | keys | sort)
-         == ($go[0].architectures | sort))
-    and ($go[0].epoch | type=="string" and test("^[0-9]+$"))
-    and ($go[0].revision | type=="string" and test("^[0-9]+$"))
-    and ($go[0].architectures | type=="array" and length>0)
-  ' "${catalog}" >/dev/null || die "catalog 与 go 配置组合不一致"
-  pkg="$(jq -r '.package' "${gocfg}")"
-  epoch="$(jq -r '.epoch' "${gocfg}")"
-  base_rev="$(expected_go_revision)"
-  rev="${expected_revision:-${base_rev}}"
   cat_id="$(jq -r '[.packages[] | select(.source_type=="go_official_archive")][0].id' "${catalog}")"
   [[ "${cat_id}" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || die "catalog id 非法"
   prov="${dl}/${cat_id}.provenance.json"
@@ -110,22 +128,56 @@ validate_constructed_dir() {
   prov_n="$(find "${dl}" -maxdepth 1 -type f -name '*.provenance.json' | wc -l | tr -d ' ')"
   [[ "${prov_n}" -eq 1 ]] || die "来源文件必须恰好一个"
   prov_base="$(basename -- "${prov}")"
-  jq -e --arg pkg "${pkg}" --arg epoch "${epoch}" --arg rev "${rev}" --slurpfile go "${gocfg}" '
-    . as $root
-    | ($go[0].architectures | sort) as $archs
-    | ([$pkg] | unique | sort) as $names
-    | ([$names[] as $n | $archs[] as $a | "\($n)|\($a)"] | sort) as $want
-    | ([.packages[] | "\(.package)|\(.architecture)"] | sort) as $got
-    | ($names | length) == 1
-    and ($root.schema_version=="1")
-    and ($root.upstream.epoch==$epoch)
-    and ($root.upstream.revision==$rev)
-    and ($root.upstream.version_debian | type=="string" and length>0)
-    and (([.packages[].filename] | unique | length) == (.packages | length))
-    and ($got == $want)
-    and all(.packages[];
+  if [[ "${match_current_config}" -eq 1 ]]; then
+    jq -e --slurpfile go "${gocfg}" '
+      ([.packages[] | select(.source_type=="go_official_archive")] | length) == 1
+      and (([.packages[] | select(.source_type=="go_official_archive")][0].package) == $go[0].package)
+      and (([.packages[] | select(.source_type=="go_official_archive")][0].architectures | keys | sort)
+           == ($go[0].architectures | sort))
+      and ($go[0].epoch | type=="string" and test("^[0-9]+$"))
+      and ($go[0].revision | type=="string" and test("^[0-9]+$"))
+      and ($go[0].architectures | type=="array" and length>0)
+    ' "${catalog}" >/dev/null || die "catalog 与 go 配置组合不一致"
+    pkg="$(jq -r '.package' "${gocfg}")"
+    epoch="$(jq -r '.epoch' "${gocfg}")"
+    base_rev="$(expected_go_revision)"
+    rev="${expected_revision:-${base_rev}}"
+    jq -e --arg pkg "${pkg}" --arg epoch "${epoch}" --arg rev "${rev}" --slurpfile go "${gocfg}" '
+      . as $root
+      | ($go[0].architectures | sort) as $archs
+      | ([$pkg] | unique | sort) as $names
+      | ([$names[] as $n | $archs[] as $a | "\($n)|\($a)"] | sort) as $want
+      | ([.packages[] | "\(.package)|\(.architecture)"] | sort) as $got
+      | ($names | length) == 1
+      and ($root.schema_version=="1")
+      and ($root.upstream.epoch==$epoch)
+      and ($root.upstream.revision==$rev)
+      and ($root.upstream.version_debian | type=="string" and length>0)
+      and (([.packages[].filename] | unique | length) == (.packages | length))
+      and ($got == $want)
+      and all(.packages[];
+          .version == ($root.upstream.epoch + ":" + $root.upstream.version_debian + "-" + $root.upstream.revision))
+    ' "${prov}" >/dev/null || die "来源与规定组合不一致"
+  else
+    jq -e '
+      . as $root
+      | .schema_version=="1"
+      and (.build_inputs_sha256 | type=="string" and test("^[0-9a-f]{64}$"))
+      and (.upstream.version | type=="string" and test("^go[0-9]+\\.[0-9]+\\.[0-9]+$"))
+      and (.upstream.version_debian | type=="string" and length>0)
+      and (.upstream.epoch | type=="string" and test("^[0-9]+$"))
+      and (.upstream.revision | type=="string" and test("^[1-9][0-9]*$"))
+      and (.packages | type=="array" and length>0)
+      and (([.packages[].filename] | unique | length) == (.packages | length))
+      and (([.packages[] | "\(.package)|\(.architecture)"] | unique | length) == (.packages | length))
+      and (([.packages[].package] | unique | length) == 1)
+      and all(.packages[];
         .version == ($root.upstream.epoch + ":" + $root.upstream.version_debian + "-" + $root.upstream.revision))
-  ' "${prov}" >/dev/null || die "来源与规定组合不一致"
+    ' "${prov}" >/dev/null || die "来源 provenance 结构或包版本组合非法"
+    pkg="$(jq -r '.packages[0].package' "${prov}")"
+    epoch="$(jq -r '.upstream.epoch' "${prov}")"
+    rev="$(jq -r '.upstream.revision' "${prov}")"
+  fi
   local up_deb_ver row filename row_pkg row_ver row_arch row_sha row_size got_size got_sha rev_re
   up_deb_ver="$(jq -er '.upstream.version_debian' "${prov}")" || die "来源 version_debian 缺失"
   while IFS= read -r row; do
@@ -157,6 +209,7 @@ validate_constructed_dir() {
     | awk -v p="${prov_base}" '$0 != "SHA256SUMS" && $0 != p' \
     | LC_ALL=C sort >"${work}/disk.rest"
   cmp -s "${work}/disk.rest" "${work}/prov.names" || die "目录文件与来源清单不一致"
+  validate_provenance_reuse_json "${prov}" "${expected_repo}" "${expected_tag}"
 }
 
 prepare_work() {
@@ -209,16 +262,85 @@ download_remote_file() {
     || die "资产字节与 Release 不符: ${name}"
 }
 
+latest_go_version_from_downloads_json() {
+  local index="$1" latest="" v
+  jq -er 'if type=="array" and length>0 then .[]|select(.stable==true)|.version else error("bad index") end' "${index}" >"${WORK_DIR}/stable.txt" || die "Go stable 索引非法"
+  while IFS= read -r v; do
+    if [[ "${v}" =~ ^go[0-9]+(\.[0-9]+)?$ ]]; then continue; fi
+    [[ "${v}" =~ ^go[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "Go stable 版本非法"
+    if [[ -z "${latest}" ]] || dpkg --compare-versions "${v#go}" gt "${latest#go}"; then latest="${v}"; fi
+  done <"${WORK_DIR}/stable.txt"
+  [[ -n "${latest}" ]] || die "Go stable 索引为空"
+  printf '%s\n' "${latest}"
+}
+
+cross_check_provenance_against_downloads() {
+  local prov="$1" index="$2"
+  jq -e --slurpfile p "${prov}" '
+    . as $index | all($p[0].packages[]; . as $pkg |
+      any($index[]; .version==$p[0].upstream.version and
+        any(.files[]; .arch==$pkg.architecture and .os=="linux" and .kind=="archive"
+          and ("https://go.dev/dl/"+.filename)==$pkg.upstream.url
+          and .sha256==$pkg.upstream.sha256 and (.size|tostring)==($pkg.upstream.size|tostring))))
+  ' "${index}" >/dev/null || die "已发布 Go 来源与当前官方归档不符"
+}
+
 # 完整来源按其自己的标签修订校验，不把当前页面版本混入包版本。
 verified_release_dir() {
-  local body="$1" tag="$2" dir="$3" name revision
+  local body="$1" tag="$2" dir="$3" repository="${4:-}" name revision
   mkdir -p "${dir}"
   while IFS= read -r name; do
     download_remote_file "${body}" "${name}" "${dir}/${name}"
   done < <(jq -r '.assets[].name' "${body}")
   revision=$(jq -er '.upstream.revision' "${dir}/golang.provenance.json") || die "来源修订缺失"
   [[ "${revision}" == "$(expected_go_revision)" ]] || die "来源修订与包配置不符: ${tag}"
-  validate_constructed_dir "${dir}" "${WORK_DIR}" "${revision}"
+  validate_constructed_dir "${dir}" "${WORK_DIR}" "${revision}" "${repository}" "${tag}"
+}
+
+# 校验历史可复用来源 Release 的完整性（使用其自身 provenance 的 epoch/revision/architectures）。
+verify_reuse_source_dir() {
+  local repository="$1" source_tag="$2" body="$3" dir="$4" name
+  mkdir -p -- "${dir}"
+  validate_remote_assets "${body}" "${repository}" "${source_tag}"
+  jq -e '.assets|any(.name=="golang.provenance.json")' "${body}" >/dev/null || die "来源 Release 缺少 golang.provenance.json: ${source_tag}"
+  jq -e '.assets|any(.name=="SHA256SUMS")' "${body}" >/dev/null || die "来源 Release 缺少 SHA256SUMS: ${source_tag}"
+  while IFS= read -r name; do
+    download_remote_file "${body}" "${name}" "${dir}/${name}"
+  done < <(jq -r '.assets[].name' "${body}")
+  validate_constructed_dir "${dir}" "${WORK_DIR}" "" "${repository}" "${source_tag}" 0
+}
+
+check_reuse_source_matches_current() {
+  local src_dir="$1" index="$2" latest="$3" fingerprint="$4" base_rev="$5" repository="$6" source_tag="$7" previous_version="${8:-}"
+  local prov="${src_dir}/golang.provenance.json"
+  local old_upstream old_inputs old_rev old_epoch cfg_epoch selected_version
+  old_upstream=$(jq -er '.upstream.version' "${prov}") || die "来源 Go 版本非法"
+  old_inputs=$(jq -er '.build_inputs_sha256' "${prov}") || die "来源构包输入缺失"
+  old_rev=$(jq -er '.upstream.revision' "${prov}") || die "来源修订缺失"
+  old_epoch=$(jq -er '.upstream.epoch' "${prov}") || die "来源 epoch 缺失"
+  cfg_epoch=$(jq -er '.epoch' "${ROOT}/config/go.json") || die "读取 config/go.json epoch 失败"
+  selected_version=$(jq -er '.packages[0].version' "${prov}") || die "来源包版本缺失"
+  dpkg --compare-versions "${old_upstream#go}" le "${latest#go}" || die "官方索引版本回退，拒绝复用旧包"
+  if [[ -n "${previous_version}" ]] && dpkg --compare-versions "${selected_version}" lt "${previous_version}"; then
+    die "拒绝退回已发布的较低 Go 包版本"
+  fi
+  if [[ "${old_inputs}" != "${fingerprint}" || "${old_upstream}" != "${latest}" || "${old_rev}" != "${base_rev}" || "${old_epoch}" != "${cfg_epoch}" ]]; then
+    return 1
+  fi
+  if ! jq -e --slurpfile go "${ROOT}/config/go.json" --slurpfile cat "${ROOT}/config/packages.json" '
+    ($cat[0].packages | map(select(.source_type=="go_official_archive"))) as $gocat
+    | ($gocat | length) == 1
+    and (. as $p
+      | ($gocat[0].package == $go[0].package)
+      and (($gocat[0].architectures | keys | sort) == ($go[0].architectures | sort))
+      and ([$p.packages[].package] | unique == [$go[0].package])
+      and ([$p.packages[].architecture] | sort == ($go[0].architectures | sort)))
+  ' "${prov}" >/dev/null; then
+    return 1
+  fi
+  cross_check_provenance_against_downloads "${prov}" "${index}"
+  validate_constructed_dir "${src_dir}" "${WORK_DIR}" "${base_rev}" "${repository}" "${source_tag}"
+  return 0
 }
 
 plan_release() {
@@ -237,30 +359,23 @@ plan_release() {
   read_catalog
   prepare_work
   if [[ "${CONSTRUCT_N}" -eq 0 ]]; then
-    printf 'build_packages=0\nbump_release=0\npackage_release_tag=%s\ngo_version=\n' "${tag}"
+    printf 'build_packages=0\nbump_release=0\npackage_release_tag=%s\ngo_version=\nreuse_from_tag=\n' "${tag}"
     return 0
   fi
   require_tool gh
   require_tool curl
-  local index="${WORK_DIR}/downloads.json" latest="" v fingerprint current="${WORK_DIR}/current.json" source_tag="${tag}" source
+  require_tool sha256sum
+  require_tool dpkg-deb
+  local index="${WORK_DIR}/downloads.json" latest="" fingerprint current="${WORK_DIR}/current.json" source_tag="${tag}" source
   curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 120 --retry 2 -o "${index}" 'https://go.dev/dl/?mode=json&include=all' || die "获取 Go 官方索引失败"
-  jq -er 'if type=="array" and length>0 then .[]|select(.stable==true)|.version else error("bad index") end' "${index}" >"${WORK_DIR}/stable.txt" || die "Go stable 索引非法"
-  while IFS= read -r v; do
-    if [[ "${v}" =~ ^go[0-9]+(\.[0-9]+)?$ ]]; then continue; fi
-    [[ "${v}" =~ ^go[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "Go stable 版本非法"
-    if [[ -z "${latest}" ]] || dpkg --compare-versions "${v#go}" gt "${latest#go}"; then latest="${v}"; fi
-  done <"${WORK_DIR}/stable.txt"
-  [[ -n "${latest}" ]] || die "Go stable 索引为空"
+  latest=$(latest_go_version_from_downloads_json "${index}")
   fingerprint=$(build_inputs_sha256) || die "计算构包输入失败"
-  local previous_version=""
+  local previous_version="" old_tag="" old_repo=""
   if [[ -n "${previous_state}" ]]; then
     [[ -f "${previous_state}" && ! -L "${previous_state}" ]] || die "previous-state 不是普通文件"
     jq -e '.schema_version=="2" and (.packages|type)=="array" and ([.packages[]|select(.id=="golang")]|length)<=1' "${previous_state}" >/dev/null || die "previous-state 结构非法"
     previous_version=$(jq -r '.packages[]|select(.id=="golang")|.version' "${previous_state}")
     [[ -z "${previous_version}" ]] || dpkg --validate-version "${previous_version}" || die "previous Go 版本非法"
-  fi
-  if [[ -n "${previous_state}" ]]; then
-    local old_tag old_repo
     old_tag=$(jq -r '.packages[]|select(.id=="golang")|.release_tag // empty' "${previous_state}") || die "previous-state 非法"
     old_repo=$(jq -r '.packages[]|select(.id=="golang")|.package_repository // empty' "${previous_state}") || die "previous-state 非法"
     if [[ -n "${old_tag}" ]]; then
@@ -276,9 +391,11 @@ plan_release() {
   source="${current}"
   source_tag="${tag}"
   local count="${current_count}" prov="${WORK_DIR}/provenance.json" upstream="" inputs="" prov_rev="" base_rev="" complete=0 pinned="${latest}" bump=0
+  local has_prov=0 prov_reused_src=""
   base_rev=$(expected_go_revision)
   if [[ "${count}" -gt 0 ]]; then
     if jq -e '.assets|any(.name=="golang.provenance.json")' "${source}" >/dev/null; then
+      has_prov=1
       download_remote_file "${source}" golang.provenance.json "${prov}"
       upstream=$(jq -er '.upstream.version|select(test("^go[0-9]+\\.[0-9]+\\.[0-9]+$"))' "${prov}") || die "来源 Go 版本非法"
       inputs=$(jq -r '.build_inputs_sha256 // empty' "${prov}") || die "来源构包输入非法"
@@ -289,21 +406,23 @@ plan_release() {
       expected_count=$(jq '.architectures|length+2' "${ROOT}/config/go.json")
       if [[ "${count}" -eq "${expected_count}" ]] && jq -e '.assets|any(.name=="SHA256SUMS")' "${source}" >/dev/null; then complete=1; fi
       if [[ "${inputs}" == "${fingerprint}" && "${complete}" -eq 1 && "${upstream}" == "${latest}" ]]; then
-        jq -e --slurpfile p "${prov}" '
-          . as $index | all($p[0].packages[]; . as $pkg |
-            any($index[]; .version==$p[0].upstream.version and
-              any(.files[]; .arch==$pkg.architecture and .os=="linux" and .kind=="archive"
-                and ("https://go.dev/dl/"+.filename)==$pkg.upstream.url
-                and .sha256==$pkg.upstream.sha256 and (.size|tostring)==($pkg.upstream.size|tostring))))
-        ' "${index}" >/dev/null || die "已发布 Go 来源与当前官方归档不符"
-        verified_release_dir "${source}" "${tag}" "${WORK_DIR}/verified"
+        cross_check_provenance_against_downloads "${prov}" "${index}"
+        verified_release_dir "${source}" "${tag}" "${WORK_DIR}/verified" "${repository}"
         local selected_version
         selected_version=$(jq -er '.packages[0].version' "${prov}") || die "来源包版本缺失"
         if [[ -n "${previous_version}" ]] && dpkg --compare-versions "${selected_version}" lt "${previous_version}"; then die "拒绝退回已发布的较低 Go 包版本"; fi
-        printf 'build_packages=0\nbump_release=0\npackage_release_tag=%s\ngo_version=%s\n' "${tag}" "${upstream}"
+        printf 'build_packages=0\nbump_release=0\npackage_release_tag=%s\ngo_version=%s\nreuse_from_tag=\n' "${tag}" "${upstream}"
         return 0
       fi
-      if [[ "${complete}" -eq 1 || "${inputs}" != "${fingerprint}" ]]; then bump=1; else pinned="${upstream}"; fi
+      if [[ "${complete}" -eq 1 || "${inputs}" != "${fingerprint}" ]]; then
+        bump=1
+      else
+        pinned="${upstream}"
+        if jq -e 'has("reused_from")' "${prov}" >/dev/null; then
+          validate_provenance_reuse_json "${prov}" "${repository}" "${tag}"
+          prov_reused_src=$(jq -r '.reused_from.source_release_tag' "${prov}")
+        fi
+      fi
     else
       jq -r '.assets[].name|select(endswith(".deb"))' "${source}" >"${WORK_DIR}/partial-names.txt"
       if jq -e '.assets|any(.name=="SHA256SUMS")' "${source}" >/dev/null; then
@@ -318,12 +437,39 @@ plan_release() {
       pinned=$(<"${WORK_DIR}/partial-versions.txt")
     fi
   fi
+
+  # 目标 tag 为空，或仅部分上传（含可续接的 reused_from / 无 provenance），且存在更早的已发布 old_tag：
+  # 始终校验 old_tag 资产完整性；构建输入与 Go 版本均未变时跨 tag 复用原字节，不重打包。
+  if [[ "${bump}" -eq 0 && -n "${old_tag}" ]] && dpkg --compare-versions "${old_tag#v}" lt "${tag#v}"; then
+    local can_try_reuse=0
+    if [[ "${count}" -eq 0 ]]; then
+      can_try_reuse=1
+    elif [[ "${has_prov}" -eq 0 && "${pinned}" == "${latest}" ]]; then
+      can_try_reuse=1
+    elif [[ "${has_prov}" -eq 1 && -n "${prov_reused_src}" ]]; then
+      [[ "${prov_reused_src}" == "${old_tag}" ]] || die "部分复用 provenance 与 previous-state 来源标签不一致: ${prov_reused_src} != ${old_tag}"
+      [[ "${pinned}" == "${latest}" ]] && can_try_reuse=1
+    fi
+    if [[ "${can_try_reuse}" -eq 1 ]]; then
+      local old_body="${WORK_DIR}/old.json" old_dir="${WORK_DIR}/old-verified"
+      fetch_release "${old_repo}" "${old_tag}" "${old_body}" || die "来源 Release 不存在或读取失败: ${old_tag}"
+      verify_reuse_source_dir "${old_repo}" "${old_tag}" "${old_body}" "${old_dir}"
+      if check_reuse_source_matches_current "${old_dir}" "${index}" "${latest}" "${fingerprint}" "${base_rev}" "${old_repo}" "${old_tag}" "${previous_version}"; then
+        printf 'build_packages=0\nbump_release=0\npackage_release_tag=%s\ngo_version=%s\nreuse_from_tag=%s\n' "${tag}" "${latest}" "${old_tag}"
+        return 0
+      fi
+      if [[ -n "${prov_reused_src}" ]]; then
+        die "部分复用目标已绑定 ${old_tag} 但当前输入或 Go 已变化"
+      fi
+    fi
+  fi
+
   if [[ -n "${previous_version}" ]]; then
     local candidate_version
     candidate_version="$(jq -er '.epoch' "${ROOT}/config/go.json"):${pinned#go}-${base_rev}"
     if dpkg --compare-versions "${candidate_version}" lt "${previous_version}"; then die "拒绝构造低于已发布的 Go 包版本"; fi
   fi
-  printf 'build_packages=1\nbump_release=%s\npackage_release_tag=%s\ngo_version=%s\n' "${bump}" "${tag}" "${pinned}"
+  printf 'build_packages=1\nbump_release=%s\npackage_release_tag=%s\ngo_version=%s\nreuse_from_tag=\n' "${bump}" "${tag}" "${pinned}"
 }
 
 stage_upload() {
@@ -344,7 +490,7 @@ stage_upload() {
   prepare_work
   local expected_rev
   expected_rev="$(expected_go_revision)"
-  validate_constructed_dir "${asset_dir}" "${WORK_DIR}" "${expected_rev}"
+  validate_constructed_dir "${asset_dir}" "${WORK_DIR}" "${expected_rev}" "${repository}" "${tag}"
   local resolved name remote sha size body="${WORK_DIR}/release.json" part prefix=""
   [[ -n "${output}" && "${output}" != *$'\n'* ]] || die "上传目录为空或非法"
   case "/${output}/" in */../*|*/./*) die "上传目录不能含 . 或 .." ;; esac
@@ -468,7 +614,7 @@ remote_status() {
     local revision
     revision=$(jq -er '.upstream.revision' "${dl}/golang.provenance.json") || die "来源修订缺失"
     [[ "${revision}" == "$(expected_go_revision)" ]] || die "来源修订与包配置不符"
-    validate_constructed_dir "${dl}" "${WORK_DIR}" "${revision}"
+    validate_constructed_dir "${dl}" "${WORK_DIR}" "${revision}" "${repository}" "${tag}"
   else
     validate_constructed_dir "${dl}" "${WORK_DIR}"
   fi
@@ -477,14 +623,22 @@ remote_status() {
 }
 
 local_status() {
-  local asset_dir=""
+  local asset_dir="" repository="" tag=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --asset-dir) [[ $# -ge 2 ]] || usage; asset_dir="$2"; shift 2 ;;
+      --repository) [[ $# -ge 2 ]] || usage; repository="$2"; shift 2 ;;
+      --tag) [[ $# -ge 2 ]] || usage; tag="$2"; shift 2 ;;
       *) die "未知参数: $1" ;;
     esac
   done
   [[ -n "${asset_dir}" ]] || usage
+  if [[ -n "${repository}" ]]; then
+    [[ "${repository}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || die "repository 非法"
+  fi
+  if [[ -n "${tag}" ]]; then
+    [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "tag 必须是严格 vX.Y.Z"
+  fi
   read_catalog
   if [[ "${CONSTRUCT_N}" -eq 0 ]]; then
     die "无可构造条目"
@@ -492,9 +646,129 @@ local_status() {
   require_tool sha256sum
   require_tool dpkg-deb
   prepare_work
-  validate_constructed_dir "${asset_dir}" "${WORK_DIR}"
+  validate_constructed_dir "${asset_dir}" "${WORK_DIR}" "" "${repository}" "${tag}"
   printf 'release_assets.sh: 本地构造集完整\n'
   exit 0
+}
+
+resolve_reuse_asset_dir() {
+  local raw="$1" abs parent base parent_abs root_tmp="${ROOT}/tmp"
+  [[ -n "${raw}" ]] || die "缺少 asset-dir"
+  case "/${raw}/" in */../*|*/./*) die "asset-dir 不能含 . 或 .." ;; esac
+  if [[ "${raw}" != /* ]]; then
+    abs="${PWD%/}/${raw}"
+  else
+    abs="${raw%/}"
+  fi
+  mkdir -p -- "${root_tmp}"
+  [[ -d "${root_tmp}" && ! -L "${root_tmp}" ]] || die "项目 tmp 不可用"
+  parent="$(dirname -- "${abs}")"
+  base="$(basename -- "${abs}")"
+  [[ "${base}" != "." && "${base}" != ".." && "${base}" != "/" ]] || die "asset-dir 非法目录名"
+  if [[ "${abs}" == "${ROOT}/build/upload_tmp_dir" ]]; then
+    mkdir -p -- "${ROOT}/build"
+    [[ ! -L "${ROOT}/build" ]] || die "build 不能是符号链接"
+  fi
+  [[ -d "${parent}" && ! -L "${parent}" ]] || die "asset-dir 父目录不存在"
+  local part prefix=""
+  local -a parts
+  IFS=/ read -r -a parts <<<"${parent#/}"
+  for part in "${parts[@]}"; do
+    prefix="${prefix}/${part}"
+    [[ ! -L "${prefix}" ]] || die "asset-dir 路径含符号链接"
+  done
+  parent_abs="$(realpath -e -- "${parent}")"
+  abs="${parent_abs}/${base}"
+  if [[ "${abs}" != "${ROOT}/build/upload_tmp_dir" ]]; then
+    local tmp_abs
+    tmp_abs="$(realpath -e -- "${root_tmp}")"
+    [[ "${abs}" == "${tmp_abs}/"* && "${abs}" != "${tmp_abs}" ]] || die "asset-dir 必须是 build/upload_tmp_dir 或项目 tmp 子目录"
+  fi
+  if [[ -L "${abs}" ]]; then
+    die "asset-dir 不能是符号链接"
+  fi
+  if [[ -e "${abs}" ]]; then
+    [[ -d "${abs}" ]] || die "asset-dir 已存在且不是目录"
+    if [[ -n "$(find -- "${abs}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+      die "asset-dir 非空，拒绝覆盖: ${abs}"
+    fi
+  fi
+  printf '%s\n' "${abs}"
+}
+
+prepare_reuse() {
+  local repository="" source_tag="" tag="" downloads_json="" asset_dir=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --repository) [[ $# -ge 2 ]] || usage; repository="$2"; shift 2 ;;
+      --source-tag) [[ $# -ge 2 ]] || usage; source_tag="$2"; shift 2 ;;
+      --tag) [[ $# -ge 2 ]] || usage; tag="$2"; shift 2 ;;
+      --downloads-json) [[ $# -ge 2 ]] || usage; downloads_json="$2"; shift 2 ;;
+      --asset-dir) [[ $# -ge 2 ]] || usage; asset_dir="$2"; shift 2 ;;
+      *) die "未知参数: $1" ;;
+    esac
+  done
+  [[ "${repository}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || die "repository 非法"
+  [[ "${source_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "source-tag 非法"
+  [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "tag 非法"
+  dpkg --compare-versions "${source_tag#v}" lt "${tag#v}" || die "复用来源标签必须早于目标标签"
+  [[ -n "${downloads_json}" && -f "${downloads_json}" && ! -L "${downloads_json}" ]] || die "downloads-json 不是普通文件"
+  read_catalog
+  [[ "${CONSTRUCT_N}" -eq 1 ]] || die "当前 catalog 无需构包或复用"
+  require_tool gh
+  require_tool curl
+  require_tool sha256sum
+  require_tool dpkg-deb
+  require_tool realpath
+  prepare_work
+  local resolved_dest
+  resolved_dest="$(resolve_reuse_asset_dir "${asset_dir}")"
+  local latest fingerprint base_rev src_body="${WORK_DIR}/source.json" src_dir="${WORK_DIR}/src-dl" staged="${WORK_DIR}/staged"
+  latest="$(latest_go_version_from_downloads_json "${downloads_json}")"
+  fingerprint="$(build_inputs_sha256)" || die "计算构包输入失败"
+  base_rev="$(expected_go_revision)"
+  fetch_release "${repository}" "${source_tag}" "${src_body}" || die "来源 Release 不存在或读取失败: ${source_tag}"
+  verify_reuse_source_dir "${repository}" "${source_tag}" "${src_body}" "${src_dir}"
+  check_reuse_source_matches_current "${src_dir}" "${downloads_json}" "${latest}" "${fingerprint}" "${base_rev}" "${repository}" "${source_tag}" \
+    || die "构建输入或 Go 上游已变化，拒绝复用旧产物: ${source_tag}"
+  mkdir -p -- "${staged}"
+  local deb_file origin_tag src_prov_sha fname
+  while IFS= read -r deb_file; do
+    install -m 644 -- "${src_dir}/${deb_file}" "${staged}/${deb_file}"
+  done < <(jq -r '.packages[].filename' "${src_dir}/golang.provenance.json" | LC_ALL=C sort)
+  src_prov_sha="$(sha256sum -- "${src_dir}/golang.provenance.json" | awk '{print $1}')"
+  origin_tag="$(jq -r --arg s "${source_tag}" '
+    if (.reused_from.origin_release_tag|type)=="string" and (.reused_from.origin_release_tag|length)>0 then
+      .reused_from.origin_release_tag
+    else
+      $s
+    end
+  ' "${src_dir}/golang.provenance.json")"
+  jq --arg repo "${repository}" \
+    --arg origin "${origin_tag}" \
+    --arg src "${source_tag}" \
+    --arg src_sha "${src_prov_sha}" \
+    --arg tgt "${tag}" \
+    '.reused_from = {
+      repository: $repo,
+      origin_release_tag: $origin,
+      source_release_tag: $src,
+      source_provenance_sha256: $src_sha,
+      target_release_tag: $tgt
+    }' "${src_dir}/golang.provenance.json" >"${staged}/golang.provenance.json"
+  chmod 644 -- "${staged}/golang.provenance.json"
+  (
+    cd -- "${staged}"
+    find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | LC_ALL=C sort \
+      | while IFS= read -r fname; do sha256sum -- "${fname}"; done
+  ) | LC_ALL=C sort -k2 >"${staged}/SHA256SUMS"
+  chmod 644 -- "${staged}/SHA256SUMS"
+  validate_constructed_dir "${staged}" "${WORK_DIR}" "${base_rev}" "${repository}" "${tag}"
+  mkdir -p -- "${resolved_dest}"
+  while IFS= read -r fname; do
+    install -m 644 -- "${staged}/${fname}" "${resolved_dest}/${fname}"
+  done < <(find "${staged}" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
+  printf 'release_assets.sh: reused %s -> %s\n' "${source_tag}" "${tag}"
 }
 
 
@@ -573,6 +847,7 @@ mode="$1"
 shift
 case "${mode}" in
   plan) plan_release "$@" ;;
+  prepare-reuse) prepare_reuse "$@" ;;
   stage-upload) stage_upload "$@" ;;
   remote-status) remote_status "$@" ;;
   local-status) local_status "$@" ;;

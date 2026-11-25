@@ -422,6 +422,31 @@ go_provenance_name_for_tag() {
   die "release tag 非法: ${tag}"
 }
 
+validate_go_provenance_reuse() {
+  local prov="$1" expected_repo="$2" expected_tag="$3"
+  if ! jq -e 'has("reused_from")' "${prov}" >/dev/null; then
+    return 0
+  fi
+  jq -e '
+    (.reused_from | type=="object")
+    and ((.reused_from | keys | sort) == ["origin_release_tag","repository","source_provenance_sha256","source_release_tag","target_release_tag"])
+    and (.reused_from.repository | type=="string" and test("^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$"))
+    and (.reused_from.origin_release_tag | type=="string" and test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+    and (.reused_from.source_release_tag | type=="string" and test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+    and (.reused_from.target_release_tag | type=="string" and test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+    and (.reused_from.source_provenance_sha256 | type=="string" and test("^[0-9a-f]{64}$"))
+  ' "${prov}" >/dev/null || die "Go provenance reused_from 结构非法"
+  local reuse_repo origin_tag source_tag target_tag
+  reuse_repo="$(jq -r '.reused_from.repository' "${prov}")"
+  origin_tag="$(jq -r '.reused_from.origin_release_tag' "${prov}")"
+  source_tag="$(jq -r '.reused_from.source_release_tag' "${prov}")"
+  target_tag="$(jq -r '.reused_from.target_release_tag' "${prov}")"
+  compare_dpkg_versions "${origin_tag#v}" le "${source_tag#v}" || die "Go provenance reused_from origin_release_tag 晚于 source_release_tag"
+  compare_dpkg_versions "${source_tag#v}" lt "${target_tag#v}" || die "Go provenance reused_from source_release_tag 必须早于 target_release_tag"
+  [[ "${reuse_repo}" == "${expected_repo}" ]] || die "Go provenance reused_from.repository 不符: ${reuse_repo}"
+  [[ "${target_tag}" == "${expected_tag}" ]] || die "Go provenance reused_from.target_release_tag 不符: ${target_tag}"
+}
+
 go_expected_deb_version() {
   local prov="$1"
   local ver_deb rev epoch
@@ -520,6 +545,7 @@ reconfirm_retained_upstream_identity() {
       assert_go_release_tag_matches_provenance "${tag}" "${prov_path}"
     else
       go_expected_deb_version "${prov_path}" >/dev/null
+      validate_go_provenance_reuse "${prov_path}" "${asset_repo}" "${tag}"
     fi
     downloads="${scratch}/retained-go-dl-${id}.json"
     load_go_downloads_index "${downloads}"
@@ -1587,6 +1613,7 @@ while IFS= read -r pkgjson; do
     if jq -e 'has("build_inputs_sha256")' "${go_prov_path}" >/dev/null; then
       jq -e '.build_inputs_sha256|type=="string" and test("^[0-9a-f]{64}$")' "${go_prov_path}" >/dev/null || die "构包输入摘要非法"
     fi
+    validate_go_provenance_reuse "${go_prov_path}" "${download_repo}" "${tag}"
     [[ "${derived_rev}" == "$(go_checkout_derived_revision)" ]] || die "Go 修订与 config/go.json 不符"
     cfg_epoch="$(jq -er '.epoch' "${PROJECT_ROOT}/config/go.json")" || die "读取 config/go.json epoch 失败"
     [[ "$(jq -r '.upstream.epoch // empty' "${go_prov_path}")" == "${cfg_epoch}" ]] || die "Go epoch 与 config/go.json 不符"
@@ -1880,7 +1907,17 @@ while IFS= read -r pkgjson; do
     for row in "${asset_rows[@]}"; do
       fn="$(jq -r '.filename' <<<"${row}")"
       sha="$(jq -r '.sha256' <<<"${row}")"
-      oldsha="$(jq -r --arg f "${fn}" '.assets[]?|select(.filename==$f)|.sha256 // empty' <<<"${prev_row}")"
+      bin_pkg="$(jq -r '.package // empty' <<<"${row}")"
+      arch="$(jq -r '.architecture // empty' <<<"${row}")"
+      if [[ -n "${bin_pkg}" && -n "${arch}" ]]; then
+        oldsha="$(jq -r --arg p "${bin_pkg}" --arg a "${arch}" --arg f "${fn}" '
+          (.assets[]? | select(.package==$p and .architecture==$a) | .sha256)
+          // (.assets[]? | select(.filename==$f) | .sha256)
+          // empty
+        ' <<<"${prev_row}")"
+      else
+        oldsha="$(jq -r --arg f "${fn}" '.assets[]?|select(.filename==$f)|.sha256 // empty' <<<"${prev_row}")"
+      fi
       [[ "${oldsha}" == "${sha}" ]] || identical=0
     done
     old_count="$(jq '.assets|length' <<<"${prev_row}")"

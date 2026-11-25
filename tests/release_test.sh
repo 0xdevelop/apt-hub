@@ -780,6 +780,30 @@ if grep -Fxq 'release_assets.sh: 本地构造集完整' "${EVIDENCE}/runs/local-
 else
   fail "local-status 成功语义不对"
 fi
+reuse_bad="${EVIDENCE}/local-reuse-bad"
+rm -rf -- "${reuse_bad}"
+mkdir -p -- "${reuse_bad}"
+cp -a -- "${OUT_BUILD}/." "${reuse_bad}/"
+jq '.reused_from={repository:"example/apt-hub",origin_release_tag:"v0.0.13",source_release_tag:"v0.0.13",source_provenance_sha256:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",target_release_tag:"v0.0.14"}' \
+  "${reuse_bad}/golang.provenance.json" >"${EVIDENCE}/runs/local-reuse.prov"
+mv -f -- "${EVIDENCE}/runs/local-reuse.prov" "${reuse_bad}/golang.provenance.json"
+(
+  cd -- "${reuse_bad}"
+  find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | LC_ALL=C sort \
+    | while IFS= read -r fname; do sha256sum -- "${fname}"; done
+) | LC_ALL=C sort -k2 >"${reuse_bad}/SHA256SUMS"
+set +e
+env -u GH_TOKEN PATH="/usr/bin:/bin" "${ASSETS}" local-status --repository example/apt-hub --tag v0.0.14 --asset-dir "${reuse_bad}" \
+  >"${EVIDENCE}/runs/local-reuse-ok.out" 2>"${EVIDENCE}/runs/local-reuse-ok.err"
+rc=$?
+set -e
+record "local_status_reused_from_match" "${rc}" 0
+set +e
+env -u GH_TOKEN PATH="/usr/bin:/bin" "${ASSETS}" local-status --repository example/apt-hub --tag v0.0.15 --asset-dir "${reuse_bad}" \
+  >"${EVIDENCE}/runs/local-reuse-mismatch.out" 2>"${EVIDENCE}/runs/local-reuse-mismatch.err"
+rc=$?
+set -e
+record "local_status_reused_from_tag_mismatch" "${rc}" 1
 gap="${EVIDENCE}/local-gap"
 rm -rf -- "${gap}"
 mkdir -p -- "${gap}"

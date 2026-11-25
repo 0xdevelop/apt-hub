@@ -495,6 +495,63 @@ shim_assets local1 0 0 1 1
 shim_assets ok 0 0 0 0
 SHIM_PKG_TAG=v0.0.1 shim_assets mismatch 0 0 0 1
 
+reuse_run="${WORK}/reuse-run.sh"
+awk '
+  /^      - / { step = 0; cap = 0 }
+  $0 == "        id: reuse" { step = 1 }
+  step && $0 == "        run: |" { cap = 1; next }
+  cap && substr($0,1,10) == "          " { print substr($0,11); next }
+  cap { exit }
+' "${WF}" >"${reuse_run}"
+# shellcheck disable=SC2016 # 匹配工作流中的原始变量文本
+if [[ -s "${reuse_run}" ]] \
+  && grep -Fq 'reuse_from_tag: ${{ steps.tag.outputs.reuse_from_tag }}' "${WF}" \
+  && grep -Fq 'steps.reuse.outputs.upload == '\''1'\''' "${WF}" \
+  && grep -Fq 'scripts/release_assets.sh prepare-reuse --repository "${REPOSITORY}" --source-tag "${REUSE_FROM_TAG}" --tag "${TAG}" --downloads-json tmp/go-downloads.json --asset-dir ./build/upload_tmp_dir || exit $?' "${reuse_run}" \
+  && grep -Fq 'scripts/release_assets.sh local-status --repository "${REPOSITORY}" --tag "${TAG}" --asset-dir ./build/upload_tmp_dir || exit $?' "${reuse_run}"; then
+  pass '抽出的 reuse run 与 upload 接线完整'
+else
+  fail '抽出的 reuse run 或 upload 接线不符'
+fi
+shim_reuse() {
+  local name="$1" prc="$2" lrc="$3" want="$4" d="${WORK}/shim-reuse-$1" rc=0
+  rm -rf -- "${d}"
+  mkdir -p -- "${d}/scripts" "${d}/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' >"${d}/bin/curl"
+  chmod 755 "${d}/bin/curl"
+  cat >"${d}/scripts/release_assets.sh" <<EOF
+#!/bin/bash
+printf '%s\n' "\$1" >> calls
+[[ "\$1" == prepare-reuse ]] && exit ${prc}
+[[ "\$1" == local-status ]] && exit ${lrc}
+if [[ "\$1" == stage-upload ]]; then printf 'upload=1\\nupload_path=tmp/missing-assets/*\\n'; exit 0; fi
+exit 10
+EOF
+  chmod a+x "${d}/scripts/release_assets.sh"
+  : >"${d}/github_output"
+  set +e
+  (
+    cd -- "${d}"
+    PATH="${d}/bin:${PATH}" GITHUB_OUTPUT="${d}/github_output" REPOSITORY=example/apt-hub TAG=v0.0.3 PACKAGE_RELEASE_TAG="${SHIM_PKG_TAG:-v0.0.3}" REUSE_FROM_TAG="${SHIM_REUSE_TAG:-v0.0.2}" GO_VERSION=go9.9.9 bash "${reuse_run}"
+  ) >"${d}.log" 2>&1
+  rc=$?
+  set -e
+  if [[ "${rc}" -eq "${want}" ]]; then pass "reuse ${name}"; else fail "reuse ${name} rc=${rc}"; fi
+  if [[ "${want}" -eq 0 ]]; then
+    if grep -Fxq 'upload=1' "${d}/github_output"; then pass "reuse ${name} 写 upload=1"; else fail "reuse ${name} 未写 upload=1"; fi
+  elif grep -Fxq 'upload=1' "${d}/github_output"; then
+    fail "reuse ${name} 写了 upload=1"
+  else
+    pass "reuse ${name} 未写 upload=1"
+  fi
+  if [[ "${name}" == prep19 ]] && grep -qx local-status "${d}/calls"; then fail 'prep19 调用了 local-status'; fi
+  if [[ "${name}" == badtag ]] && [[ -e "${d}/calls" ]]; then fail 'badtag 仍调用了 prepare-reuse'; fi
+}
+shim_reuse prep19 19 0 19
+shim_reuse local1 0 1 1
+shim_reuse ok 0 0 0
+SHIM_REUSE_TAG=v0.0.3 shim_reuse badtag 0 0 1
+
 chain="${WORK}/version-chain"
 rm -rf -- "${chain}"
 mkdir -p -- "${chain}/scripts" "${chain}/data" "${chain}/tmp"

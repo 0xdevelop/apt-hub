@@ -11,18 +11,43 @@ cp "${ROOT}/VERSION" "${BASE}/VERSION"
 cat >"${BASE}/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$1" == api ]] || exit 90
-path="$2"
-if [[ "$path" == users/fixture ]]; then
-  printf '%s\n' '{"login":"fixture","id":1,"type":"User"}'
+if [[ "$1" == api ]]; then
+  path="$2"
+  if [[ "$path" == users/fixture ]]; then
+    printf '%s\n' '{"login":"fixture","id":1,"type":"User"}'
+    exit 0
+  fi
+  tag="${path##*/}"
+  if [[ ! -f "${FIXTURE}/api/${tag}.json" ]]; then
+    printf 'gh: Not Found (HTTP 404)\n' >&2
+    exit 1
+  fi
+  cat "${FIXTURE}/api/${tag}.json"
   exit 0
 fi
-tag="${path##*/}"
-if [[ ! -f "${FIXTURE}/api/${tag}.json" ]]; then
-  printf 'gh: Not Found (HTTP 404)\n' >&2
-  exit 1
+if [[ "$1" == release && "$2" == download ]]; then
+  tag="$3"
+  shift 3
+  dir="" pattern=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) dir="$2"; shift 2 ;;
+      --pattern) pattern="$2"; shift 2 ;;
+      --repo) shift 2 ;;
+      --clobber) shift ;;
+      *) shift ;;
+    esac
+  done
+  name="${pattern//%2B/+}"
+  src="${FIXTURE}/assets-by-tag/${tag}/${name}"
+  if [[ ! -f "$src" ]]; then
+    src="${FIXTURE}/assets/${name}"
+  fi
+  [[ -f "$src" ]] || exit 22
+  cp "$src" "${dir}/${name}"
+  exit 0
 fi
-cat "${FIXTURE}/api/${tag}.json"
+exit 90
 EOF
 cat >"${BASE}/bin/curl" <<'EOF'
 #!/usr/bin/env bash
@@ -37,7 +62,18 @@ while [[ $# -gt 0 ]]; do
 done
 case "$url" in
   'https://go.dev/dl/?mode=json'|'https://go.dev/dl/?mode=json&include=all') src="${FIXTURE}/downloads.json" ;;
-  *) name="${url##*/}"; src="${FIXTURE}/assets/${name//%2B/+}" ;;
+  *)
+    name="${url##*/}"
+    name="${name//%2B/+}"
+    rest="${url%/releases/download/*}"
+    tag_part="${url##*/releases/download/}"
+    tag_part="${tag_part%%/*}"
+    if [[ -f "${FIXTURE}/assets-by-tag/${tag_part}/${name}" ]]; then
+      src="${FIXTURE}/assets-by-tag/${tag_part}/${name}"
+    else
+      src="${FIXTURE}/assets/${name}"
+    fi
+    ;;
 esac
 [[ -f "$src" ]] || exit 22
 if [[ -n "$out" ]]; then cp "$src" "$out"; else cat "$src"; fi
@@ -145,13 +181,110 @@ for round in 1 2; do
   grep -Fxq bump_release=0 "${BASE}/repeat-${round}.out"
 done
 printf 'PASS 连续两轮未变化均不重构、不升版\n'
+mkdir -p "${BASE}/assets-by-tag/${tag}"
+cp -a "${BASE}/assets/." "${BASE}/assets-by-tag/${tag}/"
 jq --arg tag "$tag" --arg ver "2:9.9.9-${fixture_revision}" '{schema_version:"2",packages:[{id:"golang",release_tag:$tag,package_repository:"example/apt-hub",version:$ver}]}' <<<null >"${BASE}/previous-state.json"
 GH_TOKEN=fixture bash "${BASE}/scripts/release_assets.sh" plan --repository example/apt-hub --tag v8.0.0 --previous-state "${BASE}/previous-state.json" >"${BASE}/new-target.out"
-grep -Fxq build_packages=1 "${BASE}/new-target.out"
+grep -Fxq build_packages=0 "${BASE}/new-target.out"
 grep -Fxq bump_release=0 "${BASE}/new-target.out"
 grep -Fxq package_release_tag=v8.0.0 "${BASE}/new-target.out"
 grep -Fxq go_version=go9.9.9 "${BASE}/new-target.out"
-printf 'PASS 新目标版即使同Go同输入也要求产本版资产，不跨版本复用旧tag\n'
+grep -Fxq "reuse_from_tag=${tag}" "${BASE}/new-target.out"
+printf 'PASS 同输入不同release tag进入跨版本复用计划，不重新打包/涨revision\n'
+
+# 真实生产函数：prepare-reuse + local-status + stage-upload + remote-status（新 tag 完整四资产，deb 原字节一致，provenance 区分原构建与复用）
+jq -n '{tag_name:"v8.0.0",html_url:"https://github.com/example/apt-hub/releases/tag/v8.0.0",draft:false,prerelease:false,assets:[]}' >"${BASE}/api/v8.0.0.json"
+GH_TOKEN=fixture bash "${BASE}/scripts/release_assets.sh" prepare-reuse \
+  --repository example/apt-hub --source-tag "$tag" --tag v8.0.0 \
+  --downloads-json "${BASE}/downloads.json" --asset-dir "${BASE}/tmp/reuse-v800"
+GH_TOKEN=fixture bash "${BASE}/scripts/release_assets.sh" local-status \
+  --repository example/apt-hub --tag v8.0.0 --asset-dir "${BASE}/tmp/reuse-v800"
+cmp -s "${BASE}/assets/golang_9.9.9-${fixture_revision}_amd64.deb" "${BASE}/tmp/reuse-v800/golang_9.9.9-${fixture_revision}_amd64.deb"
+cmp -s "${BASE}/assets/golang_9.9.9-${fixture_revision}_arm64.deb" "${BASE}/tmp/reuse-v800/golang_9.9.9-${fixture_revision}_arm64.deb"
+src_prov_sha="$(sha256sum "${BASE}/assets/golang.provenance.json" | cut -d' ' -f1)"
+jq -e --arg orig "$tag" --arg src "$tag" --arg tgt v8.0.0 --arg psha "$src_prov_sha" --arg rev "$fixture_revision" '
+  .schema_version=="1"
+  and .upstream.version=="go9.9.9"
+  and .upstream.revision==$rev
+  and .reused_from.repository=="example/apt-hub"
+  and .reused_from.origin_release_tag==$orig
+  and .reused_from.source_release_tag==$src
+  and .reused_from.source_provenance_sha256==$psha
+  and .reused_from.target_release_tag==$tgt
+' "${BASE}/tmp/reuse-v800/golang.provenance.json" >/dev/null
+(cd "${BASE}/tmp/reuse-v800" && sha256sum -c -- SHA256SUMS >/dev/null)
+GH_TOKEN=fixture bash "${BASE}/scripts/release_assets.sh" stage-upload \
+  --repository example/apt-hub --tag v8.0.0 --asset-dir "${BASE}/tmp/reuse-v800" --output-dir "${BASE}/tmp/reuse-upload-v800" >"${BASE}/tmp/reuse-stage.out"
+grep -Fxq 'upload=1' "${BASE}/tmp/reuse-stage.out"
+[[ "$(find "${BASE}/tmp/reuse-upload-v800" -maxdepth 1 -type f | wc -l)" -eq 4 ]]
+mkdir -p "${BASE}/assets-by-tag/v8.0.0"
+cp -a "${BASE}/tmp/reuse-upload-v800/." "${BASE}/assets-by-tag/v8.0.0/"
+: >"${BASE}/asset-rows.jsonl"
+for file in "${BASE}/assets-by-tag/v8.0.0/"*; do
+  jq -nc --arg name "${file##*/}" --arg sha "sha256:$(sha256sum "$file" | cut -d' ' -f1)" --argjson size "$(stat -c '%s' "$file")" '{name:$name,size:$size,digest:$sha,state:"uploaded",browser_download_url:("https://github.com/example/apt-hub/releases/download/v8.0.0/"+($name|@uri))}' >>"${BASE}/asset-rows.jsonl"
+done
+jq -n --slurpfile rows "${BASE}/asset-rows.jsonl" '{tag_name:"v8.0.0",html_url:"https://github.com/example/apt-hub/releases/tag/v8.0.0",draft:false,prerelease:false,assets:$rows}' >"${BASE}/api/v8.0.0.json"
+GH_TOKEN=fixture bash "${BASE}/scripts/release_assets.sh" remote-status --repository example/apt-hub --tag v8.0.0 --source-tag >/dev/null
+printf 'PASS 同输入跨tag复用四资产完整上传并校验通过，deb字节与Version完全一致\n'
+
+# 链式复用 v8.0.0 -> v8.0.1：origin_release_tag 保持原构建 tag，source_release_tag 记本次来源 v8.0.0
+jq -n '{tag_name:"v8.0.1",html_url:"https://github.com/example/apt-hub/releases/tag/v8.0.1",draft:false,prerelease:false,assets:[]}' >"${BASE}/api/v8.0.1.json"
+GH_TOKEN=fixture bash "${BASE}/scripts/release_assets.sh" prepare-reuse \
+  --repository example/apt-hub --source-tag v8.0.0 --tag v8.0.1 \
+  --downloads-json "${BASE}/downloads.json" --asset-dir "${BASE}/tmp/reuse-v801"
+jq -e --arg orig "$tag" '
+  .reused_from.origin_release_tag==$orig
+  and .reused_from.source_release_tag=="v8.0.0"
+  and .reused_from.target_release_tag=="v8.0.1"
+' "${BASE}/tmp/reuse-v801/golang.provenance.json" >/dev/null
+printf 'PASS 链式复用区分原构建来源与本次复用来源\n'
+
+# 构建输入改动 -> build_inputs_sha256 改变，plan 拒绝复用旧产物且 prepare-reuse 失败
+cp "${BASE}/scripts/gen_deb_golang.sh" "${BASE}/scripts/gen_deb_golang.sh.bak"
+printf '\n# input change fixture\n' >>"${BASE}/scripts/gen_deb_golang.sh"
+jq -n '{tag_name:"v8.0.2",html_url:"https://github.com/example/apt-hub/releases/tag/v8.0.2",draft:false,prerelease:false,assets:[]}' >"${BASE}/api/v8.0.2.json"
+GH_TOKEN=fixture bash "${BASE}/scripts/release_assets.sh" plan --repository example/apt-hub --tag v8.0.2 --previous-state "${BASE}/previous-state.json" >"${BASE}/changed-input.out"
+grep -Fxq build_packages=1 "${BASE}/changed-input.out"
+grep -Fxq reuse_from_tag= "${BASE}/changed-input.out"
+rc=0
+GH_TOKEN=fixture bash "${BASE}/scripts/release_assets.sh" prepare-reuse \
+  --repository example/apt-hub --source-tag "$tag" --tag v8.0.2 \
+  --downloads-json "${BASE}/downloads.json" --asset-dir "${BASE}/tmp/reuse-bad-input" >"${BASE}/changed-input-reuse.err" 2>&1 || rc=$?
+[[ "$rc" -eq 1 && ! -e "${BASE}/tmp/reuse-bad-input" ]]
+mv "${BASE}/scripts/gen_deb_golang.sh.bak" "${BASE}/scripts/gen_deb_golang.sh"
+cp "${BASE}/config/go.json" "${BASE}/config/go.json.bak"
+jq '.description += " (input-change)"' "${BASE}/config/go.json.bak" >"${BASE}/config/go.json"
+GH_TOKEN=fixture bash "${BASE}/scripts/release_assets.sh" plan --repository example/apt-hub --tag v8.0.2 --previous-state "${BASE}/previous-state.json" >"${BASE}/changed-gocfg.out"
+grep -Fxq build_packages=1 "${BASE}/changed-gocfg.out"
+grep -Fxq reuse_from_tag= "${BASE}/changed-gocfg.out"
+rc=0
+GH_TOKEN=fixture bash "${BASE}/scripts/release_assets.sh" prepare-reuse \
+  --repository example/apt-hub --source-tag "$tag" --tag v8.0.2 \
+  --downloads-json "${BASE}/downloads.json" --asset-dir "${BASE}/tmp/reuse-bad-gocfg" >"${BASE}/changed-gocfg-reuse.err" 2>&1 || rc=$?
+[[ "$rc" -eq 1 && ! -e "${BASE}/tmp/reuse-bad-gocfg" ]]
+mv "${BASE}/config/go.json.bak" "${BASE}/config/go.json"
+printf 'PASS 构建输入改动(gen_deb_golang.sh与config/go.json)后fingerprint变化并拒绝旧产物复用\n'
+
+# 缺失或损坏旧资产不能静默通过（plan 与 prepare-reuse 均拒绝）
+cp "${BASE}/api/${tag}.json" "${BASE}/api/${tag}.json.ok"
+jq '.assets=[.assets[]|select(.name!="golang_9.9.9-'"${fixture_revision}"'_arm64.deb")]' "${BASE}/api/${tag}.json.ok" >"${BASE}/api/${tag}.json"
+rc=0
+GH_TOKEN=fixture bash "${BASE}/scripts/release_assets.sh" plan --repository example/apt-hub --tag v8.0.2 --previous-state "${BASE}/previous-state.json" >"${BASE}/missing-old-plan.err" 2>&1 || rc=$?
+[[ "$rc" -eq 1 ]]
+rc=0
+GH_TOKEN=fixture bash "${BASE}/scripts/release_assets.sh" prepare-reuse --repository example/apt-hub --source-tag "$tag" --tag v8.0.2 --downloads-json "${BASE}/downloads.json" --asset-dir "${BASE}/tmp/reuse-missing-old" >"${BASE}/missing-old-reuse.err" 2>&1 || rc=$?
+[[ "$rc" -eq 1 && ! -e "${BASE}/tmp/reuse-missing-old" ]]
+cp "${BASE}/api/${tag}.json.ok" "${BASE}/api/${tag}.json"
+printf 'corrupt\n' >"${BASE}/assets-by-tag/${tag}/golang_9.9.9-${fixture_revision}_amd64.deb"
+rc=0
+GH_TOKEN=fixture bash "${BASE}/scripts/release_assets.sh" plan --repository example/apt-hub --tag v8.0.2 --previous-state "${BASE}/previous-state.json" >"${BASE}/corrupt-old-plan.err" 2>&1 || rc=$?
+[[ "$rc" -eq 1 ]]
+rc=0
+GH_TOKEN=fixture bash "${BASE}/scripts/release_assets.sh" prepare-reuse --repository example/apt-hub --source-tag "$tag" --tag v8.0.2 --downloads-json "${BASE}/downloads.json" --asset-dir "${BASE}/tmp/reuse-corrupt-old" >"${BASE}/corrupt-old-reuse.err" 2>&1 || rc=$?
+[[ "$rc" -eq 1 && ! -e "${BASE}/tmp/reuse-corrupt-old" ]]
+cp -a "${BASE}/assets/." "${BASE}/assets-by-tag/${tag}/"
+rm -f -- "${BASE}/api/${tag}.json.ok"
+printf 'PASS 缺失或损坏旧资产在plan与prepare-reuse均被拒绝\n'
 
 # 假改名拒绝：只改 deb 文件名并重算 SHA256SUMS，不改包内 control/provenance，local-status 必须拒绝
 cp -a "${BASE}/assets" "${BASE}/tmp/assets-fake-rename"
@@ -207,7 +340,7 @@ printf 'PASS 仅有SHA256SUMS也固定原包版本恢复\n'
 cp "${BASE}/complete.json" "${BASE}/api/${tag}.json"
 # 原版本入口要求工作树干净，夹具和结果留在 Git 忽略区。
 mkdir -p "${BASE}/tmp/fixture"
-for entry in bin api assets downloads.json downloads-original.json packages.jsonl asset-rows.jsonl previous-state.json release-run.sh; do
+for entry in bin api assets assets-by-tag downloads.json downloads-original.json packages.jsonl asset-rows.jsonl previous-state.json release-run.sh; do
   if [[ -e "${BASE}/${entry}" ]]; then mv "${BASE}/${entry}" "${BASE}/tmp/fixture/"; fi
 done
 for entry in "${BASE}/"*.out "${BASE}/"*.err "${BASE}/"*.log "${BASE}/github-output" "${BASE}/partial.json" "${BASE}/complete.json"; do

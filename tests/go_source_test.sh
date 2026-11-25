@@ -545,6 +545,53 @@ record_rc go_cross_tag_same_bytes_state "${rc}" 0 || true
 rc=0
 [[ -n "${old_byhash}" && -f "${TMP}/site-cross-ok/repos/golang/dists/jammy/main/binary-amd64/by-hash/SHA256/${old_byhash}" ]] || rc=1
 record_rc go_cross_tag_keeps_byhash "${rc}" 0 || true
+
+# 跨 tag 复用 provenance (reused_from) + 重建索引 URL/size/hash + 原 GPG key 签名校验
+src_prov_sha="$(sha_of "${TMP}/api/provenance.json")"
+GO_TAG="${GO_CROSS_TAG}"
+write_provenance "${TMP}/api/provenance-reused.json"
+jq --arg repo "${PKG_REPO}" --arg orig "${saved_tag}" --arg src "${saved_tag}" \
+  --arg psha "${src_prov_sha}" --arg tgt "${GO_CROSS_TAG}" \
+  '.reused_from={repository:$repo,origin_release_tag:$orig,source_release_tag:$src,source_provenance_sha256:$psha,target_release_tag:$tgt}' \
+  "${TMP}/api/provenance-reused.json" >"${TMP}/api/provenance.json"
+write_release_json "${TMP}/api/go-release.json"
+reset_curl_map
+rc="$(capture_rc "${TMP}/run-cross-reused.log" run_sync_go "${TMP}/site-go1" "${TMP}/site-cross-reused")"
+record_rc go_cross_tag_reused_provenance_ok "${rc}" 0 || true
+rc=0
+cross_dist="${TMP}/site-cross-reused/repos/golang/dists/jammy"
+cross_pkg="${cross_dist}/main/binary-amd64/Packages"
+grep -Fq "Filename: fixture/apt-hub/releases/download/${GO_CROSS_TAG}/${DEB_AMD}" "${cross_pkg}" || rc=1
+! grep -Fq "releases/download/${saved_tag}/" "${cross_pkg}" || rc=1
+grep -Fq "Size: ${META_AMD_SZ}" "${cross_pkg}" || rc=1
+grep -Fq "SHA256: ${META_AMD_SHA}" "${cross_pkg}" || rc=1
+pkg_sha="$(sha_of "${cross_pkg}")"
+pkg_gz_sha="$(sha_of "${cross_pkg}.gz")"
+grep -Fq "${pkg_sha}" "${cross_dist}/Release" || rc=1
+grep -Fq "${pkg_gz_sha}" "${cross_dist}/Release" || rc=1
+[[ -f "${cross_dist}/main/binary-amd64/by-hash/SHA256/${pkg_sha}" && -f "${cross_dist}/main/binary-amd64/by-hash/SHA256/${pkg_gz_sha}" ]] || rc=1
+gpg --homedir "${GNUPG}" --batch --export -- "${FP}" >"${TMP}/orig-trusted.gpg"
+gpgv --keyring "${TMP}/orig-trusted.gpg" -- "${cross_dist}/InRelease" >/dev/null 2>&1 || rc=1
+gpgv --keyring "${TMP}/orig-trusted.gpg" "${cross_dist}/Release.gpg" "${cross_dist}/Release" >/dev/null 2>&1 || rc=1
+record_rc go_cross_tag_reused_index_and_orig_gpg "${rc}" 0 || true
+rc=0
+orig_updated="$(jq -r '.packages[0].updated_at' "${TMP}/site-go1/state.json")"
+jq -e --arg u "${orig_updated}" --arg t "${GO_CROSS_TAG}" '
+  .packages[0].release_tag==$t and .packages[0].updated_at==$u
+' "${TMP}/site-cross-reused/state.json" >/dev/null || rc=1
+record_rc go_cross_tag_reused_preserves_updated_at "${rc}" 0 || true
+
+# 篡改 reused_from.target_release_tag 必须拒绝
+jq '.reused_from.target_release_tag="v0.0.1"' "${TMP}/api/provenance.json" >"${TMP}/api/provenance-bad-reuse.json"
+mv -- "${TMP}/api/provenance-bad-reuse.json" "${TMP}/api/provenance.json"
+write_release_json "${TMP}/api/go-release.json"
+reset_curl_map
+rc="$(capture_rc "${TMP}/run-cross-reused-bad.log" run_sync_go "${TMP}/site-go1" "${TMP}/site-cross-reused-bad")"
+record_rc go_cross_tag_bad_reuse_rejected "${rc}" 1 || true
+rc=0
+[[ ! -e "${TMP}/site-cross-reused-bad" ]] || rc=1
+record_rc go_cross_tag_bad_reuse_no_output "${rc}" 0 || true
+
 GO_TAG="${saved_tag}"
 write_provenance "${TMP}/api/provenance.json"
 write_release_json "${TMP}/api/go-release.json"
@@ -864,6 +911,67 @@ if [[ "${rc}" -eq 0 ]]; then
   jq -e 'select(.role=="release-fixture" and .method=="GET" and .status==200)' "${TMP}/access.jsonl" >/dev/null || rc=1
   record_rc verify_release_fixture_get "${rc}" 0 || true
 fi
+
+# 跨 tag 复用站点真 HTTPS verify + APT 同 Version 不无意义 upgrade
+saved_tag="${GO_TAG}"
+src_amd64_prov_sha="$(sha_of "${TMP}/api/provenance.json")"
+GO_TAG="${GO_CROSS_TAG}"
+write_provenance "${TMP}/api/provenance-amd64-cross.json"
+jq --arg repo "${PKG_REPO}" --arg orig "${saved_tag}" --arg src "${saved_tag}" \
+  --arg psha "${src_amd64_prov_sha}" --arg tgt "${GO_CROSS_TAG}" \
+  '.reused_from={repository:$repo,origin_release_tag:$orig,source_release_tag:$src,source_provenance_sha256:$psha,target_release_tag:$tgt}' \
+  "${TMP}/api/provenance-amd64-cross.json" >"${TMP}/api/provenance.json"
+write_release_json "${TMP}/api/go-release.json"
+reset_curl_map
+cross_rel="fixture/apt-hub/releases/download/${GO_CROSS_TAG}"
+mkdir -p -- "${TMP}/assets/${cross_rel}"
+cp -- "${TMP}/debs/${DEB_AMD}" "${TMP}/assets/${cross_rel}/${DEB_AMD}"
+rc="$(capture_rc "${TMP}/run-amd64-cross.log" "${SYNC}" \
+  --catalog "${TMP}/catalog-go-amd64.json" --releases "${TMP}/releases.json" \
+  --previous "${TMP}/site-go-amd64" --output "${TMP}/site-amd64-cross" \
+  --gnupghome "${GNUPG}" --fingerprint "${FP}" --site-url "${SITE_URL}" \
+  --package-repository "${PKG_REPO}" --release-tag "${GO_CROSS_TAG}" \
+  --go-downloads-json "${TMP}/api/go-downloads.json")"
+record_rc go_amd64_cross_sync "${rc}" 0 || true
+rm -rf -- "${TMP}/ver-cross-dl"
+rc="$(capture_rc "${TMP}/run-ver-cross-dl.log" "${VER}" \
+  --site "${TMP}/site-amd64-cross" --releases "${TMP}/releases.json" --work-dir "${TMP}/ver-cross-dl" \
+  --verify-downloads \
+  --acquire-https-ca "${TMP}/tls/cert.pem" \
+  --github-https-proxy "${PROXY_URL}")"
+record_rc verify_cross_downloads_https "${rc}" 0 || true
+if [[ "${rc}" -eq 0 ]]; then
+  rc=0
+  jq -e 'all(.results[]; .ok==true and .verify_downloads==true and .download_exit==0 and .upgrade_exit==0)' \
+    "${TMP}/ver-cross-dl/summary.json" >/dev/null || rc=1
+  record_rc verify_cross_downloads_summary "${rc}" 0 || true
+  rc=0
+  grep -Fq "Filename: ${cross_rel}/${DEB_AMD}" "${TMP}/site-amd64-cross/repos/golang/dists/jammy/main/binary-amd64/Packages" || rc=1
+  grep -Fq $'https://github.com/\ttype:deb' "${TMP}/site-amd64-cross/repos/golang/mirror.list" || rc=1
+  record_rc verify_cross_points_new_tag_keeps_source "${rc}" 0 || true
+  # 隔离 dpkg/status 已安装相同 Version (${VER_FULL})：按已安装 deb 控制字段构造真实已安装状态，apt-get upgrade 必须零升级、零下载、零卸载
+  same_root="${TMP}/ver-cross-dl/jammy-amd64/apt-root"
+  {
+    dpkg-deb -f "${TMP}/debs/${DEB_AMD}"
+    printf 'Status: install ok installed\n\n'
+  } >"${same_root}/var/lib/dpkg/status"
+  rc=0
+  env LC_ALL=C LANG=C LANGUAGE=C apt-get \
+    -c "${same_root}/etc/apt/apt.conf" \
+    -o Debug::NoLocking=true \
+    -o APT::Get::Simulate=true \
+    --simulate --with-new-pkgs -y --no-install-recommends \
+    upgrade >"${TMP}/same-version-upgrade.log" 2>&1 || rc=$?
+  record_rc apt_same_version_upgrade_rc "${rc}" 0 || true
+  rc=0
+  if grep -Eq '^(Inst|Remv|Conf) ' "${TMP}/same-version-upgrade.log"; then rc=1; fi
+  grep -Fq '0 upgraded, 0 newly installed, 0 to remove' "${TMP}/same-version-upgrade.log" || rc=1
+  record_rc apt_same_version_no_pointless_upgrade "${rc}" 0 || true
+fi
+GO_TAG="${saved_tag}"
+write_provenance "${TMP}/api/provenance.json"
+write_release_json "${TMP}/api/go-release.json"
+reset_curl_map
 
 # 资产 URL/Filename 篡改为与 Packages Filename 不同路径 → 拒
 cp -a -- "${TMP}/site-go-amd64" "${TMP}/site-bad-url"

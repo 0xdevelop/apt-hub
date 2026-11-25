@@ -1,5 +1,41 @@
 # 验证记录
 
+## 2026-11-25 跨标签同输入 Go 资产原字节复用与只读基线核对
+
+- **运行环境与状态记录回退**：现场工作区位于 `spark-901f` (`/home/certa/workspace/apt-hub`)；本仓库未启用/未连接 `xjb` 项目、任务或局域网后端锁（未初始化或改动任何服务/密钥/认证），按既有 Markdown 状态回退约定将完整记录记于本文件及 `docs/maintenance.md`。本地仓库在提交前已快进合入 `origin/main` 回写提交 `55e73cb`。
+- **工作流与非发版触发核查**：`.github/workflows/release.yml` 仅在 `push.tags: ['v*']`、`schedule`、`workflow_dispatch` 触发；普通推送至 `main` 分支不触发发版、构包、上传或 Pages 部署。`RemoveOldRelease` 保持三代 `by-hash` 保留窗口及仅检查当前 `Packages`/`Packages.gz` 引用的清理策略，未改动 `v0.0.10` 或生产 Release 资产。
+- **线上 `v0.0.13` 只读真实证据（严格区分于本地隔离夹具）**：
+  - 线上 `v0.0.13` Release 具备完整 4 个资产（`golang_1.27.4-2_amd64.deb`、`golang_1.27.4-2_arm64.deb`、`golang.provenance.json`、`SHA256SUMS`）；`golang.provenance.json` SHA-256 为 `c7500fecb8aa47375615fefc5d6aa0c8f344bde33e03039d33c648e7020c111d`，`generated_at_utc=2026-11-02T20:36:20Z`，`upstream` 为 `go1.27.4`（`epoch=2`、`revision=2`）。
+  - 本机当前 `sha256sum scripts/gen_deb_golang.sh config/go.json | sha256sum` 为 `feb45c05245fcf1ba6a1c97dae0c9233634a85b2699473f8da6e626a4783739a`，与线上 `v0.0.13` `golang.provenance.json` 的 `build_inputs_sha256` 一致；`go.dev` 最新稳定版仍为 `go1.27.4`。未在生产执行 `git_tag.sh`、打新 tag、`workflow_dispatch`、生产资产修改或删除。
+- **构建输入闭包审查（仅限源码结构证据）**：
+  - 沿实际构包调用链 `build.sh:87-108` → `gen_debs.sh:293-369` → `scripts/gen_deb_golang.sh:1-879` 核对：
+    - `build.sh` 不传模板、补丁或额外构包环境变量；`gen_debs.sh` 仅从 `config/packages.json` 读取唯一 `go_official_archive` 的 `id`（`golang`，仅用于重命名 `${go_id}.provenance.json`）并以 `--config "${ROOT}/config/go.json"` 调用 `scripts/gen_deb_golang.sh`（`gen_debs.sh:342,352,361-362`）。`config/packages.json` 的 `package` 与 `architectures` 组合一致性由 `scripts/release_assets.sh` 的 `validate_constructed_dir` 与 `check_reuse_source_matches_current` 交叉校验。
+    - `scripts/gen_deb_golang.sh` 不读取外部补丁、`templates/`（仅用于 `render.sh`）或辅助子脚本；控制字段、路径布局、`umask 022`、`LC_ALL=C`/`LANG=C`/`LANGUAGE=C`、`SOURCE_DATE_EPOCH`（仅取自认证上游 `go/VERSION`）及 `dpkg-deb --build --root-owner-group -Zgzip -z9` 均硬编码于脚本内，包元数据（`package`、`epoch`、`revision`、`architectures`、`description`、`maintainer`、`homepage`、`section`、`priority`）来自 `config/go.json`，脚本第 787 行自身即按 `scripts/gen_deb_golang.sh` 与 `config/go.json` 计算 `build_inputs_sha256`。
+  - **审查边界声明**：上述结论仅依据仓库源码调用结构与配置封装，**不声称消除了宿主/CI 外部工具链版本差异**（如 `dpkg-deb`、`gzip`、`tar` 等二进制自身版本升级可能带来的隐式字节差异）；当前复用契约沿用既有已验证包/输入/架构契约，不扩大修改 `build_inputs_sha256` 构成。
+- **实现改动（共 9 个文件）**：
+  - `scripts/release_assets.sh`：为 `plan` 增加同输入跨标签复用判定（输出 `reuse_from_tag`），新增 `prepare-reuse`（校验旧 Release 完整性与当前构建输入/Go 上游一致性，原字节保留 `.deb`、保留原构建 `generated_at_utc`/`build_inputs_sha256`/`upstream`/`packages` 并写入确定性 `reused_from`、重算 `SHA256SUMS`），在 `validate_constructed_dir` 增加 `match_current_config` 参数复用同一套字节/control 校验，并在 `local-status`、`stage-upload`、`remote-status` 校验 `reused_from`。
+  - `.github/workflows/release.yml`：`release` job 透传 `reuse_from_tag`，`Build` job 在 `build_packages == '0' && reuse_from_tag != ''` 时走 `prepare-reuse` -> `local-status` -> `stage-upload` -> 上传 4 资产 -> `remote-status` -> `publish_apt_site.sh publish`。
+  - `scripts/sync.sh`：校验活跃/存量 `golang.provenance.json` 的 `reused_from` 结构、标签顺序、仓库与目标标签匹配；修复跨标签同版本同字节迁移时 `updated_at` 匹配规则（优先按 `package + architecture` 比对旧 `sha256`），避免因资产 URL 标签路径变化导致 `updated_at` 误刷新。
+  - `tests/auto_update_test.sh`、`tests/workflow_test.sh`、`tests/release_test.sh`、`tests/go_source_test.sh` 与 `docs/maintenance.md`、`docs/verification.md`。
+- **分段门禁执行记录（如实区分原 `build.sh test` `exit 1` 与 12 套分段通过，不冒称单次 `build.sh test` `exit 0`）**：
+  - 所有原始与复核日志归档于本仓 Git 忽略目录 `tmp/gate-20261125-reuse/`：
+  - **原全量入口 `bash ./build.sh test`（PID `3553500`，未重跑/未中断自然收口）**：**`exit 1`**，日志 `tmp/gate-20261125-reuse/build-test-96709.log`。首项 `tests/ubuntu_test.sh` 因外部网络故障失败（`failures=2`：`curl: (35) ubuntu.com:443 SSL_ERROR_SYSCALL` 及 `verify-ok` 中 `noble/amd64 apt-get update` 超时 `exit=124`），未继续执行后续 11 套件。
+  - 确认 `build/upload_tmp_dir` 不存在后，对 12 套测试分段执行并仅对瞬时网络超时套件做有界重试，**12 / 12 全部取得 `exit 0`**：
+    1. `bash tests/auto_update_test.sh` -> `pass=14 fail=0`，**`exit 0`**（重构后重跑，覆盖跨 tag 四资产复用、链式复用、真实修改 `scripts/gen_deb_golang.sh` 与 `config/go.json` 触发 `build_inputs_sha256` 失效、缺损旧资产 fail closed），日志 `tmp/gate-20261125-reuse/auto_update_test.log`。
+    2. `PATH="$PWD/tmp/go-final-parent/bin:$PATH" bash tests/release_test.sh` -> `TOTAL PASS=86 FAIL=0`，**`exit 0`**（重构后重跑，含 `shellcheck`、`reused_from` 匹配/不匹配），日志 `tmp/gate-20261125-reuse/release_test.log`。
+    3. `bash tests/workflow_test.sh` -> `pass=94 fail=0`，**`exit 0`**（抽提 `release.yml` `id: reuse` 与失败传播/tag 不匹配拒绝），日志 `tmp/gate-20261125-reuse/workflow_test.log`。
+    4. `bash tests/go_source_test.sh` -> `go_source_test 通过`，**`exit 0`**（跨 tag 复用 `sync`、原 GPG 验签、保留 `updated_at`、隔离 HTTPS `verify_ubuntu.sh --verify-downloads`、已装同 `Version` `dpkg/status` 下 `apt-get --simulate --with-new-pkgs -y upgrade` 输出 `0 upgraded, 0 newly installed, 0 to remove`），日志 `tmp/gate-20261125-reuse/go_source_test.log`。
+    5. `PATH="$PWD/tmp/go-final-parent/bin:$PATH" bash tests/sync_test.sh` -> `PASS=117 FAIL=0`，**`exit 0`**，日志 `tmp/gate-20261125-reuse/sync_test.log`。
+    6. `PATH="$PWD/tmp/go-final-parent/bin:$PATH" bash tests/render_test.sh` -> `pass=408 fail=0`，**`exit 0`**，日志 `tmp/gate-20261125-reuse/render_test.log`。
+    7. `PATH="$PWD/tmp/go-final-parent/bin:$PATH" bash tests/ci_dependencies_test.sh` -> `pass=3 fail=0`，**`exit 0`**，日志 `tmp/gate-20261125-reuse/ci_dependencies_test.log`。
+    8. `PATH="$PWD/tmp/go-final-parent/bin:$PATH" bash tests/git_tag_test.sh` -> `pass=18 fail=0`，**`exit 0`**，日志 `tmp/gate-20261125-reuse/git_tag_test.log`。
+    9. `PATH="$PWD/tmp/go-final-parent/bin:$PATH" bash tests/add_source_test.sh` -> 通过，**`exit 0`**，日志 `tmp/gate-20261125-reuse/add_source_test.log`。
+    10. `bash tests/go_deb_test.sh` -> `TOTAL=142 PASS=142 FAIL=0`，**`exit 0`**，日志 `tmp/gate-20261125-reuse/go_deb_test.log`。
+    11. `bash tests/update_sources_test.sh` -> 首次 `real_chain` 因 `jammy/amd64 apt-get update` 超时 `exit=124`（`pass=44 fail=1`, `exit 1`）；有界重试第 1 次通过 `pass=55 fail=0`，**`exit 0`**，日志 `tmp/gate-20261125-reuse/update_sources_test.log`。
+    12. `bash tests/ubuntu_test.sh`（PID `3668429`，最多 5 次有界重试）：try1 因 `stonking/arm64 apt-get update` 超时 `exit=124` 退出 `1`（`ubuntu_test.try1.log`）；try2 因 `resolute/arm64 apt-get update` 超时 `exit=124` 退出 `1`（`ubuntu_test.try2.log`）；**try3 全部通过 `failures=0`，`exit 0`**，日志 `tmp/gate-20261125-reuse/ubuntu_test.log`（完整三轮日志 `tmp/gate-20261125-reuse/ubuntu-retry-96713.log`）。
+- **未验证项（需后续真实发版时确认）**：
+  - 真实远端 GitHub Actions 触发新标签（如未来 `v0.0.14`）时 `release` → `Build(reuse)` → `publish_apt_site.sh` → `RemoveOldRelease` 的端到端在线运行结果（本轮严禁打新 tag、`workflow_dispatch` 或改动生产资产，故仅通过线上 `v0.0.13` 只读核对与完整本地/隔离夹具验证）。
+
 ## 2026-11-17 单包与产物分支纠偏
 
 本节取代下文早先对“源码父节点必需”和双包结构的解释，保留旧记录用于对应原始证据。新 Go 产物每架构一个完整 `golang` 包；Debian 修订由基础修订加原 `VERSION` 自动派生，不替换旧版字节。Pages 后续提交只保留上一产物父节点，首次独立根；已推历史不重写。
