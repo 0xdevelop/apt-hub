@@ -47,7 +47,7 @@
 - 站点版本使用本次本仓 `vX.Y.Z`，不是 Go 或 RustDesk 的软件版本。当前发行版和变更记录链接固定到该标签；“最新发行版”链接使用 GitHub `releases/latest`，不依赖脚本维护的 `latest` 标签。变更记录沿用 `changelog/vX.Y.Z.md` 的 GitHub 渲染页，不另建前端或 Markdown 解析器。
 - `scripts/render.sh` 只替换 README 中 `APT-HUB:PACKAGES:BEGIN` / `END` 两条独占行之间的区域，区域外正文由人维护。缺失或重复标记会拒绝写入。
 
-`RemoveOldRelease` 沿母版依赖 `Release` 与 `Build` 成功后自动运行，适用于 tag、定时与手动运行，也覆盖无变化复用和同版本恢复。清理目标由本次维护版本连续递减两次取得；不足两代跳过，当前索引或保留的历史 by-hash 仍引用的资产不删。它不是遍历所有旧 Release 的批量清空；历史 by-hash 的保留逻辑不因重新索引而取消。
+`RemoveOldRelease` 沿母版依赖 `Release` 与 `Build` 成功后自动运行，适用于 tag、定时与手动运行，也覆盖无变化复用和同版本恢复。清理目标由本次维护版本连续递减两次取得；不足两代跳过，仅检查当前 `Packages`/`Packages.gz` 索引是否仍引用 `releases/download/<旧tag>/` 资产，仍被当前索引引用时不删，不因保留的历史 `by-hash` 而阻止删除两代前旧 Release（若旧缓存客户端仍命中历史索引，须先执行 `apt update` 刷新索引）。它不是遍历所有旧 Release 的批量清空；Pages 侧三代历史 `by-hash` 的保留逻辑不因重新索引而取消。
 
 签名与候选元数据每日续期，软件的 `updated_at` 不因扫描、重签而变化。Pages 部署失败不能更新主分支为“已生效”；回写失败也不强推覆盖同事提交，修复后重跑使状态收敛。
 
@@ -61,7 +61,7 @@ bash scripts/update_sources.sh --catalog config/packages.json --previous tmp/pre
 
 其余参数是候选目录、站点和发行版数据输入；入口只生成候选，不上传、不推送、不部署。
 
-以上地址、版本和指纹均需替换；`tmp/previous` 须为已有发布快照或首次使用的空目录，工作目录必须是新建或空目录。`--release-tag` 是页面维护版本；`--package-release-tag` 必须指向实际存在且通过核验的包资产，省略时与页面版本相同。Go 每个架构只发布一个完整 `golang` 包，控制字段为 `2:上游版本-基础修订`；包版本不随仓库 tag 重发或页面重签而变化，不手填修订，不替换已发布字节。当新目标 `vX.Y.Z` 尚未有包资产、且上一已发布标签（由 `apt-hub-pages` 的 `state.json` 指向）经完整校验后与当前 Go 上游及构包输入（`scripts/gen_deb_golang.sh`、`config/go.json`、`config/packages.json`）完全一致时，工作流通过 `scripts/release_assets.sh prepare-reuse` 直接下载旧 Release `.deb` 原字节上传新目标 Release，不重打包、不涨 `revision`；`golang.provenance.json` 保持原 `generated_at_utc`、`build_inputs_sha256`、`upstream` 与 `packages` 不变，仅补充 `reused_from`（含 `repository`、`origin_release_tag`、`source_release_tag`、`source_provenance_sha256`、`target_release_tag`）区分原构建来源与本次复用信息，并按目标版实际 3 个文件重新生成 `SHA256SUMS`。随后由 `scripts/sync.sh` 重建仅指向本版的 `Packages`/`Packages.gz`/`by-hash`/`Release` 并用原 GPG 私钥重签 `InRelease`/`Release.gpg`。
+以上地址、版本和指纹均需替换；`tmp/previous` 须为已有发布快照或首次使用的空目录，工作目录必须是新建或空目录。`--release-tag` 是页面维护版本；`--package-release-tag` 必须指向实际存在且通过核验的包资产，省略时与页面版本相同。Go 每个架构只发布一个完整 `golang` 包，控制字段为 `2:上游版本-基础修订`；包版本不随仓库 tag 重发或页面重签而变化，不手填修订，不替换已发布字节。当新目标 `vX.Y.Z` 尚未有包资产、且上一已发布标签（由 `apt-hub-pages` 的 `state.json` 指向）经完整校验后与当前构包输入指纹 `build_inputs_sha256`（仅由 `scripts/gen_deb_golang.sh` 与 `config/go.json` 计算，不纳入 `config/packages.json` 全文）、`config/packages.json` 中 `go_official_archive` 的 `package`/`architectures` 兼容性，以及另行核对的当前 Go 官方归档元数据（版本、架构、URL、SHA-256、size）均一致时，工作流通过 `scripts/release_assets.sh prepare-reuse` 直接下载旧 Release `.deb` 原字节上传新目标 Release，不重打包、不涨 `revision`；`golang.provenance.json` 保持原 `generated_at_utc`、`build_inputs_sha256`、`upstream` 与 `packages` 不变，仅补充 `reused_from`（含 `repository`、`origin_release_tag`、`source_release_tag`、`source_provenance_sha256`、`target_release_tag`）区分原构建来源与本次复用信息，并按目标版实际 3 个文件重新生成 `SHA256SUMS`。随后由 `scripts/sync.sh` 重建仅指向本版的 `Packages`/`Packages.gz`/`by-hash`/`Release` 并用原 GPG 私钥重签 `InRelease`/`Release.gpg`。
 
 `git_tag.sh`（无参数默认为 `auto`）触发同一条三段式发布链；`build.sh` 调用 `gen_debs.sh` 按清单处理软件，Go 专用格式转换位于 `scripts/gen_deb_golang.sh`。官方已有 `.deb` 只发现和核验官方发布，不转存；构造包、`<软件id>.provenance.json` 与 `SHA256SUMS` 才进入 `build/upload_tmp_dir/`，直接上传到对应本仓版本的 assets。归档、内部索引、日志和测试不进入发布成果。Pages 复用 `apt-hub-pages` 产物分支发布，只保存公开站点与签名索引，不走 Actions Artifacts，也不再另建站点副本。
 
