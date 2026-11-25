@@ -98,7 +98,7 @@ fi
 printf 'PASS 首次Pages骨架无需伪造state即可恢复构包\n'
 
 mkdir -p "${BASE}/assets"
-fixture_revision="$(jq -r '.revision' "${BASE}/config/go.json")+${tag#v}"
+fixture_revision="$(jq -r '.revision' "${BASE}/config/go.json")"
 fingerprint=$(cd "${BASE}" && sha256sum scripts/gen_deb_golang.sh config/go.json | sha256sum | cut -d' ' -f1)
 for arch in amd64 arm64; do
   root="${BASE}/tmp/package-${arch}"
@@ -167,12 +167,12 @@ mv "${BASE}/tmp/assets-fake-rename/golang.provenance.json.tmp" "${BASE}/tmp/asse
 rc=0
 bash "${BASE}/scripts/release_assets.sh" local-status --asset-dir "${BASE}/tmp/assets-fake-rename" >"${BASE}/fake-rename2.out" 2>&1 || rc=$?
 [[ "$rc" -eq 1 ]]
-# stage-upload 用当前 VERSION 资产上传到另一个 tag (v8.0.0) 也必须拒绝
+# stage-upload 用不匹配 config/go.json revision 的资产目录上传也必须拒绝
 jq -n '{tag_name:"v8.0.0",html_url:"https://github.com/example/apt-hub/releases/tag/v8.0.0",draft:false,prerelease:false,assets:[]}' >"${BASE}/api/v8.0.0.json"
 rc=0
-GH_TOKEN=fixture bash "${BASE}/scripts/release_assets.sh" stage-upload --repository example/apt-hub --tag v8.0.0 --asset-dir "${BASE}/assets" --output-dir "${BASE}/tmp/upload-wrong-tag" >"${BASE}/wrong-tag-upload.out" 2>&1 || rc=$?
-[[ "$rc" -eq 1 && ! -e "${BASE}/tmp/upload-wrong-tag" ]]
-printf 'PASS 假改名、包内control不匹配及跨tag staged上传均被拒绝\n' 
+GH_TOKEN=fixture bash "${BASE}/scripts/release_assets.sh" stage-upload --repository example/apt-hub --tag v8.0.0 --asset-dir "${BASE}/tmp/assets-fake-rename" --output-dir "${BASE}/tmp/upload-wrong-rev" >"${BASE}/wrong-rev-upload.out" 2>&1 || rc=$?
+[[ "$rc" -eq 1 && ! -e "${BASE}/tmp/upload-wrong-rev" ]]
+printf 'PASS 假改名、包内control不匹配及修订不符 staged上传均被拒绝\n' 
 
 jq '.assets=[.assets[]|select(.name=="golang.provenance.json")]' "${BASE}/api/${tag}.json" >"${BASE}/partial.json"
 cp "${BASE}/api/${tag}.json" "${BASE}/complete.json"

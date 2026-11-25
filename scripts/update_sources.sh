@@ -12,6 +12,7 @@ PROJECT_TMP="${PROJECT_ROOT}/tmp"
 
 catalog=""
 previous=""
+previous_prev=""
 work_arg=""
 gnupghome=""
 fingerprint=""
@@ -35,7 +36,7 @@ die() {
 
 usage() {
   cat >&2 <<'EOF'
-用法: scripts/update_sources.sh --catalog <file> --previous <dir> --work-dir <全新/空目录> --gnupghome <dir> --fingerprint <完整指纹> --site-url <https> [--releases <已生成的官方发行版JSON>] [--package-repository <owner/repo>] [--release-tag <页面vX.Y.Z>] [--package-release-tag <包来源vX.Y.Z>] [--upstream-dir <dir>] [--go-downloads-json <file>] [--rotate-from <旧完整指纹>] [--acquire-https-ca <pem>] [--github-https-proxy <http://host:port>]
+用法: scripts/update_sources.sh --catalog <file> --previous <dir> [--previous-prev <dir>] --work-dir <全新/空目录> --gnupghome <dir> --fingerprint <完整指纹> --site-url <https> [--releases <已生成的官方发行版JSON>] [--package-repository <owner/repo>] [--release-tag <页面vX.Y.Z>] [--package-release-tag <包来源vX.Y.Z>] [--upstream-dir <dir>] [--go-downloads-json <file>] [--rotate-from <旧完整指纹>] [--acquire-https-ca <pem>] [--github-https-proxy <http://host:port>]
 EOF
   exit 2
 }
@@ -200,6 +201,9 @@ while [[ $# -gt 0 ]]; do
     --previous)
       [[ $# -ge 2 ]] || usage
       previous="$2"; shift 2 ;;
+    --previous-prev)
+      [[ $# -ge 2 ]] || usage
+      previous_prev="$2"; shift 2 ;;
     --work-dir)
       [[ $# -ge 2 ]] || usage
       work_arg="$2"; shift 2 ;;
@@ -254,6 +258,9 @@ require_cmd bash jq flock cp chmod mkdir mv rm find realpath stat date cmp sha25
 
 catalog="$(assert_allowed_file catalog "${catalog}")"
 previous="$(assert_allowed_dir previous "${previous}" yes)"
+if [[ -n "${previous_prev}" ]]; then
+  previous_prev="$(assert_allowed_dir previous-prev "${previous_prev}" yes)"
+fi
 gnupghome="$(assert_allowed_dir gnupghome "${gnupghome}" yes)"
 work="$(assert_allowed_dir work-dir "${work_arg}" no)"
 fingerprint="$(strip_fp "${fingerprint}")"
@@ -305,12 +312,19 @@ if [[ -n "${github_https_proxy}" ]]; then
 fi
 
 assert_no_overlap "${work}" "${previous}" "work-dir 与 previous 重叠"
+if [[ -n "${previous_prev}" ]]; then
+  assert_no_overlap "${work}" "${previous_prev}" "work-dir 与 previous-prev 重叠"
+  assert_no_overlap "${previous_prev}" "${gnupghome}" "previous-prev 与 gnupghome 重叠"
+fi
 assert_no_overlap "${work}" "${gnupghome}" "work-dir 与 gnupghome 重叠"
 assert_no_overlap "${previous}" "${gnupghome}" "previous 与 gnupghome 重叠"
 assert_no_overlap "${work}" "${catalog}" "work-dir 与 catalog 重叠"
 if [[ -n "${releases}" ]]; then
   assert_no_overlap "${work}" "${releases}" "work-dir 与 releases 重叠"
   assert_no_overlap "${previous}" "${releases}" "previous 与 releases 重叠"
+  if [[ -n "${previous_prev}" ]]; then
+    assert_no_overlap "${previous_prev}" "${releases}" "previous-prev 与 releases 重叠"
+  fi
   assert_no_overlap "${gnupghome}" "${releases}" "gnupghome 与 releases 重叠"
 fi
 
@@ -382,6 +396,7 @@ sync_args=(
   --fingerprint "${fingerprint}"
   --site-url "${site_url}"
 )
+[[ -n "${previous_prev}" ]] && sync_args+=(--previous-prev "${previous_prev}")
 [[ -n "${package_repository}" ]] && sync_args+=(--package-repository "${package_repository}")
 [[ -n "${package_release_tag}" ]] && sync_args+=(--release-tag "${package_release_tag}")
 [[ -n "${upstream_dir}" ]] && sync_args+=(--upstream-dir "${upstream_dir}")

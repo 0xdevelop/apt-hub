@@ -30,6 +30,7 @@ GO_DOWNLOADS_DEFAULT_URL='https://go.dev/dl/?mode=json&include=all'
 catalog=""
 releases=""
 previous=""
+previous_prev=""
 output=""
 gnupghome=""
 fingerprint=""
@@ -55,7 +56,7 @@ die() {
 
 usage() {
   cat >&2 <<'EOF'
-用法: scripts/sync.sh --catalog <file> --releases <file> --previous <dir> --output <dir> --gnupghome <dir> --fingerprint <完整指纹> --site-url <https站点URL> [--package-repository <owner/repo>] [--release-tag <vX.Y.Z>] [--upstream-dir <dir>] [--go-downloads-json <file>] [--rotate-from <旧完整指纹>]
+用法: scripts/sync.sh --catalog <file> --releases <file> --previous <dir> [--previous-prev <dir>] --output <dir> --gnupghome <dir> --fingerprint <完整指纹> --site-url <https站点URL> [--package-repository <owner/repo>] [--release-tag <vX.Y.Z>] [--upstream-dir <dir>] [--go-downloads-json <file>] [--rotate-from <旧完整指纹>]
 EOF
   exit 2
 }
@@ -400,15 +401,12 @@ assert_go_release_tag_matches_provenance() {
 }
 
 go_checkout_derived_revision() {
-  local cfg base ver
+  local cfg base
   cfg="${PROJECT_ROOT}/config/go.json"
   [[ -f "${cfg}" && ! -L "${cfg}" ]] || die "缺少 config/go.json"
-  [[ -f "${PROJECT_ROOT}/VERSION" && ! -L "${PROJECT_ROOT}/VERSION" ]] || die "缺少 VERSION"
   base="$(jq -r '.revision // empty' "${cfg}")"
-  ver="$(tr -d '[:space:]' <"${PROJECT_ROOT}/VERSION")" || die "无法读取 VERSION"
   [[ "${base}" =~ ^[1-9][0-9]*$ ]] || die "config revision 非法"
-  [[ "${ver}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "VERSION 语法非法"
-  printf '%s+%s\n' "${base}" "${ver}"
+  printf '%s\n' "${base}"
 }
 
 go_provenance_name_for_tag() {
@@ -842,21 +840,58 @@ validate_previous_tree() {
   done < <(find -- "${root}" -print0)
 }
 
+collect_release_byhash_allowlist() {
+  local out="$1" src_root release_file rel repo_id series
+  shift
+  : >"${out}"
+  for src_root in "$@"; do
+    [[ -n "${src_root}" && -d "${src_root}/repos" ]] || continue
+    while IFS= read -r -d '' release_file; do
+      rel="${release_file#"${src_root}"/repos/}"
+      repo_id="${rel%%/*}"
+      series="${rel#${repo_id}/dists/}"
+      series="${series%/Release}"
+      [[ -n "${repo_id}" && "${series}" =~ ${SERIES_NAME} ]] || continue
+      awk -v repo="${repo_id}" -v series="${series}" '
+        /^SHA256:/ { in_sha=1; next }
+        /^[^[:space:]]/ { in_sha=0 }
+        in_sha && NF >= 3 {
+          h=$1; p=$3
+          if (h ~ /^[0-9a-f]{64}$/ && p ~ /^main\/binary-(amd64|arm64)\/(Packages|Packages\.gz)$/) {
+            split(p, parts, "/")
+            arch = parts[2]
+            sub(/^binary-/, "", arch)
+            printf "repos/%s/dists/%s/main/binary-%s/by-hash/SHA256/%s\n", repo, series, arch, h
+          }
+        }
+      ' "${release_file}" >>"${out}"
+    done < <(find -- "${src_root}/repos" -path '*/dists/*/Release' -type f -print0)
+  done
+  sort -u -o "${out}" "${out}"
+}
+
 copy_previous_byhash() {
-  local src="$1" dest="$2"
-  local path rel name hash
-  while IFS= read -r -d '' path; do
-    rel="${path#"${src}"/}"
-    case "${rel}" in
-      repos/*/dists/*/main/binary-*/by-hash/SHA256/*)
-        name="$(basename -- "${rel}")"
-        [[ "${name}" =~ ${HEX64} ]] || die "by-hash 文件名不是 SHA256: ${rel}"
-        hash="$(hex_sha256 "${path}")"
-        [[ "${hash}" == "${name}" ]] || die "by-hash 内容与文件名不一致: ${rel}"
-        install -D -m 644 -- "${path}" "${dest}/${rel}"
-        ;;
-    esac
-  done < <(find -- "${src}" -type f -print0)
+  local src="$1" dest="$2" prev2="${3:-}"
+  local allowlist="${scratch}/byhash-allowlist.txt"
+  local src_root path rel name hash
+  collect_release_byhash_allowlist "${allowlist}" "${src}" "${prev2}"
+  [[ -s "${allowlist}" ]] || return 0
+  for src_root in "${src}" "${prev2}"; do
+    [[ -n "${src_root}" && -d "${src_root}" ]] || continue
+    while IFS= read -r -d '' path; do
+      rel="${path#"${src_root}"/}"
+      case "${rel}" in
+        repos/*/dists/*/main/binary-*/by-hash/SHA256/*)
+          grep -Fxq -- "${rel}" "${allowlist}" || continue
+          name="$(basename -- "${rel}")"
+          [[ "${name}" =~ ${HEX64} ]] || die "by-hash 文件名不是 SHA256: ${rel}"
+          hash="$(hex_sha256 "${path}")"
+          [[ "${hash}" == "${name}" ]] || die "by-hash 内容与文件名不一致: ${rel}"
+          [[ -e "${dest}/${rel}" ]] || install -D -m 644 -- "${path}" "${dest}/${rel}"
+          ;;
+      esac
+    done < <(find -- "${src_root}" -type f -print0)
+  done
 }
 
 load_previous_state() {
@@ -1297,6 +1332,9 @@ copy_retained_repo() {
   mkdir -p -- "${dest}"
   while IFS= read -r -d '' path; do
     rel="${path#"${src}"/}"
+    case "${rel}" in
+      dists/*/main/binary-*/by-hash/SHA256/*) continue ;;
+    esac
     install -D -m 644 -- "${path}" "${dest}/${rel}"
   done < <(find -- "${src}" -type f -print0)
 
@@ -1338,6 +1376,9 @@ while [[ $# -gt 0 ]]; do
     --previous)
       [[ $# -ge 2 ]] || usage
       previous="$2"; shift 2 ;;
+    --previous-prev)
+      [[ $# -ge 2 ]] || usage
+      previous_prev="$2"; shift 2 ;;
     --output)
       [[ $# -ge 2 ]] || usage
       output="$2"; shift 2 ;;
@@ -1379,6 +1420,9 @@ require_cmd bash jq curl gpg gpgv gpg-agent dpkg-deb dpkg apt-ftparchive gzip fl
 catalog="$(assert_allowed_file catalog "${catalog}")"
 releases="$(assert_allowed_file releases "${releases}")"
 previous="$(assert_allowed_dir previous "${previous}" yes)"
+if [[ -n "${previous_prev}" ]]; then
+  previous_prev="$(assert_allowed_dir previous-prev "${previous_prev}" yes)"
+fi
 output="$(assert_allowed_dir output "${output}" no)"
 gnupghome="$(assert_allowed_dir gnupghome "${gnupghome}" yes)"
 fingerprint="$(strip_fp "${fingerprint}")"
@@ -1403,6 +1447,10 @@ if [[ -n "${go_downloads_json}" ]]; then
 fi
 
 assert_no_overlap "${previous}" "${output}" "previous 与 output 重叠"
+if [[ -n "${previous_prev}" ]]; then
+  assert_no_overlap "${previous_prev}" "${output}" "previous-prev 与 output 重叠"
+  assert_no_overlap "${gnupghome}" "${previous_prev}" "gnupghome 与 previous-prev 重叠"
+fi
 assert_no_overlap "${gnupghome}" "${output}" "gnupghome 与 output 重叠"
 assert_no_overlap "${gnupghome}" "${previous}" "gnupghome 与 previous 重叠"
 [[ "${output}" != "${catalog}" && "${output}" != "${releases}" ]] || die "output 与输入文件冲突"
@@ -1460,8 +1508,11 @@ scratch_owned=1
 mkdir -p -- "${work}/repos"
 
 validate_previous_tree "${previous}"
+if [[ -n "${previous_prev}" ]]; then
+  validate_previous_tree "${previous_prev}"
+fi
 assert_previous_signing_identity "${previous}"
-copy_previous_byhash "${previous}" "${work}"
+copy_previous_byhash "${previous}" "${work}" "${previous_prev}"
 load_previous_state "${previous}" "${scratch}"
 
 # 换钥：previous 中全部将复制/比对/保留的 repo 先用旧公钥 pin 认证正文+hash/size。
@@ -1535,15 +1586,15 @@ while IFS= read -r pkgjson; do
     derived_rev="$(jq -r '.upstream.revision // empty' "${go_prov_path}")"
     if jq -e 'has("build_inputs_sha256")' "${go_prov_path}" >/dev/null; then
       jq -e '.build_inputs_sha256|type=="string" and test("^[0-9a-f]{64}$")' "${go_prov_path}" >/dev/null || die "构包输入摘要非法"
-      [[ "${derived_rev}" == "$(jq -r '.revision' "${PROJECT_ROOT}/config/go.json")+${package_release_tag#v}" ]] || die "Go 修订与包来源标签不符"
-    else
-      [[ "${derived_rev}" == "$(go_checkout_derived_revision)" ]] || die "旧 Go 来源修订不符"
     fi
-    jq -e --arg pkg "${pkg}" --arg rev "${derived_rev}" '
+    [[ "${derived_rev}" == "$(go_checkout_derived_revision)" ]] || die "Go 修订与 config/go.json 不符"
+    cfg_epoch="$(jq -er '.epoch' "${PROJECT_ROOT}/config/go.json")" || die "读取 config/go.json epoch 失败"
+    [[ "$(jq -r '.upstream.epoch // empty' "${go_prov_path}")" == "${cfg_epoch}" ]] || die "Go epoch 与 config/go.json 不符"
+    jq -e --arg pkg "${pkg}" --arg rev "${derived_rev}" --arg ep "${cfg_epoch}" '
       . as $root
       | ([.packages[].package]|unique)==[$pkg]
       and all(.packages[];
-        .version == ("2:" + $root.upstream.version_debian + "-" + $rev)
+        .version == ($ep + ":" + $root.upstream.version_debian + "-" + $rev)
       )
     ' "${go_prov_path}" >/dev/null || die "活跃 Go 包族必须唯一等于 catalog package"
     go_downloads_path="${scratch}/go-downloads-${id}.json"

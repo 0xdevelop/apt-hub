@@ -1078,6 +1078,33 @@ record_rc previous_unchanged_on_assets_repo_and_url_replaced "$?" 0
 grep -Fq 'asset.url 路径与签名 Packages Filename 不符' "${TMP}/run-assets-repo-and-url-replaced.log"
 record_rc assets_repo_and_url_replaced_reason "$?" 0
 
+# 3 代 by-hash 裁剪窗口回归：保留当次(Gen 0)+前两代(Gen -1/-2)，淘汰 Gen -3（含 catalog 包与 retain 存量包）
+build_deb alpha 3.0.0 amd64 "${TMP}/debs/alpha-3.0.0-x86_64.deb"
+build_deb alpha 3.0.0 arm64 "${TMP}/debs/alpha-3.0.0-aarch64.deb"
+map_add "https://github.com/fixture/alpha/releases/download/3.0.0/alpha-3.0.0-x86_64.deb" "${TMP}/debs/alpha-3.0.0-x86_64.deb"
+map_add "https://github.com/fixture/alpha/releases/download/3.0.0/alpha-3.0.0-aarch64.deb" "${TMP}/debs/alpha-3.0.0-aarch64.deb"
+write_release_json alpha 3.0.0 "${TMP}/api/alpha.json"
+GEN3_EXTRA_HASH="$(printf 'stale-gen3-byhash\n' | sha256sum | awk '{print $1}')"
+GEN3_RETAIN_HASH="$(printf 'stale-gen3-retain-byhash\n' | sha256sum | awk '{print $1}')"
+cp -a -- "${TMP}/site3" "${TMP}/site3-with-gen3"
+printf 'stale-gen3-byhash\n' >"${TMP}/site3-with-gen3/repos/alpha/dists/jammy/main/binary-amd64/by-hash/SHA256/${GEN3_EXTRA_HASH}"
+printf 'stale-gen3-retain-byhash\n' >"${TMP}/site3-with-gen3/repos/beta/dists/jammy/main/binary-amd64/by-hash/SHA256/${GEN3_RETAIN_HASH}"
+BETA_GEN1_HASH="$(sha256sum -- "${TMP}/site3/repos/beta/dists/jammy/main/binary-amd64/Packages" | awk '{print $1}')"
+rc="$(capture_rc "${TMP}/run-byhash-window.log" "${SYNC}" \
+  --catalog "${TMP}/catalog.alpha-only.json" --releases "${TMP}/releases.json" \
+  --previous "${TMP}/site3-with-gen3" --previous-prev "${TMP}/site2" --output "${TMP}/site4" \
+  --gnupghome "${GNUPG}" --fingerprint "${FP}" --site-url "${SITE_URL}")"
+cat "${TMP}/run-byhash-window.log" >>"${EVIDENCE}"
+record_rc byhash_window_sync_ok "${rc}" 0
+GEN4_HASH="$(sha256sum -- "${TMP}/site4/repos/alpha/dists/jammy/main/binary-amd64/Packages" | awk '{print $1}')"
+assert_file "${TMP}/site4/repos/alpha/dists/jammy/main/binary-amd64/by-hash/SHA256/${GEN4_HASH}"
+assert_file "${TMP}/site4/repos/alpha/dists/jammy/main/binary-amd64/by-hash/SHA256/${NEW_HASH}"
+assert_file "${TMP}/site4/repos/alpha/dists/jammy/main/binary-amd64/by-hash/SHA256/${HASH_P}"
+assert_no_file "${TMP}/site4/repos/alpha/dists/jammy/main/binary-amd64/by-hash/SHA256/${GEN3_EXTRA_HASH}"
+assert_file "${TMP}/site4/repos/beta/dists/jammy/main/binary-amd64/by-hash/SHA256/${BETA_GEN1_HASH}"
+assert_no_file "${TMP}/site4/repos/beta/dists/jammy/main/binary-amd64/by-hash/SHA256/${GEN3_RETAIN_HASH}"
+record_rc byhash_window_pruned_gen3 "$?" 0
+
 gpgconf --homedir "${GNUPG}" --kill gpg-agent >/dev/null 2>&1 || true
 gpgconf --homedir "${GNUPG2}" --kill gpg-agent >/dev/null 2>&1 || true
 

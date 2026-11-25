@@ -9,8 +9,7 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD="${ROOT}/scripts/gen_deb_golang.sh"
 CONFIG="${ROOT}/config/go.json"
 BASE_REV="$(jq -r '.revision' "${CONFIG}")"
-PROJ_VER="$(tr -d '[:space:]' <"${ROOT}/VERSION")"
-GO_REV="${BASE_REV}+${PROJ_VER}"
+GO_REV="${BASE_REV}"
 GO_VER="2:9.9.9-${GO_REV}"
 GO_FN="9.9.9-${GO_REV}"
 TMP="${ROOT}/tmp/go-build-v9"
@@ -557,6 +556,14 @@ jq -e '.upstream.version=="go9.9.9"' "${OUT_LOCK}/provenance.json" >/dev/null
 RC=$?
 set -e
 record "version_lock_provenance" "${RC}" 0
+
+# dpkg 版本比较：新规则 2:1.27.4-2 严格高于历史遗留 2:1.27.4-1+0.0.12
+set +e
+dpkg --compare-versions "2:1.27.4-2" gt "2:1.27.4-1+0.0.12" \
+  && dpkg --compare-versions "2:1.27.4-2" gt "2:1.27.4-1+0.0.99"
+RC=$?
+set -e
+record "dpkg_upgrade_over_legacy_suffix" "${RC}" 0
 
 OUT_LOCK_MISS="${TMP}/out/fixture-version-missing"
 rm -rf -- "${OUT_LOCK_MISS}" "${OUT_LOCK_MISS}.work" "${OUT_LOCK_MISS}.scratch" \

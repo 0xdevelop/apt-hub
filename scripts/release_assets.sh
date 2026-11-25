@@ -57,10 +57,17 @@ read_catalog() {
   CONSTRUCT_N="${n}"
 }
 
+expected_go_revision() {
+  local rev
+  rev="$(jq -er '.revision' "${ROOT}/config/go.json")" || die "读取 config/go.json revision 失败"
+  [[ "${rev}" =~ ^[1-9][0-9]*$ ]] || die "config revision 语法非法"
+  printf '%s\n' "${rev}"
+}
+
 # 目录内文件与 SHA256SUMS、来源、catalog、go 配置一致则返回，否则 die。不访问远端。
 validate_constructed_dir() {
   local dl="$1" work="$2" expected_revision="${3:-}"
-  local catalog gocfg cat_id pkg epoch rev prov prov_n prov_base base_rev project_version
+  local catalog gocfg cat_id pkg epoch rev prov prov_n prov_base base_rev
   [[ -d "${dl}" && ! -L "${dl}" ]] || die "asset-dir 不是目录"
   if find "${dl}" -mindepth 1 -maxdepth 1 ! -type f -print -quit | grep -q .; then
     die "目录含非构造文件"
@@ -94,12 +101,8 @@ validate_constructed_dir() {
   ' "${catalog}" >/dev/null || die "catalog 与 go 配置组合不一致"
   pkg="$(jq -r '.package' "${gocfg}")"
   epoch="$(jq -r '.epoch' "${gocfg}")"
-  base_rev="$(jq -r '.revision' "${gocfg}")"
-  [[ -f "${ROOT}/VERSION" && ! -L "${ROOT}/VERSION" ]] || die "缺少 VERSION"
-  project_version="$(tr -d '[:space:]' <"${ROOT}/VERSION")" || die "无法读取 VERSION"
-  [[ "${base_rev}" =~ ^[0-9]+$ && "${project_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
-    || die "VERSION 或 config revision 语法非法"
-  rev="${expected_revision:-${base_rev}+${project_version}}"
+  base_rev="$(expected_go_revision)"
+  rev="${expected_revision:-${base_rev}}"
   cat_id="$(jq -r '[.packages[] | select(.source_type=="go_official_archive")][0].id' "${catalog}")"
   [[ "${cat_id}" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || die "catalog id 非法"
   prov="${dl}/${cat_id}.provenance.json"
@@ -214,7 +217,7 @@ verified_release_dir() {
     download_remote_file "${body}" "${name}" "${dir}/${name}"
   done < <(jq -r '.assets[].name' "${body}")
   revision=$(jq -er '.upstream.revision' "${dir}/golang.provenance.json") || die "来源修订缺失"
-  [[ "${revision}" == "$(jq -r '.revision' "${ROOT}/config/go.json")+${tag#v}" ]] || die "来源修订与包标签不符: ${tag}"
+  [[ "${revision}" == "$(expected_go_revision)" ]] || die "来源修订与包配置不符: ${tag}"
   validate_constructed_dir "${dir}" "${WORK_DIR}" "${revision}"
 }
 
@@ -273,14 +276,14 @@ plan_release() {
   source="${current}"
   source_tag="${tag}"
   local count="${current_count}" prov="${WORK_DIR}/provenance.json" upstream="" inputs="" prov_rev="" base_rev="" complete=0 pinned="${latest}" bump=0
-  base_rev=$(jq -er '.revision' "${ROOT}/config/go.json") || die "读取 config/go.json revision 失败"
+  base_rev=$(expected_go_revision)
   if [[ "${count}" -gt 0 ]]; then
     if jq -e '.assets|any(.name=="golang.provenance.json")' "${source}" >/dev/null; then
       download_remote_file "${source}" golang.provenance.json "${prov}"
       upstream=$(jq -er '.upstream.version|select(test("^go[0-9]+\\.[0-9]+\\.[0-9]+$"))' "${prov}") || die "来源 Go 版本非法"
       inputs=$(jq -r '.build_inputs_sha256 // empty' "${prov}") || die "来源构包输入非法"
       prov_rev=$(jq -er '.upstream.revision // empty' "${prov}") || die "来源修订缺失"
-      [[ "${prov_rev}" == "${base_rev}+${tag#v}" ]] || die "来源修订与标签不符: ${tag}"
+      [[ "${prov_rev}" == "${base_rev}" ]] || die "来源修订与包配置不符: ${tag}"
       dpkg --compare-versions "${upstream#go}" le "${latest#go}" || die "官方索引版本回退，拒绝替换现有包"
       local expected_count
       expected_count=$(jq '.architectures|length+2' "${ROOT}/config/go.json")
@@ -307,19 +310,17 @@ plan_release() {
         download_remote_file "${source}" SHA256SUMS "${WORK_DIR}/partial-SHA256SUMS"
         awk '$1 ~ /^[0-9a-f]+$/ && length($1)==64 {print $2}' "${WORK_DIR}/partial-SHA256SUMS" >>"${WORK_DIR}/partial-names.txt"
       fi
-      local partial_tag_re="${tag#v}"
-      partial_tag_re="${partial_tag_re//./\.}"
-      if grep -Ev "^golang_[0-9][0-9.]*-${base_rev}\+${partial_tag_re}_(amd64|arm64)\.deb$|^golang\.provenance\.json$" "${WORK_DIR}/partial-names.txt" | grep -q .; then
-        die "部分资产版本或文件名与目标标签不符: ${tag}"
+      if grep -Ev "^golang_[0-9][0-9.]*-${base_rev}_(amd64|arm64)\.deb$|^golang\.provenance\.json$" "${WORK_DIR}/partial-names.txt" | grep -q .; then
+        die "部分资产版本或文件名与包配置不符: ${tag}"
       fi
-      sed -n 's/^golang_\([0-9][0-9.]*\)-[0-9][0-9]*+.*_\(amd64\|arm64\)\.deb$/go\1/p' "${WORK_DIR}/partial-names.txt" | sort -u >"${WORK_DIR}/partial-versions.txt"
+      sed -n "s/^golang_\([0-9][0-9.]*\)-${base_rev}_\(amd64\|arm64\)\.deb$/go\1/p" "${WORK_DIR}/partial-names.txt" | sort -u >"${WORK_DIR}/partial-versions.txt"
       [[ "$(wc -l <"${WORK_DIR}/partial-versions.txt")" -eq 1 ]] || die "部分资产无法唯一确定 Go 版本"
       pinned=$(<"${WORK_DIR}/partial-versions.txt")
     fi
   fi
   if [[ -n "${previous_version}" ]]; then
     local candidate_version
-    candidate_version="$(jq -r '.epoch' "${ROOT}/config/go.json"):${pinned#go}-$(jq -r '.revision' "${ROOT}/config/go.json")+${tag#v}"
+    candidate_version="$(jq -er '.epoch' "${ROOT}/config/go.json"):${pinned#go}-${base_rev}"
     if dpkg --compare-versions "${candidate_version}" lt "${previous_version}"; then die "拒绝构造低于已发布的 Go 包版本"; fi
   fi
   printf 'build_packages=1\nbump_release=%s\npackage_release_tag=%s\ngo_version=%s\n' "${bump}" "${tag}" "${pinned}"
@@ -342,7 +343,7 @@ stage_upload() {
   read_catalog
   prepare_work
   local expected_rev
-  expected_rev="$(jq -er '.revision' "${ROOT}/config/go.json")+${tag#v}" || die "读取 config/go.json revision 失败"
+  expected_rev="$(expected_go_revision)"
   validate_constructed_dir "${asset_dir}" "${WORK_DIR}" "${expected_rev}"
   local resolved name remote sha size body="${WORK_DIR}/release.json" part prefix=""
   [[ -n "${output}" && "${output}" != *$'\n'* ]] || die "上传目录为空或非法"
@@ -466,7 +467,7 @@ remote_status() {
   if [[ "${source_tag}" -eq 1 ]]; then
     local revision
     revision=$(jq -er '.upstream.revision' "${dl}/golang.provenance.json") || die "来源修订缺失"
-    [[ "${revision}" == "$(jq -r '.revision' "${ROOT}/config/go.json")+${tag#v}" ]] || die "来源修订与标签不符"
+    [[ "${revision}" == "$(expected_go_revision)" ]] || die "来源修订与包配置不符"
     validate_constructed_dir "${dl}" "${WORK_DIR}" "${revision}"
   else
     validate_constructed_dir "${dl}" "${WORK_DIR}"

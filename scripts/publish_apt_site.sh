@@ -182,7 +182,7 @@ remove_old() {
   fi
   needle="releases/download/${old}/"
   scan_rc=0
-  find -- "${scan}" \( -name 'Packages' -o -name 'Packages.gz' -o -path '*/by-hash/SHA256/*' \) -type f -print0 >"${scan}/files.bin" || die "枚举索引失败，拒绝清理"
+  find -- "${scan}" \( -name 'Packages' -o -name 'Packages.gz' \) -type f -print0 >"${scan}/files.bin" || die "枚举索引失败，拒绝清理"
   while IFS= read -r -d '' path; do
     [[ -n "${path}" ]] || continue
     magic="$(od -An -t x1 -N 2 -- "${path}" | tr -d '[:space:]')"
@@ -255,6 +255,7 @@ remove_old() {
 
 restore_previous() {
   [[ ! -e tmp/previous && ! -L tmp/previous ]] || die "previous 已存在，拒绝覆盖"
+  [[ ! -e tmp/previous-prev && ! -L tmp/previous-prev ]] || die "previous-prev 已存在，拒绝覆盖"
   mkdir -p tmp/previous
   if ! git ls-remote --heads origin apt-hub-pages >tmp/apt-hub-pages-refs.txt; then
     echo "列出 apt-hub-pages 失败（网络或鉴权），不能当首轮空目录" >&2
@@ -266,12 +267,17 @@ restore_previous() {
     return 0
   fi
   git fetch origin refs/heads/apt-hub-pages:refs/remotes/origin/apt-hub-pages
-  local sha
+  local sha prev_sha=""
   sha="$(git rev-parse --verify origin/apt-hub-pages)"
   [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || die "无法解析 apt-hub-pages SHA"
   printf '%s\n' "${sha}" >tmp/apt-hub-pages-base.sha
   git archive "${sha}" | tar -x -C tmp/previous
   [[ -d tmp/previous ]] || die "恢复 apt-hub-pages 失败"
+  if prev_sha="$(git rev-parse --verify "${sha}^" 2>/dev/null)" && [[ "${prev_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+    mkdir -p tmp/previous-prev
+    git archive "${prev_sha}" | tar -x -C tmp/previous-prev
+    [[ -d tmp/previous-prev ]] || die "恢复前两代 apt-hub-pages 失败"
+  fi
 }
 
 build_site() {
@@ -299,6 +305,9 @@ build_site() {
     --release-tag "${tag}"
     --package-release-tag "${pkg_tag}"
   )
+  if [[ -d tmp/previous-prev ]]; then
+    update_args+=(--previous-prev tmp/previous-prev)
+  fi
   if [[ -d tmp/debs/upstream ]]; then
     update_args+=(--upstream-dir tmp/debs/upstream)
   fi

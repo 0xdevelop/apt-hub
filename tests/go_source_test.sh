@@ -7,7 +7,7 @@ export LANG=C
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 BASE_REV="$(jq -r '.revision' "${ROOT}/config/go.json")"
 PROJ_VER="$(tr -d '[:space:]' <"${ROOT}/VERSION")"
-GO_REV="${BASE_REV}+${PROJ_VER}"
+GO_REV="${BASE_REV}"
 VER_FULL="2:9.9.9-${GO_REV}"
 DEB_AMD="golang_9.9.9-${GO_REV}_amd64.deb"
 DEB_ARM="golang_9.9.9-${GO_REV}_arm64.deb"
@@ -287,8 +287,8 @@ jq -n '{
     source_url:"https://go.dev", license:"BSD-3-Clause",
     ubuntu_series:["jammy"],
     architectures:{
-      amd64:"^golang_[0-9]+\\.[0-9]+\\.[0-9]+-[0-9]+\\+[0-9]+\\.[0-9]+\\.[0-9]+_amd64\\.deb$",
-      arm64:"^golang_[0-9]+\\.[0-9]+\\.[0-9]+-[0-9]+\\+[0-9]+\\.[0-9]+\\.[0-9]+_arm64\\.deb$"
+      amd64:"^golang_[0-9]+\\.[0-9]+\\.[0-9]+-[0-9]+_amd64\\.deb$",
+      arm64:"^golang_[0-9]+\\.[0-9]+\\.[0-9]+-[0-9]+_arm64\\.deb$"
     }
   }]
 }' >"${TMP}/catalog-go.json"
@@ -450,7 +450,7 @@ jq -e --arg ver "${VER_FULL}" --arg tag "${GO_TAG}" '
 ' "${TMP}/site-go1/state.json" >/dev/null || rc=$?
 record_rc go_state_single_golang "${rc}" 0 || true
 rc=0
-jq -e 'all(.packages[0].assets[]; (.url|contains("%2B")) and (.filename|contains("+")) and (.filename|contains("%")|not))' \
+jq -e 'all(.packages[0].assets[]; (.url|contains("%")|not) and (.filename|contains("%")|not) and (.filename|contains("+")|not))' \
   "${TMP}/site-go1/state.json" >/dev/null || rc=1
 record_rc go_encoded_url_raw_filename "${rc}" 0 || true
 rc=0
@@ -619,7 +619,8 @@ map_add "https://api.github.com/repos/${PKG_REPO}/releases/tags/${LEGACY_TAG}" "
 map_add "https://github.com/${PKG_REPO}/releases/download/${LEGACY_TAG}/${DEB_AMD}" "${TMP}/debs/${DEB_AMD}"
 map_add "https://github.com/${PKG_REPO}/releases/download/${LEGACY_TAG}/${DEB_ARM}" "${TMP}/debs/${DEB_ARM}"
 map_add "https://github.com/${PKG_REPO}/releases/download/${LEGACY_TAG}/provenance.json" "${TMP}/api/provenance-legacy-rev1.json"
-legacy_byhash="$(find "${legacy_src}/repos/golang/dists/jammy/main/binary-amd64/by-hash/SHA256" -type f -printf '%f\n' | head -1)"
+legacy_byhash="$(sha256sum -- "${legacy_dist}/main/binary-amd64/Packages" | awk '{print $1}')"
+orphan_byhash="$(sha256sum -- "${TMP}/site-go1/repos/golang/dists/jammy/main/binary-amd64/Packages" | awk '{print $1}')"
 rc="$(capture_rc "${TMP}/run-legacy-read.log" "${SYNC}" \
   --catalog "${TMP}/catalog-empty.json" --releases "${TMP}/releases.json" \
   --previous "${legacy_src}" --output "${TMP}/site-legacy-read" \
@@ -633,6 +634,9 @@ record_rc go_legacy_tag_kept "${rc}" 0 || true
 rc=0
 [[ -n "${legacy_byhash}" && -f "${TMP}/site-legacy-read/repos/golang/dists/jammy/main/binary-amd64/by-hash/SHA256/${legacy_byhash}" ]] || rc=1
 record_rc go_legacy_keeps_byhash "${rc}" 0 || true
+rc=0
+[[ "${orphan_byhash}" == "${legacy_byhash}" || ! -e "${TMP}/site-legacy-read/repos/golang/dists/jammy/main/binary-amd64/by-hash/SHA256/${orphan_byhash}" ]] || rc=1
+record_rc go_legacy_prunes_orphan_byhash "${rc}" 0 || true
 reset_curl_map
 
 # retained 续签

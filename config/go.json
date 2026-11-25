@@ -9,7 +9,7 @@
   "homepage": "https://go.dev/",
   "section": "devel",
   "priority": "optional",
-  "revision": "1",
+  "revision": "2",
   "architectures": [
     "amd64",
     "arm64"

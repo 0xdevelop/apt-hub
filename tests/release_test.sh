@@ -40,7 +40,7 @@ record() {
 
 VER_BEFORE="$(tr -d '[:space:]' <"${VERSION_FILE}")"
 BASE_REV="$(jq -r '.revision' "${ROOT}/config/go.json")"
-GO_REV="${BASE_REV}+${VER_BEFORE}"
+GO_REV="${BASE_REV}"
 GO_UP="7.7.7-${GO_REV}"
 
 if [[ ! -e "${ROOT}/scripts/release_golang.sh" && ! -e "${ROOT}/gen_deb_golang.sh" ]]; then
@@ -728,6 +728,21 @@ if [[ -s "${OLD_STATE}/deleted.log" ]]; then
   fail "压缩 Packages 仍引用却删除"
 else
   pass "压缩 byhash/Packages.gz 引用不删"
+fi
+rm -f -- "${OLD_STATE}/deleted.log"
+printf '1\n' >"${OLD_STATE}/v0.0.3.present"
+ARCH_BYHASH_ONLY="${EVIDENCE}/archive-byhash-only"
+rm -rf -- "${ARCH_BYHASH_ONLY}"
+mkdir -p -- "${ARCH_BYHASH_ONLY}/repos/golang/dists/jammy/main/binary-amd64/by-hash/SHA256"
+printf 'Package: golang\nFilename: https://github.com/example/apt-hub/releases/download/v0.0.5/golang_7.7.7-2_amd64.deb\n'   >"${ARCH_BYHASH_ONLY}/repos/golang/dists/jammy/main/binary-amd64/Packages"
+gzip -n -c <"${ARCH_BYHASH_ONLY}/repos/golang/dists/jammy/main/binary-amd64/Packages"   >"${ARCH_BYHASH_ONLY}/repos/golang/dists/jammy/main/binary-amd64/Packages.gz"
+printf 'Package: golang\nFilename: https://github.com/example/apt-hub/releases/download/v0.0.3/golang_7.7.7-1_amd64.deb\n'   >"${ARCH_BYHASH_ONLY}/repos/golang/dists/jammy/main/binary-amd64/by-hash/SHA256/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+rc="$(run_old byhash_only EVENT_NAME=push REF=refs/tags/v0.0.5 APT_HUB_VIEW_MODE=present APT_HUB_TAG_EXISTS=1 APT_HUB_ARCHIVE_DIR="${ARCH_BYHASH_ONLY}")"
+record "remove_old_byhash_not_protect" "${rc}" 0
+if grep -Fq 'deleted v0.0.3' "${OLD_STATE}/deleted.log"; then
+  pass "仅剩 by-hash 的旧版不再阻止 remove-old 删除"
+else
+  fail "by-hash 仍错误阻止 remove-old 删除 v0.0.3"
 fi
 ARCH_PREFIX="${EVIDENCE}/archive-prefix"
 rm -rf -- "${ARCH_PREFIX}"
