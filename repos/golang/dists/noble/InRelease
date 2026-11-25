@@ -5,20 +5,20 @@ Acquire-By-Hash: yes
 Architectures: amd64 arm64
 Codename: noble
 Components: main
-Date: Mon, 23 Nov 2026 14:39:33 +0000
+Date: Wed, 25 Nov 2026 07:36:28 +0000
 Label: apt-hub
 Origin: apt-hub
 Suite: noble
-Valid-Until: Mon, 07 Dec 2026 14:39:33 +0000
+Valid-Until: Wed, 09 Dec 2026 07:36:28 +0000
 SHA256:
- fe61f966e575d1cd38eb5197f35f8ca3d0a261d0d5a6f4a7438b2756cf93436c              610 main/binary-amd64/Packages
- 6ce9077bbbfafa5c85cfa4d14219a01731e55f4a7f53c7fa840e6119e42ba4f9              396 main/binary-amd64/Packages.gz
- ec56da7fc68a21b66b8cd93f44fa5710e7f9dd88f2266064dee3f5910160ff27              610 main/binary-arm64/Packages
- db7f2c0cecdb42ff6f73e645fefdee04203b44b22122c12af1e0d864fa28b73b              398 main/binary-arm64/Packages.gz
+ ea103a541d7d06adcf0235222329d8061a80c76b14a35b93ddc3d21d5e3400fd              610 main/binary-amd64/Packages
+ ce042dbf407900818cfc3d4e04302a7d4cd379038f6d66e040907335219a71c1              397 main/binary-amd64/Packages.gz
+ f1de57dd4126e785f9266ca47d6e25660acf97a426ed271c759363a9d40f154c              610 main/binary-arm64/Packages
+ 2b30e670292ca02fcfa5b69daf5cf61d45f3ebe1151504e97ef7af25c7787eef              398 main/binary-arm64/Packages.gz
 -----BEGIN PGP SIGNATURE-----
 
-iHUEARYKAB0WIQRbXv4gXjqovXW/tXIyLsbFU1aH2wUCawRQJQAKCRAyLsbFU1aH
-25g/AP405whQU1ymWGoc3M9JnuDGASgIgVoyQe2SPf0N6P8E+gD/REF32fYGBUj2
-K04Ey9pO3mSM/C4aXN+HsKLNpdzi/gE=
-=Kxe3
+iHUEARYKAB0WIQRbXv4gXjqovXW/tXIyLsbFU1aH2wUCawaP/AAKCRAyLsbFU1aH
+2+JHAQCKVkVlwvqVx9Yvo4qI47wKTB+n+cXg6P8A66ztOVCnTgEAtebbKZ+7CkmG
+QbpDiqnUsVZ5x7x110pTzu2/7xnOCgc=
+=n1WI
 -----END PGP SIGNATURE-----
