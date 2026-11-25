@@ -5,11 +5,11 @@ Acquire-By-Hash: yes
 Architectures: amd64 arm64
 Codename: resolute
 Components: main
-Date: Wed, 25 Nov 2026 07:36:25 +0000
+Date: Wed, 25 Nov 2026 11:03:15 +0000
 Label: apt-hub
 Origin: apt-hub
 Suite: resolute
-Valid-Until: Wed, 09 Dec 2026 07:36:25 +0000
+Valid-Until: Wed, 09 Dec 2026 11:03:15 +0000
 SHA256:
  cd73027cf51ed597197d4545d2e8a2231c076e8a42102ae047bafc8e71ddbf64              652 main/binary-amd64/Packages
  792168b923563b82ea5686021290e8669c702cc8fece454a17539c5e6bedeb39              413 main/binary-amd64/Packages.gz
@@ -17,8 +17,8 @@ SHA256:
  548df5346a11bb4358c41b1785ee2a6dcef5e29f838caccd8df3e6aef873aa27              410 main/binary-arm64/Packages.gz
 -----BEGIN PGP SIGNATURE-----
 
-iHUEARYKAB0WIQRbXv4gXjqovXW/tXIyLsbFU1aH2wUCawaP+QAKCRAyLsbFU1aH
-277cAP9cnGsYOdtktmH49l2YavFO4uBhX4tYTYBEOh+rdpXv4wEA0v+MPuP0DmsQ
-k5xKbcdenN+twyNeeMTkhtRHK29PlwM=
-=XNZs
+iHUEARYKAB0WIQRbXv4gXjqovXW/tXIyLsbFU1aH2wUCawbAcwAKCRAyLsbFU1aH
+2wdaAP91JTRExxfdU4R1oQZfnRwtDfMpujx3UyVvIzshhCEh8QEAlkEOsEfWDa4s
+ekpuGAtCZC2xMmxUDQKqSrmCUuZTiwA=
+=eAK7
 -----END PGP SIGNATURE-----

@@ -1,0 +1,18 @@
+Package: golang
+Architecture: amd64
+Version: 2:1.27.4-2
+Priority: optional
+Section: devel
+Maintainer: apt-hub <apt-hub@invalid>
+Installed-Size: 248750
+Provides: golang-go (= 2:1.27.4-2)
+Conflicts: gccgo-go, golang-go (<< 2:1.27.4-2)
+Replaces: golang-go (<< 2:1.27.4-2)
+Filename: 0xdevelop/apt-hub/releases/download/v0.0.13/golang_1.27.4-2_amd64.deb
+Size: 69931584
+SHA256: fb542d36bb3e492e166aaca5022ba9744a78fbb6f6b00a34b83567a17461398f
+Homepage: https://go.dev/
+Description: Go programming language compiler
+ Official Go toolchain archive packaged for apt-hub (go1.27.4).
+
+
