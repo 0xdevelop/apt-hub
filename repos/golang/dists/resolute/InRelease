@@ -5,11 +5,11 @@ Acquire-By-Hash: yes
 Architectures: amd64 arm64
 Codename: resolute
 Components: main
-Date: Wed, 25 Nov 2026 11:03:17 +0000
+Date: Wed, 25 Nov 2026 14:24:06 +0000
 Label: apt-hub
 Origin: apt-hub
 Suite: resolute
-Valid-Until: Wed, 09 Dec 2026 11:03:17 +0000
+Valid-Until: Wed, 09 Dec 2026 14:24:06 +0000
 SHA256:
  1ff29e73b5fd9af925e7bb7eeeb4fa418c9a7a478a1ff9699a6a93a23cb7fdf9              575 main/binary-amd64/Packages
  05e3bb15c864139d59e93c79914076ce4652bdcab3e65116e0b3e387c6577fc9              394 main/binary-amd64/Packages.gz
@@ -17,8 +17,8 @@ SHA256:
  33e518ab677b6bc0e408dce0813bb85e117400764df9b5fd7cf47441765737ba              394 main/binary-arm64/Packages.gz
 -----BEGIN PGP SIGNATURE-----
 
-iHUEARYKAB0WIQRbXv4gXjqovXW/tXIyLsbFU1aH2wUCawbAdQAKCRAyLsbFU1aH
-21x7APoCC8TnJy84+2nhnF0Mg0muEJ+qwTTdXai2vXMpFUzUBgD6ApRT1b50Ekyj
-BKZtBgmVqTC7wK2a9DBEB6GHtITdZwo=
-=IchP
+iHUEARYKAB0WIQRbXv4gXjqovXW/tXIyLsbFU1aH2wUCawbvhgAKCRAyLsbFU1aH
+2zTbAPwI9nd/m2Cz/1KSkTc7vLsAk4UKKlChPVTxyEK9LuP9NwD9GPMGY1HttIS0
+O+wM/oqeItwrumoIN0RGDshiPf2/YgA=
+=VRpk
 -----END PGP SIGNATURE-----

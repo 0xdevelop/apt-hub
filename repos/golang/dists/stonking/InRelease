@@ -5,11 +5,11 @@ Acquire-By-Hash: yes
 Architectures: amd64 arm64
 Codename: stonking
 Components: main
-Date: Wed, 25 Nov 2026 11:03:17 +0000
+Date: Wed, 25 Nov 2026 14:24:06 +0000
 Label: apt-hub
 Origin: apt-hub
 Suite: stonking
-Valid-Until: Wed, 09 Dec 2026 11:03:17 +0000
+Valid-Until: Wed, 09 Dec 2026 14:24:06 +0000
 SHA256:
  1ff29e73b5fd9af925e7bb7eeeb4fa418c9a7a478a1ff9699a6a93a23cb7fdf9              575 main/binary-amd64/Packages
  05e3bb15c864139d59e93c79914076ce4652bdcab3e65116e0b3e387c6577fc9              394 main/binary-amd64/Packages.gz
@@ -17,8 +17,8 @@ SHA256:
  33e518ab677b6bc0e408dce0813bb85e117400764df9b5fd7cf47441765737ba              394 main/binary-arm64/Packages.gz
 -----BEGIN PGP SIGNATURE-----
 
-iHUEARYKAB0WIQRbXv4gXjqovXW/tXIyLsbFU1aH2wUCawbAdQAKCRAyLsbFU1aH
-2z/LAP9CasImHYj1vlti8sRzLO8oIykE3ZjfouXa7aOgB63TEwEA5j92SKpz2ySl
-Xkwt0J+hsVRBsqAM2j+U88MyrAyq1AM=
-=VesE
+iHUEARYKAB0WIQRbXv4gXjqovXW/tXIyLsbFU1aH2wUCawbvhgAKCRAyLsbFU1aH
+2whJAQDMxaLZS91oyQLNdfRr/yWzZdG5EaXtb1unEkPY2mNZMwEAwloZJX+KUQ4b
+XIuEOFyMLcom0JgxdAio3FqcaURegQ0=
+=tBEj
 -----END PGP SIGNATURE-----
