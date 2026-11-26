@@ -169,7 +169,7 @@ jobs:
           scripts/release_assets.sh prepare-archives --go-version "${GO_VERSION}" --downloads-json tmp/go-downloads.json --archive-dir tmp/go-archives || exit $?
           bash ./build.sh --go-version "${GO_VERSION}" --downloads-json tmp/go-downloads.json --archive-dir tmp/go-archives && bash ./build.sh test || exit $?
           scripts/release_assets.sh local-status --asset-dir ./build/upload_tmp_dir || exit $?
-          scripts/release_assets.sh stage-upload --repository "${REPOSITORY}" --tag "${TAG}" --asset-dir ./build/upload_tmp_dir --output-dir tmp/missing-assets >>"$GITHUB_OUTPUT"
+          scripts/release_assets.sh stage-upload --repository "${REPOSITORY}" --tag "${TAG}" --asset-dir ./build/upload_tmp_dir --output-dir tmp/release-assets >>"$GITHUB_OUTPUT"
 
       - name: 复用已核验旧 Release 资产
         id: reuse
@@ -192,16 +192,15 @@ jobs:
           curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 120 --retry 2 'https://go.dev/dl/?mode=json&include=all' -o tmp/go-downloads.json
           scripts/release_assets.sh prepare-reuse --repository "${REPOSITORY}" --source-tag "${REUSE_FROM_TAG}" --tag "${TAG}" --downloads-json tmp/go-downloads.json --asset-dir ./build/upload_tmp_dir || exit $?
           scripts/release_assets.sh local-status --repository "${REPOSITORY}" --tag "${TAG}" --asset-dir ./build/upload_tmp_dir || exit $?
-          scripts/release_assets.sh stage-upload --repository "${REPOSITORY}" --tag "${TAG}" --asset-dir ./build/upload_tmp_dir --output-dir tmp/missing-assets >>"$GITHUB_OUTPUT"
+          scripts/release_assets.sh stage-upload --repository "${REPOSITORY}" --tag "${TAG}" --asset-dir ./build/upload_tmp_dir --output-dir tmp/release-assets >>"$GITHUB_OUTPUT"
 
-      - name: 上传构造包
+      - name: Upload binaries
+        id: upload_file_to_release
         if: steps.assets.outputs.upload == '1' || steps.reuse.outputs.upload == '1'
-        uses: george012/upload_github_release_assets_action@b56f61e7a10692c6ee2d7482b451911393479030
+        uses: george012/upload_github_release_assets_action@latest
         with:
-          path: ${{ steps.assets.outputs.upload_path || steps.reuse.outputs.upload_path }}
+          path: ./tmp/release-assets/*
           tag_name: ${{ needs.release.outputs.release_tag }}
-          token: ${{ github.token }}
-          fail_on_unmatched_files: true
 
       - name: 核验已上传包来源
         if: needs.release.outputs.go_version != ''

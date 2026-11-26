@@ -566,7 +566,8 @@ if grep -Eq '^  release:' "${WF_REL}" \
   && grep -Eq '^  Build:' "${WF_REL}" \
   && grep -Eq '^  RemoveOldRelease:' "${WF_REL}" \
   && grep -Fq 'ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd' "${WF_REL}" \
-  && grep -Fq 'george012/upload_github_release_assets_action@b56f61e7a10692c6ee2d7482b451911393479030' "${WF_REL}" \
+  && grep -Fq 'george012/upload_github_release_assets_action@latest' "${WF_REL}" \
+  && grep -Fq 'path: ./tmp/release-assets/*' "${WF_REL}" \
   && ! grep -Eq 'upload-pages-artifact|deploy-pages@|upload-artifact|download-artifact' "${WF_REL}" \
   && grep -Fq 'site#http://' "${PUBLISH}" \
   && grep -Fq 'publish_apt_site.sh publish' "${WF_REL}" \

@@ -410,7 +410,15 @@ if grep -Fq '          EVENT_NAME: push' "${WF}" \
 else
   fail '清理标签或来源核验接线缺失'
 fi
-if grep -Fq 'george012/upload_github_release_assets_action@' "${WF}" && grep -Fq 'bash ./build.sh test' "${WF}"; then pass '母版构建检验与直传 assets'; else fail '母版调用链缺失'; fi
+if grep -Fq 'uses: george012/upload_github_release_assets_action@latest' "${WF}" \
+  && grep -Fq 'id: upload_file_to_release' "${WF}" \
+  && grep -Fq 'path: ./tmp/release-assets/*' "${WF}" \
+  && grep -Fq 'bash ./build.sh test' "${WF}" \
+  && ! grep -Fq 'gh release upload' "${WF}"; then
+  pass '母版构建检验与直传 assets'
+else
+  fail '母版调用链缺失'
+fi
 assets_run="${WORK}/assets-run.sh"
 awk '
   /^      - / { step = 0; cap = 0 }
