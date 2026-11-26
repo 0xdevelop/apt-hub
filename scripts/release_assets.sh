@@ -654,6 +654,11 @@ local_status() {
 resolve_reuse_asset_dir() {
   local raw="$1" abs parent base parent_abs root_tmp="${ROOT}/tmp"
   [[ -n "${raw}" ]] || die "缺少 asset-dir"
+  # 允许相对路径的 ./ 前缀；仍拒绝路径中的 . 或 .. 组件。
+  while [[ "${raw}" == ./* ]]; do
+    raw="${raw#./}"
+  done
+  [[ -n "${raw}" && "${raw}" != "." && "${raw}" != ".." ]] || die "asset-dir 不能含 . 或 .."
   case "/${raw}/" in */../*|*/./*) die "asset-dir 不能含 . 或 .." ;; esac
   if [[ "${raw}" != /* ]]; then
     abs="${PWD%/}/${raw}"

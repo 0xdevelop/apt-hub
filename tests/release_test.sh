@@ -953,6 +953,64 @@ else
 fi
 rm -rf -- "${pa_dir}"
 
+# ---------- resolve_reuse_asset_dir: 允许 ./ 前缀，拒绝 . / .. 组件 ----------
+rad="${EVIDENCE}/resolve-asset-dir"
+rm -rf -- "${rad}"
+mkdir -p -- "${rad}/tmp"
+awk '/^resolve_reuse_asset_dir\(\)/,/^}$/' "${ASSETS}" >"${rad}/fn.sh"
+grep -q '^resolve_reuse_asset_dir()' "${rad}/fn.sh" || fail "未能抽出 resolve_reuse_asset_dir"
+cat >"${rad}/driver.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$1"
+cd -- "$ROOT"
+die() { printf 'release_assets.sh: %s\n' "$*" >&2; exit 1; }
+# shellcheck disable=SC1091
+. "$2"
+resolve_reuse_asset_dir "$3"
+EOF
+chmod a+x -- "${rad}/driver.sh"
+resolve_probe() {
+  local name="$1" rel="$2" want="$3"
+  local rc=0
+  set +e
+  ( cd -- "${rad}" && bash "${rad}/driver.sh" "${rad}" "${rad}/fn.sh" "${rel}" ) \
+    >"${EVIDENCE}/runs/rad-${name}.out" 2>"${EVIDENCE}/runs/rad-${name}.err"
+  rc=$?
+  set -e
+  record "resolve_asset_dir_${name}" "${rc}" "${want}"
+}
+resolve_probe dot_prefix "./build/upload_tmp_dir" 0
+if [[ "$(tr -d '\n' <"${EVIDENCE}/runs/rad-dot_prefix.out")" == "${rad}/build/upload_tmp_dir" ]]; then
+  pass "允许 ./build/upload_tmp_dir 并解析到 build/upload_tmp_dir"
+else
+  fail "未接受 ./build/upload_tmp_dir: $(cat "${EVIDENCE}/runs/rad-dot_prefix.out" "${EVIDENCE}/runs/rad-dot_prefix.err")"
+fi
+resolve_probe plain "build/upload_tmp_dir" 0
+if [[ "$(tr -d '\n' <"${EVIDENCE}/runs/rad-plain.out")" == "${rad}/build/upload_tmp_dir" ]]; then
+  pass "build/upload_tmp_dir 解析一致"
+else
+  fail "build/upload_tmp_dir 解析不符"
+fi
+resolve_probe tmp_dot "./tmp/reuse-dest" 0
+if [[ "$(tr -d '\n' <"${EVIDENCE}/runs/rad-tmp_dot.out")" == "${rad}/tmp/reuse-dest" ]]; then
+  pass "允许 ./tmp 子目录"
+else
+  fail "./tmp 子目录解析不符"
+fi
+resolve_probe parent "../build/upload_tmp_dir" 1
+if grep -Fq 'asset-dir 不能含 . 或 ..' "${EVIDENCE}/runs/rad-parent.err"; then
+  pass "拒绝 ../ 前缀"
+else
+  fail "../ 前缀未被拒绝"
+fi
+resolve_probe mid_dot "build/./upload_tmp_dir" 1
+if grep -Fq 'asset-dir 不能含 . 或 ..' "${EVIDENCE}/runs/rad-mid_dot.err"; then
+  pass "拒绝路径中的 . 组件"
+else
+  fail "路径中的 . 组件未被拒绝"
+fi
+
 if [[ "$(sha256sum -- "${ROOT}/config/packages.json" "${ROOT}/config/go.json")" == "${cfg_before}" ]]; then
   pass "主配置未被测试改写"
 else

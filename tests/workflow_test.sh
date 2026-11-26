@@ -431,7 +431,7 @@ awk '
 if [[ -s "${assets_run}" ]] \
   && grep -Fq 'scripts/release_assets.sh prepare-archives --go-version "${GO_VERSION}" --downloads-json tmp/go-downloads.json --archive-dir tmp/go-archives || exit $?' "${assets_run}" \
   && grep -Fq 'bash ./build.sh --go-version "${GO_VERSION}" --downloads-json tmp/go-downloads.json --archive-dir tmp/go-archives && bash ./build.sh test || exit $?' "${assets_run}" \
-  && grep -Fq 'local-status --asset-dir ./build/upload_tmp_dir || exit $?' "${assets_run}"; then
+  && grep -Fq 'local-status --asset-dir build/upload_tmp_dir || exit $?' "${assets_run}"; then
   pass '抽出的 assets run 含失败传播与 local-status'
 else
   fail '抽出的 assets run 不符'
@@ -515,8 +515,8 @@ awk '
 if [[ -s "${reuse_run}" ]] \
   && grep -Fq 'reuse_from_tag: ${{ steps.tag.outputs.reuse_from_tag }}' "${WF}" \
   && grep -Fq 'steps.reuse.outputs.upload == '\''1'\''' "${WF}" \
-  && grep -Fq 'scripts/release_assets.sh prepare-reuse --repository "${REPOSITORY}" --source-tag "${REUSE_FROM_TAG}" --tag "${TAG}" --downloads-json tmp/go-downloads.json --asset-dir ./build/upload_tmp_dir || exit $?' "${reuse_run}" \
-  && grep -Fq 'scripts/release_assets.sh local-status --repository "${REPOSITORY}" --tag "${TAG}" --asset-dir ./build/upload_tmp_dir || exit $?' "${reuse_run}"; then
+  && grep -Fq 'scripts/release_assets.sh prepare-reuse --repository "${REPOSITORY}" --source-tag "${REUSE_FROM_TAG}" --tag "${TAG}" --downloads-json tmp/go-downloads.json --asset-dir build/upload_tmp_dir || exit $?' "${reuse_run}" \
+  && grep -Fq 'scripts/release_assets.sh local-status --repository "${REPOSITORY}" --tag "${TAG}" --asset-dir build/upload_tmp_dir || exit $?' "${reuse_run}"; then
   pass '抽出的 reuse run 与 upload 接线完整'
 else
   fail '抽出的 reuse run 或 upload 接线不符'
