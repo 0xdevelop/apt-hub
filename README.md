@@ -36,38 +36,51 @@ curl -fsSL --proto '=https' --proto-redir '=https' -o add_source.sh 'https://apt
 | [rustdesk](https://github.com/rustdesk/rustdesk/releases/tag/1.5.3) | 1.5.3 | jammy, noble, resolute, stonking · amd64, arm64 | 开源远程桌面 |
 <!-- APT-HUB:PACKAGES:END -->
 
-## 新增软件流程规范
+## 新增软件
 
-接入入口是 `config/packages.json`，不为每个软件另建目录或复制同步脚本。官方已有 GitHub `.deb` 时，优先用 `scripts/add_package.sh` 填写 `id`、`repository`、`package`、说明、源地址、许可证和各架构资产正则；脚本会校验 Debian 包名、清单去重、Ubuntu apt/snap 同名冲突，并默认核对上游 `/releases/latest`。也可以按 `templates/package_github_deb.json` 手工追加条目。清单生效后，下一次 `auto_check.sh` 或手动发版会纳入新软件；已加源的使用者重跑同一条加源命令即可。版本、大小和摘要由官方发布与包元数据取得，不手填。更细的字段说明见[维护说明](docs/maintenance.md#新增软件)。
+官方已有 GitHub `.deb` 时，用 `scripts/add_package.sh` 写入 `config/packages.json`。脚本校验 Debian 包名、清单去重、Ubuntu apt/snap 同名冲突，并默认核对上游 `/releases/latest` 资产正则。命令、字段和手工模板见[维护说明](docs/maintenance.md#新增软件)。
 
-新增软件的 `package` 必须等于 `.deb` 的 `Package` 字段，并遵守 Debian/APT 包名约定：以小写字母或数字开头，其后只使用小写字母、数字、`-`、`+`、`.`。选名时必须与 Ubuntu 自带的 apt 包和 snap 包名错开，避免同名冲突。
-
-上游只有归档、没有官方 `.deb` 时，在 `scripts/` 实现具体构包并接入 `gen_debs.sh`，不复制发布流程，也不在客户端安装阶段联网下载主程序。
+上游只有归档、没有官方 `.deb` 时，在 `scripts/` 实现构包并接入 `gen_debs.sh`，不要复制发布流程，也不要在客户端安装时联网下载主程序。
 
 ## 维护
 
-首次部署只需一个签名私钥 Secret 和 Pages，步骤见[部署与密钥](docs/nees_user_read.md#部署自己的源)。日常联动更新在有 `origin` 推送权限的 Linux 机器上启用 systemd 定时器，由 `scripts/auto_check.sh` 巡检全部已支持软件；发现更新并通过本地预验后调用 `git_tag.sh` 打 tag，GitHub Actions 再按母版链路发版。也可先预览：
+首次部署只要一个签名私钥 Secret 和 Pages，见[使用与部署](docs/nees_user_read.md#部署自己的源)。
+
+日常更新在有 `origin` 推送权限的 Linux 机器上运行 `scripts/auto_check.sh`：巡检全部已支持软件，本地预验通过后调用 `git_tag.sh` 打 tag；GitHub Actions 仅在 `push: tags` 上走 `Release → Build → PublishPages → RemoveOldRelease`。无更新时 exit 0，不打 tag。换钥等手动重签用 Actions `workflow_dispatch` 的 `rotate_from`，不会在 Actions 里升版。
 
 ```bash
 bash scripts/auto_check.sh --dry-run
-```
-
-手动发版在干净仓库执行：
-
-```bash
 bash git_tag.sh
 ```
 
-默认自动升版。`push: tags` 工作流完成 `Release → Build → PublishPages → RemoveOldRelease`：构造包或复用包上传到本仓 `vX.Y.Z` assets，签名站点保存到 `apt-hub-pages` 并发布，成功后回写列表。`Release` 与 `Build`（含 Pages 部署及列表回写）全部成功后，自动调用既有两代清理；不足两代或有效索引仍引用的资产不删除。换钥等手动重签使用 Actions `workflow_dispatch` 的 `rotate_from`，不会在 Actions 里升版。
+systemd 分两套，命令可直接复制，见[维护说明：systemd 定时巡检](docs/maintenance.md#systemd-定时巡检)：
 
-核心脚本的职责边界见 [AGENTS.md](AGENTS.md) 与 [CLAUDE.md](CLAUDE.md)。
+- 系统级：`templates/systemd/apt-hub-auto-check.service`（`sudo` 安装，服务仍以维护者账户运行）
+- 普通用户级：`templates/systemd/apt-hub-auto-check.user.service`（安装为 `~/.config/systemd/user/apt-hub-auto-check.service`；注销后仍要跑时执行 `loginctl enable-linger`）
+- 两套共用 `templates/systemd/apt-hub-auto-check.timer`（默认每天北京时间 12:17）
+- 每次运行覆盖同一文件 `tmp/auto_check.last.log`（`cat tmp/auto_check.last.log` 查看），不向 journald 堆积历史
 
-系统级（sudo 安装，服务仍以仓库维护者账户运行）和普通用户级（`systemd --user`）的完整启用、手动触发、查看日志与卸载步骤见[维护说明：systemd 定时巡检](docs/maintenance.md#systemd-定时巡检)。模板在 `templates/systemd/`。每次运行覆盖同一文件 `tmp/auto_check.last.log`，不向 journald 堆积历史。默认每天北京时间 12:17 运行；无更新时脚本 exit 0 且不打 tag。
+### 脚本一览
+
+| 脚本 | 职责 |
+| --- | --- |
+| `scripts/add_source.sh` | 使用者加源，发布时原样放到 Pages |
+| `scripts/add_package.sh` | 按模板把官方 GitHub `.deb` 写入 `config/packages.json` |
+| `scripts/auto_check.sh` | 巡检上游；`--dry-run` 只探测和预验；有更新则预验后调用 `git_tag.sh` |
+| `git_tag.sh` | 唯一升版、打 tag、推送入口 |
+| `build.sh` | 构包入口；`--arch` 只预验本机架构；`build.sh test` 跑全量测试 |
+| `scripts/sync.sh` | 生成签名 APT 索引；`--check-catalog-only` 只验清单 |
+| `scripts/render.sh` | 渲染 README 列表和 Pages 首页 |
+| `scripts/release_assets.sh` | 为当前 tag 决定构包、复用或跳过，并核验 Release 资产 |
+| `scripts/reindex_apt_repo.sh` | 在 Actions 中重索引、签名并发布 `apt-hub-pages` |
+| `scripts/update_sources.sh` | 本地/CI 生成签源候选，不上传、不推送 |
+
+更细的职责边界见 [AGENTS.md](AGENTS.md) 与 [CLAUDE.md](CLAUDE.md)。
 
 ## 文档
 
-- [项目规范](docs/PROJECT_STANDARDS.md)：本地工作流、版本管理与发布授权。
+- [维护说明](docs/maintenance.md)：新增软件、巡检发版、systemd（系统级与普通用户级）和单日志。
 - [使用与部署](docs/nees_user_read.md)：加源、Pages、签名密钥与恢复。
-- [维护说明](docs/maintenance.md)：新增软件、版本职责、本地验证，以及 systemd 定时巡检（系统级与普通用户级）。
-- [AGENTS.md](AGENTS.md) · [CLAUDE.md](CLAUDE.md)：核心脚本职责与发版边界。
-- [验证记录](docs/verification.md) · [需求与边界](docs/plan.md)。
+- [项目规范](docs/PROJECT_STANDARDS.md)：路径、SSH、版本号与发版授权。
+- [AGENTS.md](AGENTS.md) · [CLAUDE.md](CLAUDE.md)：协作约束与脚本职责。
+- [验证记录](docs/verification.md) · [需求与边界](docs/plan.md)：历史记录，不是现行操作说明。

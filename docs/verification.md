@@ -1,5 +1,8 @@
 # 验证记录
 
+> 本文是历史记录，不作为现行操作说明。现行约定见 [README](../README.md)、[维护说明](maintenance.md)、[项目规范](PROJECT_STANDARDS.md)。
+
+
 ## 2026-11-25 跨标签同输入 Go 资产原字节复用与只读基线核对
 
 - **运行环境与状态记录回退**：现场工作区位于 `spark-901f` (`/home/certa/workspace/apt-hub`)；本仓库未启用/未连接 `xjb` 项目、任务或局域网后端锁（未初始化或改动任何服务/密钥/认证），按既有 Markdown 状态回退约定将完整记录记于本文件及 `docs/maintenance.md`。本地仓库在提交前已快进合入 `origin/main` 回写提交 `55e73cb`。

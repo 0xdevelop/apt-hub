@@ -1,6 +1,6 @@
 # apt-hub 项目规范
 
-本文档汇总本项目已确认的开发与发布约定。后续协作必须遵守本文；禁止以口头习惯或临时便利替代这些条款。
+后续协作必须遵守这些已确认条款，禁止以口头习惯或临时便利替代。
 
 ## 1. 仓库位置
 
@@ -30,9 +30,9 @@
 ## 5. 自动升版逻辑
 
 - 自动升版由有推送权限的机器运行 `scripts/auto_check.sh` 调用 `git_tag.sh`，再由 `push: tags` 工作流发版。Actions 不再使用 `schedule`，也不在工作流里调用 `git_tag.sh`。
-- 必须遵守“有实质变化才升、没变化不升”。
-- 禁止为了升而升。
-- 必要性由 `auto_check.sh` 判断：上游构包软件更新、外链 `.deb` 新版本、或签名超过续签阈值。
+- systemd 系统级与普通用户级（用户级注销后需 `loginctl enable-linger`）的安装、以及覆盖日志 `tmp/auto_check.last.log`，见 `docs/maintenance.md`。
+- 必须遵守“有实质变化才升、没变化不升”。禁止为了升而升。
+- 必要性由 `auto_check.sh` 判断：上游构包软件更新、外链 `.deb` 新版本、或签名超过续签阈值。官方 GitHub `.deb` 用 `scripts/add_package.sh` 接入。
 - 空 Release 必须只补包，禁止因此新打 tag 或盲目升版。
 
 ## 6. 发布清理脚本

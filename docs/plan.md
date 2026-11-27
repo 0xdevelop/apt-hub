@@ -1,5 +1,8 @@
 # 实施计划
 
+> 本文是历史记录，不作为现行操作说明。现行约定见 [README](../README.md)、[维护说明](maintenance.md)、[项目规范](PROJECT_STANDARDS.md)。
+
+
 ## 用户已定边界与出处
 
 2026-11-02 本会话：
