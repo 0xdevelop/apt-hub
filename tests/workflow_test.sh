@@ -386,25 +386,38 @@ if ! grep -Fq cleanup_release "${WF}" \
 else
   fail '母版清理存在事件/构包门禁或缺少成功依赖'
 fi
-# Build 仅在 push: tags 上传，避免 schedule/workflow_dispatch 在 refs/heads/main 调用上传 action。
-# Pages 独立 job，有变构包与无变复用都进入发布链，不被 build_packages 门禁跳过。
+# Build 仅在 push: tags 上传，避免 workflow_dispatch 在 refs/heads/main 调用上传 action。
+# 定时巡检改由 scripts/auto_check.sh 在有权限的机器上触发 git_tag.sh，工作流不再使用 schedule。
+# Pages 独立 job：tag 推送在 Build 成功后发布；workflow_dispatch（如换钥）允许在 Build 被跳过时发布。
 if awk '
   /^  Build:/{job="Build"; next}
   /^  PublishPages:/{job="PublishPages"; next}
   /^  [A-Za-z0-9_]+:/{if(job!="" && job!="Build" && job!="PublishPages") job=""}
   job=="Build" && /^    needs: release$/{bneeds=1}
   job=="Build" && /^    if: github.event_name == '\''push'\''$/{bpush=1}
-  job=="PublishPages" && /^    if:/{pbad=1}
+  job=="PublishPages" && /^    if:/ {
+    if ($0 ~ /always\(\)/ && $0 ~ /needs\.release\.result == .success./ && $0 ~ /needs\.Build\.result == .success./ && $0 ~ /workflow_dispatch/ && $0 ~ /skipped/) pif=1; else pbad=1
+  }
   job=="PublishPages" && /^      - release$/{prelease=1}
   job=="PublishPages" && /^      - Build$/{pbuild=1}
   job=="PublishPages" && /^      - name: /{step=($0 ~ /生成并发布 Pages/)}
   job=="PublishPages" && step && /^        if:/{pbad=1}
   job=="PublishPages" && step && /run: bash scripts\/reindex_apt_repo.sh publish$/{publish=1}
-  END{exit (pbad || !bneeds || !bpush || !prelease || !pbuild || !publish)}
+  END{exit (pbad || !pif || !bneeds || !bpush || !prelease || !pbuild || !publish)}
 ' "${WF}"; then
-  pass '有变构包与无变复用都进入独立 PublishPages，Build 仅在 tag 推送上传'
+  pass '有变构包与无变复用都进入独立 PublishPages；Build 仅在 tag 推送上传；dispatch 换钥可跳过 Build'
 else
-  fail 'Build 缺 push 门禁，或 PublishPages 被条件跳过/缺 Release、Build 依赖'
+  fail 'Build 缺 push 门禁，或 PublishPages 条件/依赖不正确'
+fi
+if awk '
+  /^on:/{on=1; next}
+  on && /^[a-zA-Z]/{on=0}
+  on && /schedule:/{bad=1}
+  END{exit bad?1:0}
+' "${WF}" && ! grep -Fq "cron:" "${WF}"; then
+  pass '工作流已去掉 schedule 定时触发'
+else
+  fail 'release.yml 仍含 schedule/cron'
 fi
 # shellcheck disable=SC2016 # 匹配工作流原始表达式，不在测试进程展开
 if grep -Fq '          EVENT_NAME: push' "${WF}" \

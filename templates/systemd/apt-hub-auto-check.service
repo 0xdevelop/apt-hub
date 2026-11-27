@@ -1,0 +1,17 @@
+[Unit]
+Description=apt-hub 上游巡检与自动发版触发
+Documentation=file://@REPO@/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@USER@
+Group=@USER@
+WorkingDirectory=@REPO@
+# 以对 origin 有推送权限的维护者账户运行，沿用其 SSH 与 git 身份。
+ExecStart=@REPO@/scripts/auto_check.sh
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

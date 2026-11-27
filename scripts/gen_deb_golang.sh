@@ -35,7 +35,7 @@ die() {
 
 usage() {
   cat >&2 <<'EOF'
-用法: scripts/gen_deb_golang.sh --config <config/go.json> --output <全新/空的本项目tmp内目录> [--version <goX.Y.Z>] [--downloads-json <官方JSON普通文件>] [--archive-dir <已下载归档目录>]
+用法: scripts/gen_deb_golang.sh --config <config/go.json> --output <全新/空的本项目tmp内目录> [--version <goX.Y.Z>] [--downloads-json <官方JSON普通文件>] [--archive-dir <已下载归档目录>] [--arch <amd64|arm64>]
 EOF
   exit 2
 }
@@ -536,6 +536,8 @@ EOF
   emit_deb_row "${arch}" "golang" "${deb_path}" "${ver_ctrl}" "${url}" "${sha}" "${size}" "${mtime_epoch}"
 }
 
+arch_filter=""
+
 # ---- args ----
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -562,6 +564,11 @@ while [[ $# -gt 0 ]]; do
     --version)
       [[ $# -ge 2 ]] || usage
       version_lock="$2"
+      shift 2
+      ;;
+    --arch)
+      [[ $# -ge 2 ]] || usage
+      arch_filter="$2"
       shift 2
       ;;
     -h|--help)
@@ -693,6 +700,17 @@ jq -r '.architectures[]' "${config}" >"${archs_file}" \
 mapfile -t archs <"${archs_file}" \
   || die "解析 architectures 失败"
 [[ "${#archs[@]}" -gt 0 ]] || die "architectures 为空"
+if [[ -n "${arch_filter}" ]]; then
+  [[ "${arch_filter}" =~ ^(amd64|arm64)$ ]] || die "非法 --arch: ${arch_filter}"
+  filtered=()
+  for arch in "${archs[@]}"; do
+    if [[ "${arch}" == "${arch_filter}" ]]; then
+      filtered+=("${arch}")
+    fi
+  done
+  [[ "${#filtered[@]}" -eq 1 ]] || die "--arch ${arch_filter} 不在 config/go.json architectures 中"
+  archs=("${filtered[@]}")
+fi
 
 prov_rows="${scratch}/prov-rows.jsonl"
 : >"${prov_rows}" || die "无法初始化 provenance 行文件"

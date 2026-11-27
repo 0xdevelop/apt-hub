@@ -4,8 +4,6 @@ on:
   push:
     tags:
       - 'v*'
-  schedule:
-    - cron: "17 4 * * *"
   workflow_dispatch:
     inputs:
       rotate_from:
@@ -57,7 +55,7 @@ jobs:
           if [[ "${EVENT_NAME}" == "push" ]]; then
             [[ "${REF}" == "refs/tags/${tag}" ]] || { echo "VERSION 与 tag 不符" >&2; exit 1; }
           else
-            [[ "${EVENT_NAME}" == schedule || "${EVENT_NAME}" == workflow_dispatch ]] || exit 1
+            [[ "${EVENT_NAME}" == workflow_dispatch ]] || exit 1
           fi
           git fetch origin refs/heads/main:refs/remotes/origin/main
           source_sha=$(git rev-parse HEAD)
@@ -91,19 +89,6 @@ jobs:
           if [[ -n "${reuse_from_tag}" ]]; then
             [[ "${build_packages}" == 0 && "${bump_release}" == 0 && "${reuse_from_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
             dpkg --compare-versions "${reuse_from_tag#v}" lt "${tag#v}" || exit 1
-          fi
-          if [[ "${bump_release}" == 1 ]]; then
-            actor=$(gh api "users/${GITHUB_ACTOR}")
-            login=$(jq -er '.login' <<<"${actor}")
-            actor_id=$(jq -er '.id|tostring' <<<"${actor}")
-            jq -e '.type=="User"' <<<"${actor}" >/dev/null
-            [[ "${login,,}" == "${GITHUB_ACTOR,,}" && "${actor_id}" == "${GITHUB_ACTOR_ID}" && "${actor_id}" =~ ^[1-9][0-9]*$ && "${login}" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] || exit 1
-            git checkout -B main "${source_sha}"
-            GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0="${login}" GIT_CONFIG_KEY_1=user.email GIT_CONFIG_VALUE_1="${actor_id}+${login}@users.noreply.github.com" bash git_tag.sh
-            tag="v$(tr -d '[:space:]' <VERSION)"
-            package_tag="${tag}"
-            reuse_from_tag=""
-            source_sha=$(git rev-parse HEAD)
           fi
           printf 'release_tag=%s\npackage_release_tag=%s\ngo_version=%s\nbuild_packages=%s\nreuse_from_tag=%s\nsource_sha=%s\n' "${tag}" "${package_tag}" "${go_version}" "${build_packages}" "${reuse_from_tag}" "${source_sha}" >>"$GITHUB_OUTPUT"
 
@@ -206,6 +191,7 @@ jobs:
     needs:
       - release
       - Build
+    if: always() && needs.release.result == 'success' && (needs.Build.result == 'success' || (github.event_name == 'workflow_dispatch' && needs.Build.result == 'skipped'))
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     permissions:

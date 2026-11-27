@@ -28,6 +28,7 @@ SITE_URL_RE='^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]+)?(/[A-Za-z
 GO_DOWNLOADS_DEFAULT_URL='https://go.dev/dl/?mode=json&include=all'
 
 catalog=""
+check_catalog_only=0
 releases=""
 previous=""
 previous_prev=""
@@ -57,6 +58,7 @@ die() {
 usage() {
   cat >&2 <<'EOF'
 用法: scripts/sync.sh --catalog <file> --releases <file> --previous <dir> [--previous-prev <dir>] --output <dir> --gnupghome <dir> --fingerprint <完整指纹> --site-url <https站点URL> [--package-repository <owner/repo>] [--release-tag <vX.Y.Z>] [--upstream-dir <dir>] [--go-downloads-json <file>] [--rotate-from <旧完整指纹>]
+  scripts/sync.sh --check-catalog-only --catalog <file>
 EOF
   exit 2
 }
@@ -1432,12 +1434,25 @@ while [[ $# -gt 0 ]]; do
     --rotate-from)
       [[ $# -ge 2 ]] || usage
       rotate_from="$2"; shift 2 ;;
+    --check-catalog-only)
+      check_catalog_only=1; shift ;;
     -h|--help)
       usage ;;
     *)
       die "未知参数: $1" ;;
   esac
 done
+
+if [[ "${check_catalog_only}" -eq 1 ]]; then
+  [[ -n "${catalog}" ]] || usage
+  [[ -z "${releases}" && -z "${previous}" && -z "${previous_prev}" && -z "${output}" && -z "${gnupghome}" && -z "${fingerprint}" && -z "${site_url}" ]]     || die "--check-catalog-only 只接受 --catalog"
+  require_cmd bash jq
+  catalog="$(assert_allowed_file catalog "${catalog}")"
+  validate_catalog "${catalog}"
+  printf 'sync.sh: catalog ok
+'
+  exit 0
+fi
 
 [[ -n "${catalog}" && -n "${releases}" && -n "${previous}" && -n "${output}" && -n "${gnupghome}" && -n "${fingerprint}" && -n "${site_url}" ]] || usage
 

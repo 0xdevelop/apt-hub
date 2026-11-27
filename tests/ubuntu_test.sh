@@ -784,11 +784,11 @@ else
   pass "README 不取 apt-hub-pages 最新 tip"
 fi
 if sed -n '/^on:/,/^permissions:/p' "$PUB" | grep -q 'workflow_dispatch:' \
-  && sed -n '/^on:/,/^permissions:/p' "$PUB" | grep -q 'schedule:' \
+  && ! sed -n '/^on:/,/^permissions:/p' "$PUB" | grep -q 'schedule:' \
   && sed -n '/^on:/,/^permissions:/p' "$PUB" | grep -q 'push:' \
   && ! sed -n '/^on:/,/^permissions:/p' "$PUB" | grep -q 'pull_request:' \
   && [[ ! -e "$ROOT/.github/workflows/ubuntu-publish.yml" ]]; then
-  pass "发布在 release.yml，无独立 ubuntu-publish"
+  pass "发布在 release.yml，无独立 ubuntu-publish，无 schedule"
 else
   fail "发布触发或残留 ubuntu-publish 不对"
 fi

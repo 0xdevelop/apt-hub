@@ -38,7 +38,7 @@ curl -fsSL --proto '=https' --proto-redir '=https' -o add_source.sh 'https://apt
 
 ## 新增软件流程规范
 
-接入入口是 `config/packages.json`，不为每个软件另建目录或复制同步脚本。官方已有 `.deb` 时，按 `templates/package_github_deb.json` 把新条目追加进 `packages` 数组，保留已有项，按真实信息填写。清单生效后，下一次发布会纳入新软件；已加源的使用者重跑同一条加源命令即可。版本、大小和摘要由官方发布与包元数据取得，不手填。更细的字段说明见[维护说明](docs/maintenance.md#新增软件)。
+接入入口是 `config/packages.json`，不为每个软件另建目录或复制同步脚本。官方已有 GitHub `.deb` 时，优先用 `scripts/add_package.sh` 填写 `id`、`repository`、`package`、说明、源地址、许可证和各架构资产正则；脚本会校验 Debian 包名、清单去重、Ubuntu apt/snap 同名冲突，并默认核对上游 `/releases/latest`。也可以按 `templates/package_github_deb.json` 手工追加条目。清单生效后，下一次 `auto_check.sh` 或手动发版会纳入新软件；已加源的使用者重跑同一条加源命令即可。版本、大小和摘要由官方发布与包元数据取得，不手填。更细的字段说明见[维护说明](docs/maintenance.md#新增软件)。
 
 新增软件的 `package` 必须等于 `.deb` 的 `Package` 字段，并遵守 Debian/APT 包名约定：以小写字母或数字开头，其后只使用小写字母、数字、`-`、`+`、`.`。选名时必须与 Ubuntu 自带的 apt 包和 snap 包名错开，避免同名冲突。
 
@@ -46,17 +46,42 @@ curl -fsSL --proto '=https' --proto-redir '=https' -o add_source.sh 'https://apt
 
 ## 维护
 
-首次部署只需一个签名私钥 Secret 和 Pages，步骤见[部署与密钥](docs/nees_user_read.md#部署自己的源)。日常发布在干净仓库执行：
+首次部署只需一个签名私钥 Secret 和 Pages，步骤见[部署与密钥](docs/nees_user_read.md#部署自己的源)。日常联动更新在有 `origin` 推送权限的 Linux 机器上启用 systemd 定时器，由 `scripts/auto_check.sh` 巡检全部已支持软件；发现更新并通过本地预验后调用 `git_tag.sh` 打 tag，GitHub Actions 再按母版链路发版。也可先预览：
+
+```bash
+bash scripts/auto_check.sh --dry-run
+```
+
+手动发版在干净仓库执行：
 
 ```bash
 bash git_tag.sh
 ```
 
-默认自动升版。同一工作流完成 `Release → Build → RemoveOldRelease`：构造包上传对应本仓 `vX.Y.Z` assets，签名站点保存到 `apt-hub-pages` 并发布，成功后回写列表。日常检查与索引续签也由该工作流定时执行。`Release` 与 `Build`（含 Pages 部署及列表回写）全部成功后，自动调用既有两代清理；不足两代或有效索引仍引用的资产不删除。
+默认自动升版。`push: tags` 工作流完成 `Release → Build → PublishPages → RemoveOldRelease`：构造包或复用包上传到本仓 `vX.Y.Z` assets，签名站点保存到 `apt-hub-pages` 并发布，成功后回写列表。`Release` 与 `Build`（含 Pages 部署及列表回写）全部成功后，自动调用既有两代清理；不足两代或有效索引仍引用的资产不删除。换钥等手动重签使用 Actions `workflow_dispatch` 的 `rotate_from`，不会在 Actions 里升版。
+
+核心脚本的职责边界见 [AGENTS.md](AGENTS.md) 与 [CLAUDE.md](CLAUDE.md)。
+
+### 启用 systemd 定时巡检
+
+在对 `origin` 有推送权限、且已配置 git 用户名和邮箱的机器上执行（把仓库路径换成实际位置）：
+
+```bash
+repo=/home/certa/workspace/apt-hub
+user="$(id -un)"
+sudo sed "s|@REPO@|${repo}|g; s|@USER@|${user}|g"   "${repo}/templates/systemd/apt-hub-auto-check.service"   | sudo tee /etc/systemd/system/apt-hub-auto-check.service >/dev/null
+sudo sed "s|@REPO@|${repo}|g"   "${repo}/templates/systemd/apt-hub-auto-check.timer"   | sudo tee /etc/systemd/system/apt-hub-auto-check.timer >/dev/null
+sudo systemctl daemon-reload
+sudo systemctl enable --now apt-hub-auto-check.timer
+sudo systemctl list-timers apt-hub-auto-check.timer
+```
+
+默认每天北京时间 12:17 运行；无更新时脚本 exit 0 且不打 tag。可用 `journalctl -u apt-hub-auto-check.service` 查看最近一次巡检日志。
 
 ## 文档
 
 - [项目规范](docs/PROJECT_STANDARDS.md)：本地工作流、版本管理与发布授权。
 - [使用与部署](docs/nees_user_read.md)：加源、Pages、签名密钥与恢复。
 - [维护说明](docs/maintenance.md)：新增软件、版本职责与本地验证。
+- [AGENTS.md](AGENTS.md) · [CLAUDE.md](CLAUDE.md)：核心脚本职责与发版边界。
 - [验证记录](docs/verification.md) · [需求与边界](docs/plan.md)。

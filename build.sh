@@ -17,8 +17,8 @@ die() {
 usage() {
   cat >&2 <<'EOF'
 用法:
-  ./build.sh [release] [--catalog <file>] [--go-version <goX.Y.Z>] [--downloads-json <文件>] [--archive-dir <目录>]
-  ./build.sh --output <tmp子目录或build/upload_tmp_dir> [--catalog <file>] [--go-version <goX.Y.Z>] [--downloads-json <文件>] [--archive-dir <目录>]
+  ./build.sh [release] [--catalog <file>] [--go-version <goX.Y.Z>] [--downloads-json <文件>] [--archive-dir <目录>] [--arch <amd64|arm64>]
+  ./build.sh --output <tmp子目录或build/upload_tmp_dir> [--catalog <file>] [--go-version <goX.Y.Z>] [--downloads-json <文件>] [--archive-dir <目录>] [--arch <amd64|arm64>]
   ./build.sh test
 release 按 catalog 构造，默认写入 build/upload_tmp_dir。已有非空目录拒绝清理。test 校验已有上传目录后跑现有测试，不删除该目录。
 EOF
@@ -31,6 +31,7 @@ catalog=""
 go_version=""
 downloads_json=""
 archive_dir=""
+arch=""
 
 if [[ $# -gt 0 && "$1" != -* ]]; then
   mode="$1"
@@ -44,6 +45,7 @@ while [[ $# -gt 0 ]]; do
     --go-version) [[ $# -ge 2 ]] || usage; go_version="$2"; shift 2 ;;
     --downloads-json) [[ $# -ge 2 ]] || usage; downloads_json="$2"; shift 2 ;;
     --archive-dir) [[ $# -ge 2 ]] || usage; archive_dir="$2"; shift 2 ;;
+    --arch) [[ $# -ge 2 ]] || usage; arch="$2"; shift 2 ;;
     -h|--help) usage ;;
     *) die "未知参数: $1" ;;
   esac
@@ -53,7 +55,7 @@ done
 [[ -x "${ROOT}/gen_debs.sh" ]] || die "缺少 gen_debs.sh"
 
 if [[ "${mode}" == "test" ]]; then
-  [[ -z "${output}" && -z "${catalog}" && -z "${go_version}" && -z "${downloads_json}" && -z "${archive_dir}" ]] \
+  [[ -z "${output}" && -z "${catalog}" && -z "${go_version}" && -z "${downloads_json}" && -z "${archive_dir}" && -z "${arch}" ]] \
     || die "test 不接受输出或构包参数"
   dir="build/upload_tmp_dir"
   if [[ -e "${dir}" ]]; then
@@ -78,7 +80,9 @@ if [[ "${mode}" == "test" ]]; then
     && bash tests/update_sources_test.sh \
     && bash tests/go_source_test.sh \
     && bash tests/release_test.sh \
-    && bash tests/go_deb_test.sh; then
+    && bash tests/go_deb_test.sh \
+    && bash tests/auto_check_test.sh \
+    && bash tests/add_package_test.sh; then
     exit 0
   fi
   exit 1
@@ -103,6 +107,10 @@ if [[ -n "${downloads_json}" ]]; then
 fi
 if [[ -n "${archive_dir}" ]]; then
   args+=(--archive-dir "${archive_dir}")
+fi
+if [[ -n "${arch}" ]]; then
+  [[ "${arch}" =~ ^(amd64|arm64)$ ]] || die "非法 --arch: ${arch}"
+  args+=(--arch "${arch}")
 fi
 "${ROOT}/gen_debs.sh" "${args[@]}"
 printf 'build.sh: release output=%s\n' "${output:-build/upload_tmp_dir}"

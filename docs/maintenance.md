@@ -4,7 +4,7 @@
 
 ## 软件清单
 
-`config/packages.json` 是接入软件的配置入口，`packages` 可包含多个软件，不为每个软件复制同步脚本。官方已有 `.deb` 的新条目照 `templates/package_github_deb.json` 填写。
+`config/packages.json` 是接入软件的配置入口，`packages` 可包含多个软件，不为每个软件复制同步脚本。官方已有 GitHub `.deb` 的新条目优先用 `scripts/add_package.sh` 写入，或照 `templates/package_github_deb.json` 填写。
 
 - `id`：本仓唯一标识；`package` 必须等于 `.deb` 的 `Package`。
 - `repository`：上游官方 GitHub `owner/repository`，不填第三方下载镜像。Go 条目仍指向 `golang/go`，生成包的发布仓库通过 `--package-repository` 单独指定。
@@ -18,7 +18,19 @@
 
 ### 新增软件
 
-官方已有 `.deb` 时，将下面的对象加入 `config/packages.json` 的 `packages` 数组，保留已有条目，按真实信息替换占位值：
+官方已有 GitHub `.deb` 时，优先在仓库根目录执行：
+
+```bash
+bash scripts/add_package.sh --id example-app --repository official-owner/example-app \
+  --package example-app --description '软件用途的简短说明' \
+  --source-url https://github.com/official-owner/example-app --license MIT \
+  --arch 'amd64=^example-app_[0-9.]+_amd64\.deb$' \
+  --arch 'arm64=^example-app_[0-9.]+_arm64\.deb$'
+```
+
+脚本会检查 Debian/APT 包名、与现有清单去重，并在本机有 `apt-cache` / `snap` 时拦截 Ubuntu 同名冲突；默认再请求目标仓库 `/releases/latest`，确认每个架构正则只匹配一个 `.deb`。离线调试可加 `--skip-remote-check`。校验通过后写入 `config/packages.json`，并调用 `scripts/sync.sh --check-catalog-only`。
+
+也可以将下面的对象手工加入 `packages` 数组，保留已有条目，按真实信息替换占位值：
 
 ```json
 {
@@ -76,7 +88,7 @@ bash scripts/update_sources.sh --catalog config/packages.json --previous tmp/pre
 执行完整既有测试：
 
 ```bash
-bash tests/sync_test.sh && bash tests/render_test.sh && bash tests/workflow_test.sh && bash tests/git_tag_test.sh && bash tests/auto_update_test.sh && bash tests/add_source_test.sh && bash tests/update_sources_test.sh && bash tests/go_deb_test.sh && bash tests/go_source_test.sh && bash tests/release_test.sh && bash tests/ubuntu_test.sh
+bash tests/sync_test.sh && bash tests/render_test.sh && bash tests/workflow_test.sh && bash tests/git_tag_test.sh && bash tests/auto_update_test.sh && bash tests/auto_check_test.sh && bash tests/add_package_test.sh && bash tests/add_source_test.sh && bash tests/update_sources_test.sh && bash tests/go_deb_test.sh && bash tests/go_source_test.sh && bash tests/release_test.sh && bash tests/ubuntu_test.sh
 ```
 
 测试密钥只用于本地 `tmp/`，不放进生产 Actions Secret；测试目录不要混放用户文件。
@@ -91,7 +103,7 @@ bash git_tag.sh
 
 脚本沿用 `project_template_go/git_tag.sh`，只适配根目录 `VERSION` 和本仓变更记录，不生成 Go API 文档。无参数与 `auto` 等价；`-get_pre_del_tag_name` 仅查询前一版本。发版保留母版的分支、`latest` 与版本标签推送，以及本地旧标签清理；首次没有 `latest` 或本地旧标签时不会因此失败，历史变更记录保留。
 
-首次脚本标签为 `v0.0.1`；以后末段逐次加 1，超过 `999` 向前进位。不手填版本、不重写已有 `vX.Y.Z` 标签；`latest` 是随发版更新的浮动标签。Actions 沿母版三段式，仅适配构包扩展、依赖和产物路径；软件源日常扫描、RustDesk 更新和签名续期不递增维护版本；Go 上游或构包输入变化且当前标签已有包时，原 Release job 调用同一无参 `git_tag.sh` 自动进位，并在同一次运行构包发布。当前标签已完整且无变化时直接跳过构包进入重签；新目标标签空或可续接复用且上一标签构建输入与 Go 上游未变时，跨标签复用旧 `.deb` 原字节并生成本版完整四资产；输入或 Go 上游变化时拒绝旧产物复用并在目标版重新构包；空 Release 按需补构包或补复用，部分上传只补字节一致的缺项。真实发版须经用户明确授权。
+首次脚本标签为 `v0.0.1`；以后末段逐次加 1，超过 `999` 向前进位。不手填版本、不重写已有 `vX.Y.Z` 标签；`latest` 是随发版更新的浮动标签。日常联动更新由 `scripts/auto_check.sh`（systemd 或手动，支持 `--dry-run`）巡检全部已支持软件：构包类比对上游稳定版与 `build_inputs_sha256`，外链 `.deb` 比对 GitHub `/releases/latest`，签名默认超过 7 天续签（`Valid-Until` 为 14 天）。有更新并完成本地预验后，写下固定范式原因并调用 `git_tag.sh` 进位；随后 Actions 仅在 `push: tags` 上沿母版四段 `Release → Build → PublishPages → RemoveOldRelease` 构包或复用、上传、重索引和清理。无更新不升版。`workflow_dispatch` 只用于换钥等手动重签，不在 Actions 里调用 `git_tag.sh`。当前标签已完整且无变化时 Build 跳过构包，由 Pages 重签；新目标标签空或可续接复用且上一标签构建输入与 Go 上游未变时，跨标签复用旧 `.deb` 原字节并生成本版完整四资产；输入或 Go 上游变化时拒绝旧产物复用并在目标版重新构包；空 Release 按需补构包或补复用，部分上传只补字节一致的缺项。真实发版须经用户明确授权。
 
 ## 自动巡检与本地发版重合
 

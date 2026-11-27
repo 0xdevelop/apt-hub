@@ -20,7 +20,7 @@ usage() {
   cat >&2 <<'EOF'
 用法:
   gen_debs.sh metadata --upstream-dir <目录> [--catalog <file>]
-  gen_debs.sh release --output <目录> [--catalog <file>] [--go-version <goX.Y.Z>] [--downloads-json <文件>] [--archive-dir <目录>]
+  gen_debs.sh release --output <目录> [--catalog <file>] [--go-version <goX.Y.Z>] [--downloads-json <文件>] [--archive-dir <目录>] [--arch <amd64|arm64>]
 metadata 只写入官方 Release API 原文。release 只构造 catalog 里需要转换的条目。
 EOF
   exit 2
@@ -291,7 +291,7 @@ commit_stage() {
 }
 
 release_build() {
-  local output="" go_version="" downloads_json="" archive_dir=""
+  local output="" go_version="" downloads_json="" archive_dir="" arch=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --output) [[ $# -ge 2 ]] || usage; output="$2"; shift 2 ;;
@@ -299,6 +299,7 @@ release_build() {
       --go-version) [[ $# -ge 2 ]] || usage; go_version="$2"; shift 2 ;;
       --downloads-json) [[ $# -ge 2 ]] || usage; downloads_json="$2"; shift 2 ;;
       --archive-dir) [[ $# -ge 2 ]] || usage; archive_dir="$2"; shift 2 ;;
+      --arch) [[ $# -ge 2 ]] || usage; arch="$2"; shift 2 ;;
       *) die "release 未知参数: $1" ;;
     esac
   done
@@ -348,6 +349,10 @@ release_build() {
   fi
   if [[ -n "${archive_dir}" ]]; then
     args+=(--archive-dir "${archive_dir}")
+  fi
+  if [[ -n "${arch}" ]]; then
+    [[ "${arch}" =~ ^(amd64|arm64)$ ]] || die "非法 --arch: ${arch}"
+    args+=(--arch "${arch}")
   fi
   if ! "${ROOT}/scripts/gen_deb_golang.sh" "${args[@]}"; then
     rm -rf -- "${stage}"

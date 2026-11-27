@@ -12,6 +12,8 @@ GEN_DEBS="${ROOT}/gen_debs.sh"
 GEN_GO="${ROOT}/scripts/gen_deb_golang.sh"
 ASSETS="${ROOT}/scripts/release_assets.sh"
 PUBLISH="${ROOT}/scripts/reindex_apt_repo.sh"
+AUTO_CHECK="${ROOT}/scripts/auto_check.sh"
+ADD_PACKAGE="${ROOT}/scripts/add_package.sh"
 WF_REL="${ROOT}/.github/workflows/release.yml"
 VERSION_FILE="${ROOT}/VERSION"
 SHELLCHECK_BIN=""
@@ -48,7 +50,7 @@ if [[ ! -e "${ROOT}/scripts/release_golang.sh" && ! -e "${ROOT}/gen_deb_golang.s
 else
   fail "仍存在 release_golang.sh 或根 gen_deb_golang.sh"
 fi
-if [[ -f "${GEN_DEBS}" && -f "${GEN_GO}" && -f "${ASSETS}" && -f "${PUBLISH}" ]]; then
+if [[ -f "${GEN_DEBS}" && -f "${GEN_GO}" && -f "${ASSETS}" && -f "${PUBLISH}" && -f "${AUTO_CHECK}" && -f "${ADD_PACKAGE}" ]]; then
   pass "统一入口文件在位"
 else
   fail "缺少 gen_debs/scripts gen/assets/publish"
@@ -57,6 +59,7 @@ fi
 if [[ -n "${SHELLCHECK_BIN}" ]]; then
   set +e
   "${SHELLCHECK_BIN}" -s bash -- "${BUILD_SH}" "${GEN_DEBS}" "${GEN_GO}" "${ASSETS}" "${PUBLISH}" \
+    "${AUTO_CHECK}" "${ADD_PACKAGE}" "${ROOT}/git_tag.sh" \
     >"${EVIDENCE}/runs/shellcheck.out" 2>&1
   RC=$?
   set -e

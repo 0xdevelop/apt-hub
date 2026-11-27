@@ -114,19 +114,19 @@ git -C "${BASE}" remote add origin "${BASE}/tmp/origin.git"
 git -C "${BASE}" push -q origin main "$tag"
 : >"${BASE}/github-output"
 rc=0
-(cd "${BASE}" && GH_TOKEN=fixture EVENT_NAME=schedule REF=refs/heads/main REPOSITORY=example/apt-hub GITHUB_ACTOR=fixture GITHUB_ACTOR_ID=1 GITHUB_OUTPUT="${BASE}/github-output" bash "${BASE}/release-run.sh") >"${BASE}/schedule.log" 2>&1 || rc=$?
+(cd "${BASE}" && GH_TOKEN=fixture EVENT_NAME=workflow_dispatch REF=refs/heads/main REPOSITORY=example/apt-hub GITHUB_ACTOR=fixture GITHUB_ACTOR_ID=1 GITHUB_OUTPUT="${BASE}/github-output" bash "${BASE}/release-run.sh") >"${BASE}/schedule.log" 2>&1 || rc=$?
 if [[ "$rc" -ne 0 ]] || ! grep -Fxq 'build_packages=1' "${BASE}/github-output"; then
-  printf 'FAIL 原schedule仍跳过空Release修复 rc=%s evidence=%s\n' "$rc" "$BASE"
+  printf 'FAIL workflow_dispatch 空Release恢复失败 rc=%s evidence=%s\n' "$rc" "$BASE"
   exit 1
 fi
-printf 'PASS 原schedule进入缺失资产恢复\n'
+printf 'PASS workflow_dispatch 进入缺失资产恢复\n'
 # 首次 preflight 只准备 .nojekyll，尚无可读的已发布 state。
 blob=$(printf '' | git -C "${BASE}" hash-object -w --stdin)
 tree=$(printf '100644 blob %s\t.nojekyll\n' "$blob" | git -C "${BASE}" mktree)
 site_sha=$(printf 'site\n' | git -C "${BASE}" -c user.name=fixture -c user.email=fixture@invalid commit-tree "$tree")
 git -C "${BASE}" push -q origin "${site_sha}:refs/heads/apt-hub-pages"
 rc=0
-(cd "${BASE}" && GH_TOKEN=fixture EVENT_NAME=schedule REF=refs/heads/main REPOSITORY=example/apt-hub GITHUB_OUTPUT="${BASE}/tmp/skeleton-output" bash "${BASE}/release-run.sh") >"${BASE}/tmp/skeleton.log" 2>&1 || rc=$?
+(cd "${BASE}" && GH_TOKEN=fixture EVENT_NAME=workflow_dispatch REF=refs/heads/main REPOSITORY=example/apt-hub GITHUB_OUTPUT="${BASE}/tmp/skeleton-output" bash "${BASE}/release-run.sh") >"${BASE}/tmp/skeleton.log" 2>&1 || rc=$?
 if [[ "${rc}" -ne 0 ]] || ! grep -Fxq build_packages=1 "${BASE}/tmp/skeleton-output"; then
   printf 'FAIL 首次Pages骨架被当成已发布快照 rc=%s evidence=%s\n' "$rc" "$BASE"
   exit 1
@@ -349,15 +349,22 @@ done
 export FIXTURE="${BASE}/tmp/fixture"
 export PATH="${FIXTURE}/bin:${PATH}"
 rc=0
-(cd "${BASE}" && GH_TOKEN=fixture EVENT_NAME=schedule REF=refs/heads/main REPOSITORY=example/apt-hub GITHUB_ACTOR=fixture GITHUB_ACTOR_ID=1 GITHUB_OUTPUT="${BASE}/tmp/version-output" bash "${FIXTURE}/release-run.sh") >"${BASE}/tmp/auto-version.log" 2>&1 || rc=$?
-if [[ "${rc}" -ne 0 ]]; then printf 'FAIL 原版本入口自动发版 rc=%s evidence=%s\n' "$rc" "$BASE"; exit 1; fi
+(cd "${BASE}" && GH_TOKEN=fixture EVENT_NAME=workflow_dispatch REF=refs/heads/main REPOSITORY=example/apt-hub GITHUB_ACTOR=fixture GITHUB_ACTOR_ID=1 GITHUB_OUTPUT="${BASE}/tmp/version-output" bash "${FIXTURE}/release-run.sh") >"${BASE}/tmp/auto-version.log" 2>&1 || rc=$?
+if [[ "${rc}" -ne 0 ]]; then printf 'FAIL workflow_dispatch 解析 vtag 失败 rc=%s evidence=%s\n' "$rc" "$BASE"; exit 1; fi
+still_tag="v$(tr -d '[:space:]' <"${BASE}/VERSION")"
+[[ "${still_tag}" == "${tag}" ]]
+grep -Fxq "release_tag=${tag}" "${BASE}/tmp/version-output"
+printf 'PASS workflow_dispatch 不调用 git_tag.sh，维护版本保持不变\n'
+# 自动升版改由 scripts/auto_check.sh 在本地调用 git_tag.sh。
+rc=0
+(cd "${BASE}" && GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=fixture GIT_CONFIG_KEY_1=user.email GIT_CONFIG_VALUE_1=fixture@invalid bash git_tag.sh) >"${BASE}/tmp/auto-check-tag.log" 2>&1 || rc=$?
+if [[ "${rc}" -ne 0 ]]; then printf 'FAIL 本地 git_tag.sh 自动发版 rc=%s evidence=%s\n' "$rc" "$BASE"; exit 1; fi
 new_tag="v$(tr -d '[:space:]' <"${BASE}/VERSION")"
 [[ "${new_tag}" != "${tag}" ]]
 remote_main=$(git -C "${BASE}" ls-remote origin refs/heads/main)
 remote_new_tag=$(git -C "${BASE}" ls-remote origin "refs/tags/${new_tag}")
 [[ "${remote_main%%$'\t'*}" == "${remote_new_tag%%$'\t'*}" && "${remote_main%%$'\t'*}" == "$(git -C "${BASE}" rev-parse HEAD)" ]]
-grep -Fxq "source_sha=${remote_main%%$'\t'*}" "${BASE}/tmp/version-output"
-printf 'PASS 原git_tag在同一次运行推进维护分支、标签和准确构包SHA\n'
+printf 'PASS 本地 git_tag.sh 推进维护分支、标签和准确构包SHA\n'
 # 版本标签被远端 hook 拒绝：新的 atomic 发布必须全部拒绝，不留下半发布。
 cat >"${BASE}/tmp/origin.git/hooks/update" <<'EOF'
 #!/usr/bin/env bash
@@ -380,7 +387,7 @@ git --git-dir="${BASE}/tmp/origin.git" update-ref refs/tags/latest "${recover_sh
 printf '#!/usr/bin/env bash\nexit 0\n' >"${BASE}/tmp/origin.git/hooks/update"
 git clone -q -b main "${BASE}/tmp/origin.git" "${BASE}/tmp/recovery"
 : >"${BASE}/tmp/recovery-output"
-(cd "${BASE}/tmp/recovery" && GH_TOKEN=fixture EVENT_NAME=schedule REF=refs/heads/main REPOSITORY=example/apt-hub GITHUB_OUTPUT="${BASE}/tmp/recovery-output" bash "${FIXTURE}/release-run.sh") >"${BASE}/tmp/recovery.log" 2>&1
+(cd "${BASE}/tmp/recovery" && GH_TOKEN=fixture EVENT_NAME=workflow_dispatch REF=refs/heads/main REPOSITORY=example/apt-hub GITHUB_OUTPUT="${BASE}/tmp/recovery-output" bash "${FIXTURE}/release-run.sh") >"${BASE}/tmp/recovery.log" 2>&1
 recovered=$(git -C "${BASE}" ls-remote origin "refs/tags/${recover_tag}")
 [[ "${recovered%%$'\t'*}" == "${recover_sha}" ]]
 grep -Fxq "release_tag=${recover_tag}" "${BASE}/tmp/recovery-output"

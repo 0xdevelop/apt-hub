@@ -198,4 +198,18 @@ for target in refs/heads/main refs/tags/latest refs/tags/v0.0.8; do
   pass "${target} 推送失败真实返回非零"
 done
 
+
+# changelog 可收录 auto_check.sh 写下的固定范式原因，不改变发版提交契约。
+new_repo auto-reasons 0.0.7
+printf '%s\n' 'auto-update: golang 1.27.4 -> 1.27.5' 'auto-renew: apt signing refresh' >"${BASE}/auto-reasons.txt"
+export AUTO_CHECK_REASONS_FILE="${BASE}/auto-reasons.txt"
+run_tag
+unset AUTO_CHECK_REASONS_FILE
+assert_release 0.0.8
+grep -Fq -- '- auto-update: golang 1.27.4 -> 1.27.5' "${REPO}/changelog/v0.0.8.md" \
+  && grep -Fq -- '- auto-renew: apt signing refresh' "${REPO}/changelog/v0.0.8.md" \
+  || fail '变更记录未写入 auto-check 原因'
+[[ "$(git -C "$REPO" log -1 --format=%s)" == "Release:--: v0.0.8_"* ]] || fail '提交格式因原因文件改变'
+pass 'changelog 收录 auto-check 固定范式原因且提交契约不变'
+
 printf 'RESULT pass=%s fail=0 evidence=%s\n' "$passes" "$BASE"

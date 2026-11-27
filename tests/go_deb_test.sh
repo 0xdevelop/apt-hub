@@ -557,6 +557,26 @@ RC=$?
 set -e
 record "version_lock_provenance" "${RC}" 0
 
+# 单架构预验：只构造指定 arch，不影响默认双架构行为。
+OUT_ARCH="${TMP}/out/fixture-arch-amd64"
+rm -rf -- "${OUT_ARCH}" "${OUT_ARCH}.work" "${OUT_ARCH}.scratch" "${OUT_ARCH}.staging" "${OUT_ARCH}.hold-empty" "${OUT_ARCH}.lock"
+set +e
+"${BUILD}" --config "${CONFIG}" --output "${OUT_ARCH}"   --arch amd64   --downloads-json "${FIXTURE_JSON}" --archive-dir "${TMP}/test/archives"
+RC=$?
+set -e
+record "arch_filter_ok" "${RC}" 0
+assert_file "${OUT_ARCH}/golang_${GO_FN}_amd64.deb"
+if [[ -e "${OUT_ARCH}/golang_${GO_FN}_arm64.deb" ]]; then
+  record "arch_filter_no_arm64" 1 0
+else
+  record "arch_filter_no_arm64" 0 0
+fi
+set +e
+jq -e '(.packages|length)==1 and .packages[0].architecture=="amd64"' "${OUT_ARCH}/provenance.json" >/dev/null
+RC=$?
+set -e
+record "arch_filter_provenance" "${RC}" 0
+
 # dpkg 版本比较：新规则 2:1.27.4-2 严格高于历史遗留 2:1.27.4-1+0.0.12
 set +e
 dpkg --compare-versions "2:1.27.4-2" gt "2:1.27.4-1+0.0.12" \

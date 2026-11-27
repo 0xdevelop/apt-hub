@@ -140,6 +140,17 @@ function gen_changelog_if_possible() {
             git log --reverse --date=short --pretty=format:"- %ad %h %s" "${range}" || true
         fi
         echo
+        reasons_file="${AUTO_CHECK_REASONS_FILE:-./tmp/auto_check_reasons.txt}"
+        if [[ -f "${reasons_file}" && ! -L "${reasons_file}" ]]; then
+            echo "### auto-check reasons"
+            echo
+            while IFS= read -r reason || [[ -n "${reason}" ]]; do
+                [[ -n "${reason}" ]] || continue
+                [[ "${reason}" =~ ^auto-(update|renew):[[:space:]] ]] || continue
+                echo "- ${reason}"
+            done <"${reasons_file}"
+            echo
+        fi
     } > "${out_file}" || return
 
     echo "[changelog] wrote ${out_file}"
