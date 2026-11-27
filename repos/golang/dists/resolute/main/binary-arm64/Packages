@@ -8,7 +8,7 @@ Installed-Size: 243380
 Provides: golang-go (= 2:1.27.4-2)
 Conflicts: gccgo-go, golang-go (<< 2:1.27.4-2)
 Replaces: golang-go (<< 2:1.27.4-2)
-Filename: 0xdevelop/apt-hub/releases/download/v0.0.15/golang_1.27.4-2_arm64.deb
+Filename: 0xdevelop/apt-hub/releases/download/v0.0.16/golang_1.27.4-2_arm64.deb
 Size: 66328634
 SHA256: 41439c6582a90742d09055e59bfe04bb5d181937e689af8a0ceaa3e09e28f60f
 Homepage: https://go.dev/

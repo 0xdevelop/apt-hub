@@ -8,13 +8,13 @@
       "package_repository": "0xdevelop/apt-hub",
       "description": "Go 官方 Linux 归档构建的工具链",
       "version": "2:1.27.4-2",
-      "release_url": "https://github.com/0xdevelop/apt-hub/releases/tag/v0.0.15",
+      "release_url": "https://github.com/0xdevelop/apt-hub/releases/tag/v0.0.16",
       "source_url": "https://go.dev",
       "license": "BSD-3-Clause",
       "updated_at": "2026-11-25T11:03:14Z",
       "apt_source_uri": "mirror+https://apt-hub.m-b-crazy.com/repos/golang/mirror.list",
       "source_type": "go_official_archive",
-      "release_tag": "v0.0.15",
+      "release_tag": "v0.0.16",
       "upstream": {
         "version": "go1.27.4",
         "version_debian": "1.27.4",
@@ -35,10 +35,10 @@
         {
           "package": "golang",
           "architecture": "amd64",
-          "filename": "0xdevelop/apt-hub/releases/download/v0.0.15/golang_1.27.4-2_amd64.deb",
+          "filename": "0xdevelop/apt-hub/releases/download/v0.0.16/golang_1.27.4-2_amd64.deb",
           "sha256": "fb542d36bb3e492e166aaca5022ba9744a78fbb6f6b00a34b83567a17461398f",
           "size": "69931584",
-          "url": "https://github.com/0xdevelop/apt-hub/releases/download/v0.0.15/golang_1.27.4-2_amd64.deb",
+          "url": "https://github.com/0xdevelop/apt-hub/releases/download/v0.0.16/golang_1.27.4-2_amd64.deb",
           "upstream": {
             "url": "https://go.dev/dl/go1.27.4.linux-amd64.tar.gz",
             "sha256": "7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840",
@@ -48,10 +48,10 @@
         {
           "package": "golang",
           "architecture": "arm64",
-          "filename": "0xdevelop/apt-hub/releases/download/v0.0.15/golang_1.27.4-2_arm64.deb",
+          "filename": "0xdevelop/apt-hub/releases/download/v0.0.16/golang_1.27.4-2_arm64.deb",
           "sha256": "41439c6582a90742d09055e59bfe04bb5d181937e689af8a0ceaa3e09e28f60f",
           "size": "66328634",
-          "url": "https://github.com/0xdevelop/apt-hub/releases/download/v0.0.15/golang_1.27.4-2_arm64.deb",
+          "url": "https://github.com/0xdevelop/apt-hub/releases/download/v0.0.16/golang_1.27.4-2_arm64.deb",
           "upstream": {
             "url": "https://go.dev/dl/go1.27.4.linux-arm64.tar.gz",
             "sha256": "3392582988a273a87ab5043ee1b2c9c17a2c3c00580bf9326c47a2e0aaaeac92",
