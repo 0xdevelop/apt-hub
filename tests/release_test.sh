@@ -11,7 +11,7 @@ BUILD_SH="${ROOT}/build.sh"
 GEN_DEBS="${ROOT}/gen_debs.sh"
 GEN_GO="${ROOT}/scripts/gen_deb_golang.sh"
 ASSETS="${ROOT}/scripts/release_assets.sh"
-PUBLISH="${ROOT}/scripts/publish_apt_site.sh"
+PUBLISH="${ROOT}/scripts/reindex_apt_repo.sh"
 WF_REL="${ROOT}/.github/workflows/release.yml"
 VERSION_FILE="${ROOT}/VERSION"
 SHELLCHECK_BIN=""
@@ -574,8 +574,8 @@ if grep -Eq '^  release:' "${WF_REL}" \
   && ! grep -Fq 'tag_name:' "${WF_REL}" \
   && ! grep -Eq 'upload-pages-artifact|deploy-pages@|upload-artifact|download-artifact' "${WF_REL}" \
   && grep -Fq 'site#http://' "${PUBLISH}" \
-  && grep -Fq 'publish_apt_site.sh publish' "${WF_REL}" \
-  && grep -Fq 'publish_apt_site.sh remove-old' "${WF_REL}" \
+  && grep -Fq 'reindex_apt_repo.sh publish' "${WF_REL}" \
+  && grep -Fq 'reindex_apt_repo.sh remove-old' "${WF_REL}" \
   && grep -Fq 'get_pre_del_tag' "${PUBLISH}" \
   && ! grep -Fq 'release_golang.sh' "${WF_REL}" \
   && ! grep -Fq 'go-downloads-json' "${WF_REL}" \

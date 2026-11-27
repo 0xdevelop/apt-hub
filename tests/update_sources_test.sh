@@ -809,12 +809,12 @@ fi
 # ---------- release 接线静态断言 ----------
 log "== workflow 接线 =="
 WF="${ROOT}/.github/workflows/release.yml"
-SITE="${ROOT}/scripts/publish_apt_site.sh"
+SITE="${ROOT}/scripts/reindex_apt_repo.sh"
 BUILD="${ROOT}/build.sh"
-if grep -Fq 'scripts/publish_apt_site.sh publish' "${WF}"; then
-  pass "release_calls_publish_apt_site"
+if grep -Fq 'scripts/reindex_apt_repo.sh publish' "${WF}"; then
+  pass "release_calls_reindex_apt_repo"
 else
-  fail "release_missing_publish_apt_site"
+  fail "release_missing_reindex_apt_repo"
 fi
 if grep -Fq 'scripts/update_sources.sh' "${SITE}"; then
   pass "publish_calls_update_sources"

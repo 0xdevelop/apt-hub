@@ -16,7 +16,7 @@ die() {
 
 usage() {
   cat >&2 <<'EOF'
-用法: scripts/publish_apt_site.sh preflight|publish|remove-old
+用法: scripts/reindex_apt_repo.sh preflight|publish|remove-old
 EOF
   exit 2
 }
@@ -420,20 +420,12 @@ pages_http_note() {
 
 deploy_pages() {
   local sha="${APT_HUB_PAGES_SHA:?}" repo="${GITHUB_REPOSITORY:-}" remote endpoint body status commit attempt
-  local matched=0 err note post_cmd
+  local matched=0 err note
   [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || die "::error::站点提交非法"
   [[ "${repo}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*/[A-Za-z0-9_][A-Za-z0-9._-]*$ && "${repo}" != *..* ]] \
     || die "::error::GITHUB_REPOSITORY 非法"
   remote=$(git ls-remote --exit-code origin refs/heads/apt-hub-pages) || die "::error::无法回读 apt-hub-pages"
   [[ "${remote%%$'\t'*}" == "${sha}" ]] || die "::error::Pages 分支提交已变化，拒绝回读: ${sha}"
-  post_cmd="gh api --method POST repos/${repo}/pages/builds"
-  err=$(mktemp "${ROOT}/tmp/pages-http.XXXXXX")
-  if ! gh api --method POST "repos/${repo}/pages/builds" >/dev/null 2>"${err}"; then
-    note=$(pages_http_note "${err}")
-    rm -f -- "${err}"
-    die "阶段=deploy-pages 命令=${post_cmd} ${note}"
-  fi
-  rm -f -- "${err}"
   endpoint="repos/${repo}/pages/builds/latest"
   status=""
   for ((attempt=0; attempt<60; attempt++)); do

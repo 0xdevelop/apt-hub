@@ -226,7 +226,7 @@ jobs:
         id: config
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash scripts/publish_apt_site.sh preflight
+        run: bash scripts/reindex_apt_repo.sh preflight
 
       - name: 生成并发布 Pages 产物分支
         env:
@@ -239,7 +239,7 @@ jobs:
           RELEASE_TAG: ${{ needs.release.outputs.release_tag }}
           PACKAGE_RELEASE_TAG: ${{ needs.release.outputs.package_release_tag }}
           ROTATE_FROM: ${{ inputs.rotate_from }}
-        run: bash scripts/publish_apt_site.sh publish
+        run: bash scripts/reindex_apt_repo.sh publish
 
   RemoveOldRelease:
     name: RemoveOldRelease
@@ -268,5 +268,5 @@ jobs:
           REF: refs/tags/${{ needs.release.outputs.release_tag }}
         run: |
           set -euo pipefail
-          chmod a+x scripts/publish_apt_site.sh
-          scripts/publish_apt_site.sh remove-old
+          chmod a+x scripts/reindex_apt_repo.sh
+          scripts/reindex_apt_repo.sh remove-old

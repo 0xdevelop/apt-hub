@@ -14,7 +14,7 @@
   - **审查边界声明**：上述结论仅依据仓库源码调用结构与配置封装，**不声称消除了宿主/CI 外部工具链版本差异**（如 `dpkg-deb`、`gzip`、`tar` 等二进制自身版本升级可能带来的隐式字节差异）；当前复用契约沿用既有已验证包/输入/架构契约，不扩大修改 `build_inputs_sha256` 构成。
 - **实现改动（共 9 个文件）**：
   - `scripts/release_assets.sh`：为 `plan` 增加同输入跨标签复用判定（输出 `reuse_from_tag`），新增 `prepare-reuse`（校验旧 Release 完整性与当前构建输入/Go 上游一致性，原字节保留 `.deb`、保留原构建 `generated_at_utc`/`build_inputs_sha256`/`upstream`/`packages` 并写入确定性 `reused_from`、重算 `SHA256SUMS`），在 `validate_constructed_dir` 增加 `match_current_config` 参数复用同一套字节/control 校验，并在 `local-status`、`stage-upload`、`remote-status` 校验 `reused_from`。
-  - `.github/workflows/release.yml`：`release` job 透传 `reuse_from_tag`，`Build` job 在 `build_packages == '0' && reuse_from_tag != ''` 时走 `prepare-reuse` -> `local-status` -> `stage-upload` -> 上传 4 资产 -> `remote-status` -> `publish_apt_site.sh publish`。
+  - `.github/workflows/release.yml`：`release` job 透传 `reuse_from_tag`，`Build` job 在 `build_packages == '0' && reuse_from_tag != ''` 时走 `prepare-reuse` -> `local-status` -> `stage-upload` -> 上传 4 资产 -> `remote-status` -> `reindex_apt_repo.sh publish`。
   - `scripts/sync.sh`：校验活跃/存量 `golang.provenance.json` 的 `reused_from` 结构、标签顺序、仓库与目标标签匹配；修复跨标签同版本同字节迁移时 `updated_at` 匹配规则（优先按 `package + architecture` 比对旧 `sha256`），避免因资产 URL 标签路径变化导致 `updated_at` 误刷新。
   - `tests/auto_update_test.sh`、`tests/workflow_test.sh`、`tests/release_test.sh`、`tests/go_source_test.sh` 与 `docs/maintenance.md`、`docs/verification.md`。
 - **分段门禁执行记录（如实区分原 `build.sh test` `exit 1` 与 12 套分段通过，不冒称单次 `build.sh test` `exit 0`）**：
@@ -34,7 +34,7 @@
     11. `bash tests/update_sources_test.sh` -> 首次 `real_chain` 因 `jammy/amd64 apt-get update` 超时 `exit=124`（`pass=44 fail=1`, `exit 1`）；有界重试第 1 次通过 `pass=55 fail=0`，**`exit 0`**，日志 `tmp/gate-20261125-reuse/update_sources_test.log`。
     12. `bash tests/ubuntu_test.sh`（PID `3668429`，最多 5 次有界重试）：try1 因 `stonking/arm64 apt-get update` 超时 `exit=124` 退出 `1`（`ubuntu_test.try1.log`）；try2 因 `resolute/arm64 apt-get update` 超时 `exit=124` 退出 `1`（`ubuntu_test.try2.log`）；**try3 全部通过 `failures=0`，`exit 0`**，日志 `tmp/gate-20261125-reuse/ubuntu_test.log`（完整三轮日志 `tmp/gate-20261125-reuse/ubuntu-retry-96713.log`）。
 - **未验证项（需后续真实发版时确认）**：
-  - 真实远端 GitHub Actions 触发新标签（如未来 `v0.0.14`）时 `release` → `Build(reuse)` → `publish_apt_site.sh` → `RemoveOldRelease` 的端到端在线运行结果（本轮严禁打新 tag、`workflow_dispatch` 或改动生产资产，故仅通过线上 `v0.0.13` 只读核对与完整本地/隔离夹具验证）。
+  - 真实远端 GitHub Actions 触发新标签（如未来 `v0.0.14`）时 `release` → `Build(reuse)` → `reindex_apt_repo.sh` → `RemoveOldRelease` 的端到端在线运行结果（本轮严禁打新 tag、`workflow_dispatch` 或改动生产资产，故仅通过线上 `v0.0.13` 只读核对与完整本地/隔离夹具验证）。
 
 ## 2026-11-17 单包与产物分支纠偏
 

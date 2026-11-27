@@ -8,7 +8,7 @@ BASE="${ROOT}/tmp/workflow-test"
 mkdir -p "${BASE}"
 WORK="$(mktemp -d "${BASE}/run.XXXXXX")"
 mkdir -p "${WORK}/scripts" "${WORK}/bin" "${WORK}/tmp/site"
-cp "${ROOT}/scripts/publish_apt_site.sh" "${WORK}/scripts/"
+cp "${ROOT}/scripts/reindex_apt_repo.sh" "${WORK}/scripts/"
 PASS=0
 FAIL=0
 cleanup() {
@@ -51,14 +51,11 @@ case "${method} $1" in
     esac
     ;;
   'GET users/fixture-human') cat "${FIXTURE}/actor.json" ;;
-  'POST repos/example/apt-hub/pages/builds')
-    if [[ -f "${FIXTURE}/post-fail.txt" ]]; then
-      cat "${FIXTURE}/post-fail.txt" >&2
+  'GET repos/example/apt-hub/pages/builds/latest')
+    if [[ -f "${FIXTURE}/latest-fail.txt" ]]; then
+      cat "${FIXTURE}/latest-fail.txt" >&2
       exit 1
     fi
-    cat "${FIXTURE}/build-request.json"
-    ;;
-  'GET repos/example/apt-hub/pages/builds/123'|'GET repos/example/apt-hub/pages/builds/latest')
     if [[ -s "${FIXTURE}/build-steps.jsonl" ]]; then
       IFS= read -r step <"${FIXTURE}/build-steps.jsonl"
       tail -n +2 "${FIXTURE}/build-steps.jsonl" >"${FIXTURE}/build-steps.next"
@@ -114,7 +111,7 @@ printf '%s\n' '{"login":"fixture-human","id":12345,"type":"User"}' >"${WORK}/act
 printf '200\n' >"${WORK}/pages.status"
 git -C "${WORK}" init -b main >/dev/null
 printf 'fixture\n' >"${WORK}/README.md"
-git -C "${WORK}" add -- README.md scripts/publish_apt_site.sh
+git -C "${WORK}" add -- README.md scripts/reindex_apt_repo.sh
 git -C "${WORK}" -c user.name=fixture -c user.email=fixture@invalid commit -m init >/dev/null
 git init --bare "${WORK}/origin.git" >/dev/null
 git -C "${WORK}" remote add origin "${WORK}/origin.git"
@@ -130,7 +127,6 @@ seed_sha="$(git -C "${seed}" rev-parse HEAD)"
 export APT_HUB_PAGES_SHA="${seed_sha}"
 rm -rf -- "${seed}"
 printf '%s\n' '{"html_url":"http://packages.example.test/","build_type":"legacy","source":{"branch":"apt-hub-pages","path":"/"},"cname":"packages.example.test"}' >"${WORK}/pages.json"
-printf '%s\n' '{"url":"https://api.github.com/repos/example/apt-hub/pages/builds/123"}' >"${WORK}/build-request.json"
 printf '%s\n' "{\"status\":\"built\",\"commit\":\"${seed_sha}\"}" >"${WORK}/build-result.json"
 printf '%s\n' '{"schema_version":"2","packages":[]}' >"${WORK}/tmp/site/state.json"
 printf '%s\n' '<html>candidate</html>' >"${WORK}/tmp/site/index.html"
@@ -138,7 +134,7 @@ printf '%s\n' 'candidate-client' >"${WORK}/tmp/site/add_source.sh"
 cp "${WORK}/tmp/site/state.json" "${WORK}/public-state.json"
 cp "${WORK}/tmp/site/index.html" "${WORK}/public-index.html"
 cp "${WORK}/tmp/site/add_source.sh" "${WORK}/public-add_source.sh"
-run() { (cd "${WORK}" && bash scripts/publish_apt_site.sh "$@"); }
+run() { (cd "${WORK}" && bash scripts/reindex_apt_repo.sh "$@"); }
 : >"${GITHUB_OUTPUT}"
 expect preflight_branch 0 run preflight
 if grep -Fxq 'site_url=https://packages.example.test' "${GITHUB_OUTPUT}"; then pass '同域规范化 HTTPS'; else fail 'HTTPS 输出'; fi
@@ -218,8 +214,8 @@ fi
 printf '200\n' >"${WORK}/pages.status"
 git -C "${WORK}" remote set-url origin "${WORK}/origin.git"
 
-expect explicit_pages_build 0 run deploy-pages
-if grep -Fxq 'POST repos/example/apt-hub/pages/builds' "${WORK}/calls.log"; then pass '显式请求分支构建'; else fail '未请求构建'; fi
+expect pages_poll_latest 0 run deploy-pages
+if ! grep -Fq 'POST repos/example/apt-hub/pages/builds' "${WORK}/calls.log"; then pass '不额外 POST 触发构建'; else fail '仍 POST 触发构建'; fi
 if grep -Fxq 'GET repos/example/apt-hub/pages/builds/latest' "${WORK}/calls.log"; then pass '回读构建状态'; else fail '未回读构建状态'; fi
 if cmp -s "${WORK}/tmp/site/state.json" "${WORK}/tmp/public-state.json" \
   && cmp -s "${WORK}/tmp/site/index.html" "${WORK}/tmp/public-index.html" \
@@ -275,7 +271,7 @@ if cmp -s "${WORK}/tmp/site/state.json" "${WORK}/tmp/public-state.json" \
 else
   fail '三文件对齐后未成功'
 fi
-# 不跟随 POST 返回的 .url，始终只对可信 GITHUB_REPOSITORY 轮询 builds/latest。
+# 推送 apt-hub-pages 后只轮询可信 GITHUB_REPOSITORY 的 builds/latest，不再 POST 触发构建。
 run_with_repo() {
   local repo_val="$1"
   shift
@@ -290,31 +286,23 @@ for bad_repo in '../bad/repo' 'example/apt-hub?x=1' 'onlyowner'; do
     fail "非法 GITHUB_REPOSITORY(${bad_repo}) 仍发出了 API 请求"
   fi
 done
-for resp_body in \
-  '{"status":"queued"}' \
-  '{"url":"https://evil.example/repos/example/apt-hub/pages/builds/123"}' \
-  '{"url":"https://api.github.com/repositories/1442432901/pages/builds/latest"}' \
-  '{"url":"https://api.github.com/repositories/999999/pages/builds/123?redirect=evil"}'; do
-  printf '%s\n' "${resp_body}" >"${WORK}/build-request.json"
-  : >"${WORK}/calls.log"
-  expect pages_ignore_response_url 0 run deploy-pages
-  if grep -Fxq 'POST repos/example/apt-hub/pages/builds' "${WORK}/calls.log" \
-    && grep -Fxq 'GET repos/example/apt-hub/pages/builds/latest' "${WORK}/calls.log" \
-    && ! grep -Eq 'evil\.example|repositories/|builds/123' "${WORK}/calls.log"; then
-    pass '忽略 POST 响应 url，固定按 GITHUB_REPOSITORY 轮询 latest'
-  else
-    fail "跟随了响应 url: $(cat "${WORK}/calls.log")"
-  fi
-done
+: >"${WORK}/calls.log"
+expect pages_poll_only_latest 0 run deploy-pages
+if ! grep -Fq 'POST ' "${WORK}/calls.log" \
+  && [[ "$(grep -c 'GET repos/example/apt-hub/pages/builds/latest' "${WORK}/calls.log")" -eq 1 ]] \
+  && ! grep -Eq 'evil\.example|repositories/|builds/123' "${WORK}/calls.log"; then
+  pass '不 POST 构建，只按 GITHUB_REPOSITORY 轮询 latest'
+else
+  fail "调用了非 latest 接口: $(cat "${WORK}/calls.log")"
+fi
 old_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 printf '%s\n' \
   "{\"status\":\"built\",\"commit\":\"${old_sha}\"}" \
   '{"status":"queued"}' \
   "{\"status\":\"built\",\"commit\":\"${seed_sha}\"}" >"${WORK}/build-steps.jsonl"
-printf '%s\n' '{"url":"https://api.github.com/repos/example/apt-hub/pages/builds/latest"}' >"${WORK}/build-request.json"
 : >"${WORK}/calls.log"
 expect pages_latest_stale_then_expected 0 run deploy-pages
-if grep -Fxq 'POST repos/example/apt-hub/pages/builds' "${WORK}/calls.log" \
+if ! grep -Fq 'POST repos/example/apt-hub/pages/builds' "${WORK}/calls.log" \
   && [[ "$(grep -c 'GET repos/example/apt-hub/pages/builds/latest' "${WORK}/calls.log")" -eq 3 ]] \
   && grep -Fq 'Pages 已部署并回读提交' "${WORK}/pages_latest_stale_then_expected.log" \
   && ! grep -Fq "${old_sha}" "${WORK}/pages_latest_stale_then_expected.log"; then
@@ -323,13 +311,12 @@ else
   fail '旧 built 被当成成功，或未等到预期提交'
 fi
 rm -f -- "${WORK}/build-steps.jsonl" "${WORK}/build-steps.next"
-printf '%s\n' '{"url":"https://api.github.com/repositories/1442432901/pages/builds/latest"}' >"${WORK}/build-request.json"
-rm -f -- "${WORK}/build-queue-left" "${WORK}/post-fail.txt"
+rm -f -- "${WORK}/build-queue-left" "${WORK}/latest-fail.txt"
 printf '%s\n' '1' >"${WORK}/build-queue-left"
 printf '%s\n' "{\"status\":\"built\",\"commit\":\"${seed_sha}\"}" >"${WORK}/build-result.json"
 : >"${WORK}/calls.log"
 expect pages_queued_then_built 0 run deploy-pages
-if grep -Fxq 'POST repos/example/apt-hub/pages/builds' "${WORK}/calls.log" \
+if ! grep -Fq 'POST repos/example/apt-hub/pages/builds' "${WORK}/calls.log" \
   && [[ "$(grep -c 'GET repos/example/apt-hub/pages/builds/latest' "${WORK}/calls.log")" -eq 2 ]] \
   && grep -Fq 'Pages 已部署并回读提交' "${WORK}/pages_queued_then_built.log"; then
   pass 'queued 后再 built 且提交一致才成功'
@@ -340,14 +327,14 @@ printf '%s\n' '80' >"${WORK}/build-queue-left"
 : >"${WORK}/calls.log"
 expect pages_build_timeout 1 run deploy-pages
 if grep -Eq '^::error::阶段=deploy-pages 命令=轮询构建状态 Pages 构建超时:' "${WORK}/pages_build_timeout.log" \
-  && grep -Fxq 'POST repos/example/apt-hub/pages/builds' "${WORK}/calls.log" \
+  && ! grep -Fq 'POST repos/example/apt-hub/pages/builds' "${WORK}/calls.log" \
   && ! grep -Fq 'Pages 已部署并回读提交' "${WORK}/pages_build_timeout.log"; then
   pass '构建停在 queued 超时且不记成功'
 else
   fail '构建超时被当成成功或错误行不可见'
 fi
 rm -f -- "${WORK}/build-queue-left"
-cat >"${WORK}/post-fail.txt" <<'EOF'
+cat >"${WORK}/latest-fail.txt" <<'EOF'
 HTTP 502
 {"message":"boom","token":"fixture-not-a-credential"}
 -----BEGIN PGP PRIVATE KEY BLOCK-----
@@ -355,17 +342,18 @@ secret
 -----END PGP SECRET KEY BLOCK-----
 EOF
 : >"${WORK}/calls.log"
-expect pages_post_http 1 run deploy-pages
-if grep -Eq '^::error::阶段=deploy-pages 命令=gh api --method POST repos/example/apt-hub/pages/builds HTTP 502$' "${WORK}/pages_post_http.log" \
-  && ! grep -Fq 'boom' "${WORK}/pages_post_http.log" \
-  && ! grep -Fq 'fixture-not-a-credential' "${WORK}/pages_post_http.log" \
-  && ! grep -Fq 'BEGIN PGP PRIVATE KEY' "${WORK}/pages_post_http.log" \
-  && ! grep -Fq 'Pages 已部署并回读提交' "${WORK}/pages_post_http.log"; then
-  pass 'POST 失败留下阶段、命令与 HTTP 状态且不掩盖成功'
+expect pages_latest_http 1 run deploy-pages
+if grep -Eq '^::error::阶段=deploy-pages 命令=轮询构建状态 HTTP 502$' "${WORK}/pages_latest_http.log" \
+  && ! grep -Fq 'POST repos/example/apt-hub/pages/builds' "${WORK}/calls.log" \
+  && ! grep -Fq 'boom' "${WORK}/pages_latest_http.log" \
+  && ! grep -Fq 'fixture-not-a-credential' "${WORK}/pages_latest_http.log" \
+  && ! grep -Fq 'BEGIN PGP PRIVATE KEY' "${WORK}/pages_latest_http.log" \
+  && ! grep -Fq 'Pages 已部署并回读提交' "${WORK}/pages_latest_http.log"; then
+  pass '轮询 latest 失败留下阶段、命令与 HTTP 状态且不掩盖成功'
 else
-  fail 'POST 失败不可观察或被公网文件掩盖'
+  fail 'latest 失败不可观察或被公网文件掩盖'
 fi
-rm -f -- "${WORK}/post-fail.txt"
+rm -f -- "${WORK}/latest-fail.txt"
 
 for item in key key-other key-protected; do mkdir -p "${WORK}/${item}"; chmod 700 "${WORK}/${item}"; done
 gpg --homedir "${WORK}/key" --batch --pinentry-mode loopback --passphrase '' --quick-generate-key 'Workflow fixture <workflow@invalid>' ed25519 sign 1d >"${WORK}/keygen.log" 2>&1
@@ -411,7 +399,7 @@ if awk '
   job=="PublishPages" && /^      - Build$/{pbuild=1}
   job=="PublishPages" && /^      - name: /{step=($0 ~ /生成并发布 Pages/)}
   job=="PublishPages" && step && /^        if:/{pbad=1}
-  job=="PublishPages" && step && /run: bash scripts\/publish_apt_site.sh publish$/{publish=1}
+  job=="PublishPages" && step && /run: bash scripts\/reindex_apt_repo.sh publish$/{publish=1}
   END{exit (pbad || !bneeds || !bpush || !prelease || !pbuild || !publish)}
 ' "${WF}"; then
   pass '有变构包与无变复用都进入独立 PublishPages，Build 仅在 tag 推送上传'
@@ -458,7 +446,7 @@ else
   fail '抽出的 assets run 不符'
 fi
 up_n="$(grep -n "steps.assets.outputs.upload == '1'" "${WF}" | cut -d: -f1)"
-pub_n="$(grep -n 'publish_apt_site.sh publish' "${WF}" | cut -d: -f1)"
+pub_n="$(grep -n 'reindex_apt_repo.sh publish' "${WF}" | cut -d: -f1)"
 if [[ -n "${up_n}" && -n "${pub_n}" && "${up_n}" -lt "${pub_n}" ]]; then pass '上传门在 Pages 之前'; else fail '上传与 Pages 次序不对'; fi
 # shellcheck disable=SC2016 # 匹配工作流原始表达式，不在测试进程展开
 if grep -Fq 'actions/cache@' "${WF}" \
@@ -619,9 +607,9 @@ MAIN_ONLY
 <!-- APT-HUB:PACKAGES:END -->
 EOF
 printf '%s\n' '{"schema_version":"2","packages":[]}' >"${chain}/data/published.json"
-cp -- "${ROOT}/scripts/publish_apt_site.sh" "${chain}/scripts/publish_apt_site.sh"
+cp -- "${ROOT}/scripts/reindex_apt_repo.sh" "${chain}/scripts/reindex_apt_repo.sh"
 git -C "${chain}" init -b main >/dev/null
-git -C "${chain}" add -- README.md data/published.json scripts/publish_apt_site.sh
+git -C "${chain}" add -- README.md data/published.json scripts/reindex_apt_repo.sh
 git -C "${chain}" -c user.name=fixture-publisher -c user.email=fixture-publisher@invalid commit -m 'main' >/dev/null
 git init --bare "${chain}.git" >/dev/null
 git -C "${chain}" remote add origin "${chain}.git"
@@ -642,7 +630,7 @@ miss_rc=0
   env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
     APT_HUB_GIT_NAME=fixture-publisher APT_HUB_GIT_EMAIL=fixture-publisher@invalid \
     APT_HUB_PAGES_SHA="${chain_sha}" GITHUB_REPOSITORY=example/apt-hub \
-    bash scripts/publish_apt_site.sh update-readme
+    bash scripts/reindex_apt_repo.sh update-readme
 ) >"${chain}/miss.log" 2>&1 || miss_rc=$?
 if [[ "${miss_rc}" -ne 0 && ! -e "${CAPTURE}" ]]; then
   pass '回写缺标签时不调用 render'
@@ -656,7 +644,7 @@ ok_rc=0
   env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
     APT_HUB_GIT_NAME=fixture-publisher APT_HUB_GIT_EMAIL=fixture-publisher@invalid \
     APT_HUB_PAGES_SHA="${chain_sha}" GITHUB_REPOSITORY=example/apt-hub RELEASE_TAG=v7.7.7 \
-    bash scripts/publish_apt_site.sh update-readme
+    bash scripts/reindex_apt_repo.sh update-readme
 ) >"${chain}/ok.log" 2>&1 || ok_rc=$?
 ok_args="$(cat "${CAPTURE}" 2>/dev/null || true)"
 if [[ "${ok_rc}" -eq 0 \
@@ -675,7 +663,7 @@ again_note=1
   env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
     APT_HUB_GIT_NAME=fixture-publisher APT_HUB_GIT_EMAIL=fixture-publisher@invalid \
     APT_HUB_PAGES_SHA="${chain_sha}" GITHUB_REPOSITORY=example/apt-hub RELEASE_TAG=v7.7.7 \
-    bash scripts/publish_apt_site.sh update-readme
+    bash scripts/reindex_apt_repo.sh update-readme
 ) >"${chain}/again.log" 2>&1 || again_rc=$?
 grep -Fq 'README 与已发布状态已一致' "${chain}/again.log" && again_note=0
 again_readme="$(git --git-dir="${chain}.git" show main:README.md)"
@@ -700,7 +688,7 @@ git -C "${chain}" checkout -q --detach "${main_sha}"
 stale_rc=0
 (cd -- "${chain}"; APT_HUB_GIT_NAME=fixture-publisher APT_HUB_GIT_EMAIL=fixture-publisher@invalid \
  APT_HUB_PAGES_SHA="${chain_sha}" GITHUB_REPOSITORY=example/apt-hub RELEASE_TAG=v7.7.7 \
- bash scripts/publish_apt_site.sh update-readme) >"${chain}/stale-source.log" 2>&1 || stale_rc=$?
+ bash scripts/reindex_apt_repo.sh update-readme) >"${chain}/stale-source.log" 2>&1 || stale_rc=$?
 if [[ "${stale_rc}" -ne 0 && "$(git --git-dir="${chain}.git" rev-parse main)" == "${new_release_sha}" ]]; then
   pass '旧维护遇新源码安全失败，不在新发版上追加回写；失败传播阻止 cleanup'
 else
@@ -711,7 +699,7 @@ git -C "${chain}" checkout -q --detach "${new_release_sha}"
 new_rc=0
 (cd -- "${chain}"; APT_HUB_GIT_NAME=fixture-publisher APT_HUB_GIT_EMAIL=fixture-publisher@invalid \
  APT_HUB_PAGES_SHA="${chain_sha}" GITHUB_REPOSITORY=example/apt-hub RELEASE_TAG=v7.7.7 \
- bash scripts/publish_apt_site.sh update-readme) >"${chain}/new-source.log" 2>&1 || new_rc=$?
+ bash scripts/reindex_apt_repo.sh update-readme) >"${chain}/new-source.log" 2>&1 || new_rc=$?
 if [[ "${new_rc}" -eq 0 && "$(git --git-dir="${chain}.git" rev-parse main)" == "${new_release_sha}" ]]; then
   pass '较新源码的后继运行正常幂等，不受旧维护影响'
 else
@@ -726,7 +714,7 @@ race_rc=0
 (cd -- "${chain}"; RACE_MAIN_SHA="${race_main_sha}" RACE_REMOTE="${chain}.git" \
  APT_HUB_GIT_NAME=fixture-publisher APT_HUB_GIT_EMAIL=fixture-publisher@invalid \
  APT_HUB_PAGES_SHA="${chain_sha}" GITHUB_REPOSITORY=example/apt-hub RELEASE_TAG=v7.7.7 \
- bash scripts/publish_apt_site.sh update-readme) >"${chain}/race-source.log" 2>&1 || race_rc=$?
+ bash scripts/reindex_apt_repo.sh update-readme) >"${chain}/race-source.log" 2>&1 || race_rc=$?
 if [[ "${race_rc}" -ne 0 && "$(git --git-dir="${chain}.git" rev-parse main)" == "${race_main_sha}" ]]; then
   pass 'main在fetch后推进，即使无变化回写也重新核对并安全失败'
 else
@@ -741,7 +729,7 @@ mismatch_site_rc=0
   env GITHUB_TOKEN=fixture APT_HUB_FINGERPRINT=0123456789ABCDEF0123456789ABCDEF01234567 \
     SITE_URL=https://example.github.io/apt-hub PACKAGE_REPOSITORY=example/apt-hub \
     RELEASE_TAG=v7.7.7 PACKAGE_RELEASE_TAG=v7.7.6 \
-    bash scripts/publish_apt_site.sh build-site
+    bash scripts/reindex_apt_repo.sh build-site
 ) >"${chain}/pkg-tag-mismatch.log" 2>&1 || mismatch_site_rc=$?
 if [[ "${mismatch_site_rc}" -ne 0 ]] && grep -Fq '必须与 RELEASE_TAG' "${chain}/pkg-tag-mismatch.log"; then
   pass 'build-site 拒绝 PACKAGE_RELEASE_TAG 与 RELEASE_TAG 不一致'

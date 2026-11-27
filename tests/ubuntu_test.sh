@@ -11,7 +11,7 @@ export LANGUAGE=C
 REL="$ROOT/scripts/ubuntu_releases.sh"
 VER="$ROOT/scripts/verify_ubuntu.sh"
 PUB="$ROOT/.github/workflows/release.yml"
-SITE="$ROOT/scripts/publish_apt_site.sh"
+SITE="$ROOT/scripts/reindex_apt_repo.sh"
 
 BASE="$ROOT/tmp/metadata-C"
 mkdir -p "$ROOT/tmp"
@@ -807,7 +807,7 @@ if grep -Fq 'tmp/gnupg' "$SITE" && grep -Fq 'gpgconf --homedir' "$SITE"; then
 else
   fail "未限制/清理 gnupg"
 fi
-if grep -Fq 'scripts/update_sources.sh' "$SITE" && grep -Fq 'publish_apt_site.sh publish' "$PUB"; then
+if grep -Fq 'scripts/update_sources.sh' "$SITE" && grep -Fq 'reindex_apt_repo.sh publish' "$PUB"; then
   pass "发布构建步改为单入口 update_sources"
 else
   fail "发布构建步未改为单入口或不干净"
@@ -829,8 +829,8 @@ GIT_EMAIL='fixture-publisher@invalid'
 install_publish_script() {
   local sandbox="$1"
   mkdir -p "$sandbox/scripts"
-  cp "$SITE" "$sandbox/scripts/publish_apt_site.sh"
-  chmod a+x "$sandbox/scripts/publish_apt_site.sh"
+  cp "$SITE" "$sandbox/scripts/reindex_apt_repo.sh"
+  chmod a+x "$sandbox/scripts/reindex_apt_repo.sh"
 }
 
 make_git_site() {
@@ -867,7 +867,7 @@ gate_root="$BASE/site-gate"
 gate_run="$BASE/site-gate.sh"
 cat >"$gate_run" <<'EOF'
 set -euo pipefail
-bash scripts/publish_apt_site.sh gate-site
+bash scripts/reindex_apt_repo.sh gate-site
 EOF
 # 加源脚本复制已收口进 update_sources.sh；gate 正向用例按同一契约就地消费，不再 awk 截取失效构建步。
 copy_run="$BASE/site-copy-add-source.sh"
@@ -1000,7 +1000,7 @@ isolated_save() {
         GITHUB_SERVER_URL="${server_url}" \
         GITHUB_REPOSITORY="${repo_name}" \
         GITHUB_OUTPUT="${sandbox}/github-output.txt" \
-        bash scripts/publish_apt_site.sh save-apt-hub-pages
+        bash scripts/reindex_apt_repo.sh save-apt-hub-pages
       sed -n "s/^apt_hub_pages_sha=//p" "${sandbox}/github-output.txt" >"${out}"
     ' >"${log}" 2>&1 || rc=$?
   return "${rc}"
@@ -1147,8 +1147,8 @@ else
 fi
 
 tree2=$(git --git-dir="$origin" rev-parse "${sha2}^{tree}")
-printf '\n# source-moved\n' >>"$sandbox/scripts/publish_apt_site.sh"
-git -C "$sandbox" add -- scripts/publish_apt_site.sh
+printf '\n# source-moved\n' >>"$sandbox/scripts/reindex_apt_repo.sh"
+git -C "$sandbox" add -- scripts/reindex_apt_repo.sh
 git -C "$sandbox" -c "user.name=$GIT_NAME" -c "user.email=$GIT_EMAIL" commit -m "源码前进" >/dev/null
 src_moved=$(git -C "$sandbox" rev-parse 'HEAD^{commit}')
 printf '%s\n' "$sha2" >"$sandbox/tmp/apt-hub-pages-base.sha"
@@ -1275,11 +1275,11 @@ readme_origin="$readme_root/origin.git"
 readme_work="$readme_root/work"
 rm -rf "$readme_root"
 mkdir -p "$readme_work/scripts" "$readme_work/templates" "$readme_work/data"
-cp "$SITE" "$readme_work/scripts/publish_apt_site.sh"
+cp "$SITE" "$readme_work/scripts/reindex_apt_repo.sh"
 cp "$ROOT/scripts/render.sh" "$readme_work/scripts/render.sh"
 cp "$ROOT/templates/readme_packages.md" "$ROOT/templates/readme_empty.md" "$ROOT/templates/index.html" \
   "$readme_work/templates/"
-chmod a+x "$readme_work/scripts/publish_apt_site.sh" "$readme_work/scripts/render.sh"
+chmod a+x "$readme_work/scripts/reindex_apt_repo.sh" "$readme_work/scripts/render.sh"
 cat >"$readme_work/README.md" <<'EOF'
 MAIN_ONLY_SENTINEL
 <!-- APT-HUB:PACKAGES:BEGIN -->
@@ -1353,7 +1353,7 @@ diverge_rc=0
     APT_HUB_PAGES_SHA="$apt_sha" \
     GITHUB_REPOSITORY="example/apt-hub" \
     RELEASE_TAG="v7.7.7" \
-    bash scripts/publish_apt_site.sh update-readme
+    bash scripts/reindex_apt_repo.sh update-readme
 ) >"$readme_root/diverge.log" 2>&1 || diverge_rc=$?
 diverge_main=$(git --git-dir="$readme_origin" show main:README.md 2>/dev/null || true)
 if [[ "$diverge_rc" -ne 0 && "$(git --git-dir="$readme_origin" rev-parse v0.0.9 2>/dev/null || true)" == "$tag_sha" && "$diverge_main" == *MAIN_ONLY_SENTINEL* && "$diverge_main" != *alpha-app* ]]; then
@@ -1376,7 +1376,7 @@ readme_rc=0
     APT_HUB_PAGES_SHA="$apt_sha" \
     GITHUB_REPOSITORY="example/apt-hub" \
     RELEASE_TAG="v7.7.7" \
-    bash scripts/publish_apt_site.sh update-readme
+    bash scripts/reindex_apt_repo.sh update-readme
 ) >"$readme_root/update.log" 2>&1 || readme_rc=$?
 main_readme=$(git --git-dir="$readme_origin" show main:README.md 2>/dev/null || true)
 tag_now=$(git --git-dir="$readme_origin" rev-parse v0.0.10 2>/dev/null || true)
