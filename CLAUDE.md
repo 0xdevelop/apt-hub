@@ -22,4 +22,4 @@
 
 自动更新不要依赖 Actions `schedule`（已移除）。在有推送权限的机器上用 systemd 跑 `scripts/auto_check.sh`，由它调用 `git_tag.sh`，再触发 `push: tags` 母版链路：`Release` → `Build` → `PublishPages` → `RemoveOldRelease`。上传必须使用 `george012/upload_github_release_assets_action@latest` 与 `./build/upload_tmp_dir/*`。`workflow_dispatch` 只用于换钥等手动重签。
 
-systemd 模板：`templates/systemd/`。安装命令见 `README.md`。
+systemd 模板：`templates/systemd/apt-hub-auto-check.service`（系统级）、`apt-hub-auto-check.user.service`（用户级）与共用的 `apt-hub-auto-check.timer`。每次运行覆盖 `tmp/auto_check.last.log`。安装命令见 `docs/maintenance.md`。

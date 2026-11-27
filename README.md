@@ -62,26 +62,12 @@ bash git_tag.sh
 
 核心脚本的职责边界见 [AGENTS.md](AGENTS.md) 与 [CLAUDE.md](CLAUDE.md)。
 
-### 启用 systemd 定时巡检
-
-在对 `origin` 有推送权限、且已配置 git 用户名和邮箱的机器上执行（把仓库路径换成实际位置）：
-
-```bash
-repo=/home/certa/workspace/apt-hub
-user="$(id -un)"
-sudo sed "s|@REPO@|${repo}|g; s|@USER@|${user}|g"   "${repo}/templates/systemd/apt-hub-auto-check.service"   | sudo tee /etc/systemd/system/apt-hub-auto-check.service >/dev/null
-sudo sed "s|@REPO@|${repo}|g"   "${repo}/templates/systemd/apt-hub-auto-check.timer"   | sudo tee /etc/systemd/system/apt-hub-auto-check.timer >/dev/null
-sudo systemctl daemon-reload
-sudo systemctl enable --now apt-hub-auto-check.timer
-sudo systemctl list-timers apt-hub-auto-check.timer
-```
-
-默认每天北京时间 12:17 运行；无更新时脚本 exit 0 且不打 tag。可用 `journalctl -u apt-hub-auto-check.service` 查看最近一次巡检日志。
+系统级（sudo 安装，服务仍以仓库维护者账户运行）和普通用户级（`systemd --user`）的完整启用、手动触发、查看日志与卸载步骤见[维护说明：systemd 定时巡检](docs/maintenance.md#systemd-定时巡检)。模板在 `templates/systemd/`。每次运行覆盖同一文件 `tmp/auto_check.last.log`，不向 journald 堆积历史。默认每天北京时间 12:17 运行；无更新时脚本 exit 0 且不打 tag。
 
 ## 文档
 
 - [项目规范](docs/PROJECT_STANDARDS.md)：本地工作流、版本管理与发布授权。
 - [使用与部署](docs/nees_user_read.md)：加源、Pages、签名密钥与恢复。
-- [维护说明](docs/maintenance.md)：新增软件、版本职责与本地验证。
+- [维护说明](docs/maintenance.md)：新增软件、版本职责、本地验证，以及 systemd 定时巡检（系统级与普通用户级）。
 - [AGENTS.md](AGENTS.md) · [CLAUDE.md](CLAUDE.md)：核心脚本职责与发版边界。
 - [验证记录](docs/verification.md) · [需求与边界](docs/plan.md)。

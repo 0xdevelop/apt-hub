@@ -20,4 +20,4 @@
 
 ## systemd 定时
 
-模板在 `templates/systemd/`。启用方法见 `README.md`。默认每天北京时间 12:17 跑一次 `auto_check.sh`；无更新则不发版。
+模板在 `templates/systemd/`：`apt-hub-auto-check.service`（系统级）、`apt-hub-auto-check.user.service`（用户级，安装时复制为同名 `apt-hub-auto-check.service`），共用 `apt-hub-auto-check.timer`。每次运行覆盖 `@REPO@/tmp/auto_check.last.log`，不向 journald 堆积历史。系统级与普通用户级的启用、手动触发和卸载见 `docs/maintenance.md`。默认每天北京时间 12:17 跑一次 `auto_check.sh`；无更新则不发版。

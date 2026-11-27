@@ -1,0 +1,1 @@
+保留空的 tmp/ 目录，供 systemd 打开 truncate:tmp/auto_check.last.log。

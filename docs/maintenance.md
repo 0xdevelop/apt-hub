@@ -105,6 +105,79 @@ bash git_tag.sh
 
 首次脚本标签为 `v0.0.1`；以后末段逐次加 1，超过 `999` 向前进位。不手填版本、不重写已有 `vX.Y.Z` 标签；`latest` 是随发版更新的浮动标签。日常联动更新由 `scripts/auto_check.sh`（systemd 或手动，支持 `--dry-run`）巡检全部已支持软件：构包类比对上游稳定版与 `build_inputs_sha256`，外链 `.deb` 比对 GitHub `/releases/latest`，签名默认超过 7 天续签（`Valid-Until` 为 14 天）。有更新并完成本地预验后，写下固定范式原因并调用 `git_tag.sh` 进位；随后 Actions 仅在 `push: tags` 上沿母版四段 `Release → Build → PublishPages → RemoveOldRelease` 构包或复用、上传、重索引和清理。无更新不升版。`workflow_dispatch` 只用于换钥等手动重签，不在 Actions 里调用 `git_tag.sh`。当前标签已完整且无变化时 Build 跳过构包，由 Pages 重签；新目标标签空或可续接复用且上一标签构建输入与 Go 上游未变时，跨标签复用旧 `.deb` 原字节并生成本版完整四资产；输入或 Go 上游变化时拒绝旧产物复用并在目标版重新构包；空 Release 按需补构包或补复用，部分上传只补字节一致的缺项。真实发版须经用户明确授权。
 
+## systemd 定时巡检
+
+在对 `origin` 有推送权限、且已配置 git 用户名和邮箱的 Linux 机器上启用。需要 systemd 240 及以上（Ubuntu 22.04、24.04 满足）。模板在 `templates/systemd/`：
+
+- `apt-hub-auto-check.service`：系统级单元（`sudo` 安装到 `/etc/systemd/system/`）。单元里的 `User=` / `Group=` 仍是仓库维护者，不是用 root 跑 `auto_check.sh`。
+- `apt-hub-auto-check.user.service`：普通用户级单元，安装时复制为 `~/.config/systemd/user/apt-hub-auto-check.service`（不要保留 `.user` 后缀，以便与 timer 的 `Unit=` 对齐）。
+- `apt-hub-auto-check.timer`：两套共用，安装后单元名都是 `apt-hub-auto-check.timer`。
+
+每次触发都会截断并覆盖同一个日志文件 `tmp/auto_check.last.log`（`StandardOutput=truncate:`，`StandardError=inherit`），不向 journald 堆积历史输出。该路径位于已忽略的 `tmp/` 下，不会把工作区弄脏，也就不会被 `auto_check.sh` 拒绝。仓库跟踪 `tmp/.gitkeep`，保证克隆后日志目录已存在。
+
+默认每天北京时间 12:17 运行；无更新时脚本 exit 0 且不打 tag。把下面命令中的仓库路径换成实际位置。
+
+### 系统级（sudo 安装）
+
+```bash
+repo=/home/certa/workspace/apt-hub
+user="$(id -un)"
+sudo sed "s|@REPO@|${repo}|g; s|@USER@|${user}|g" \
+  "${repo}/templates/systemd/apt-hub-auto-check.service" \
+  | sudo tee /etc/systemd/system/apt-hub-auto-check.service >/dev/null
+sudo sed "s|@REPO@|${repo}|g" \
+  "${repo}/templates/systemd/apt-hub-auto-check.timer" \
+  | sudo tee /etc/systemd/system/apt-hub-auto-check.timer >/dev/null
+sudo systemctl daemon-reload
+sudo systemctl enable --now apt-hub-auto-check.timer
+sudo systemctl list-timers apt-hub-auto-check.timer
+```
+
+手动触发一次、查看最近一次日志、停用并卸载：
+
+```bash
+repo=/home/certa/workspace/apt-hub
+sudo systemctl start apt-hub-auto-check.service
+cat "${repo}/tmp/auto_check.last.log"
+sudo systemctl disable --now apt-hub-auto-check.timer
+sudo rm -f /etc/systemd/system/apt-hub-auto-check.service \
+  /etc/systemd/system/apt-hub-auto-check.timer
+sudo systemctl daemon-reload
+```
+
+### 普通用户级（systemd --user）
+
+不需要把单元安装到 `/etc`。若希望注销后定时器仍运行，需要对该用户开启 linger（若当前用户无权执行，再加 `sudo`）：
+
+```bash
+repo=/home/certa/workspace/apt-hub
+mkdir -p ~/.config/systemd/user
+sed "s|@REPO@|${repo}|g" \
+  "${repo}/templates/systemd/apt-hub-auto-check.user.service" \
+  > ~/.config/systemd/user/apt-hub-auto-check.service
+sed "s|@REPO@|${repo}|g" \
+  "${repo}/templates/systemd/apt-hub-auto-check.timer" \
+  > ~/.config/systemd/user/apt-hub-auto-check.timer
+systemctl --user daemon-reload
+systemctl --user enable --now apt-hub-auto-check.timer
+loginctl enable-linger "$(id -un)" || sudo loginctl enable-linger "$(id -un)"
+systemctl --user list-timers apt-hub-auto-check.timer
+```
+
+手动触发一次、查看最近一次日志、停用并卸载：
+
+```bash
+repo=/home/certa/workspace/apt-hub
+systemctl --user start apt-hub-auto-check.service
+cat "${repo}/tmp/auto_check.last.log"
+systemctl --user disable --now apt-hub-auto-check.timer
+rm -f ~/.config/systemd/user/apt-hub-auto-check.service \
+  ~/.config/systemd/user/apt-hub-auto-check.timer
+systemctl --user daemon-reload
+```
+
+卸载用户级单元时不要顺手关闭 linger，除非你确认本机没有其他用户服务依赖它。
+
 ## 自动巡检与本地发版重合
 
 定时、手动运行与版本 tag 的 Actions 共用 `apt-hub-publish` 并发组，运行中的链不会被新事件取消；这不锁住本地终端，也不保证排队事件按顺序逐个执行。

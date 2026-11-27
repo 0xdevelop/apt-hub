@@ -1,0 +1,18 @@
+[Unit]
+Description=apt-hub 上游巡检与自动发版触发
+Documentation=file://@REPO@/docs/maintenance.md
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO@
+# 安装到 systemd --user，复制为 apt-hub-auto-check.service。不要写 User=/Group=。
+# 用户实例通常没有 network-online.target；网络由脚本自身请求与重试。
+# systemd 在执行 Exec* 之前就会打开 truncate: 日志，因此仓库跟踪 tmp/.gitkeep。
+ExecStartPre=/bin/mkdir -p @REPO@/tmp
+StandardOutput=truncate:@REPO@/tmp/auto_check.last.log
+StandardError=inherit
+ExecStart=@REPO@/scripts/auto_check.sh
+Nice=10
+
+[Install]
+WantedBy=default.target

@@ -1,6 +1,6 @@
 [Unit]
 Description=apt-hub 上游巡检与自动发版触发
-Documentation=file://@REPO@/README.md
+Documentation=file://@REPO@/docs/maintenance.md
 After=network-online.target
 Wants=network-online.target
 
@@ -10,6 +10,10 @@ User=@USER@
 Group=@USER@
 WorkingDirectory=@REPO@
 # 以对 origin 有推送权限的维护者账户运行，沿用其 SSH 与 git 身份。
+# systemd 在执行 Exec* 之前就会打开 truncate: 日志，因此仓库跟踪 tmp/.gitkeep。
+ExecStartPre=/bin/mkdir -p @REPO@/tmp
+StandardOutput=truncate:@REPO@/tmp/auto_check.last.log
+StandardError=inherit
 ExecStart=@REPO@/scripts/auto_check.sh
 Nice=10
 

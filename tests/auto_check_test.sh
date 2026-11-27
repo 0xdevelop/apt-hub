@@ -287,5 +287,111 @@ else
   fail "脏工作区未拒绝 rc=${rc} log=$(cat "${BASE}/dirty/run.log")"
 fi
 
+# 7) tmp 日志与忽略规则不会被当成脏工作区
+setup_repo "${BASE}/log"
+install_mocks "${BASE}/log"
+write_go_downloads "${BASE}/log/go-downloads.json" go9.9.9
+write_state "${BASE}/log/state.json" go9.9.9 1.5.3
+write_provenance "${BASE}/log/prov.json" "$(current_inputs "${BASE}/log")"
+write_rust_latest "${BASE}/log/upstream/rustdesk.json" 1.5.3
+mkdir -p "${BASE}/log/tmp"
+printf 'previous-run\n' >"${BASE}/log/tmp/auto_check.last.log"
+if [[ -n "$(git -C "${BASE}/log" status --porcelain)" ]]; then
+  fail "fixture 中 tmp/auto_check.last.log 不应出现在 git status"
+else
+  rc=0
+  run_check "${BASE}/log" --dry-run --state "${BASE}/log/state.json" \
+    --go-downloads-json "${BASE}/log/go-downloads.json" \
+    --golang-provenance "${BASE}/log/prov.json" \
+    --upstream-dir "${BASE}/log/upstream" \
+    --release-date "${fresh_date}" --renew-days 7 --host-arch arm64 || rc=$?
+  if [[ "${rc}" -eq 0 ]] && grep -q '无更新' "${BASE}/log/run.log"; then
+    pass 'tmp 下的上次巡检日志不会触发脏工作区拒绝'
+  else
+    fail "已忽略日志被当成脏工作区 rc=${rc} log=$(cat "${BASE}/log/run.log")"
+  fi
+fi
+
+# 8) systemd 模板：系统级/用户级契约、单日志覆盖、语法可校验
+sys_unit="${ROOT}/templates/systemd/apt-hub-auto-check.service"
+user_unit="${ROOT}/templates/systemd/apt-hub-auto-check.user.service"
+timer_unit="${ROOT}/templates/systemd/apt-hub-auto-check.timer"
+log_line='StandardOutput=truncate:@REPO@/tmp/auto_check.last.log'
+ok=1
+for f in "${sys_unit}" "${user_unit}"; do
+  grep -Fxq "${log_line}" "${f}" \
+    && grep -Fxq 'StandardError=inherit' "${f}" \
+    && grep -Fxq 'ExecStartPre=/bin/mkdir -p @REPO@/tmp' "${f}" \
+    && grep -Fxq 'ExecStart=@REPO@/scripts/auto_check.sh' "${f}" \
+    || ok=0
+done
+grep -Fq 'User=@USER@' "${sys_unit}" && grep -Fq 'Group=@USER@' "${sys_unit}" \
+  && grep -Fxq 'WantedBy=multi-user.target' "${sys_unit}" || ok=0
+if grep -Eq '^(User|Group)=' "${user_unit}"; then
+  ok=0
+fi
+grep -Fxq 'WantedBy=default.target' "${user_unit}" || ok=0
+grep -Fxq 'Unit=apt-hub-auto-check.service' "${timer_unit}" || ok=0
+if grep -Fq '@USER@' "${user_unit}" || grep -Fq '@USER@' "${timer_unit}"; then
+  ok=0
+fi
+if ! grep -Fxq 'tmp/*' "${ROOT}/.gitignore" || ! grep -Fxq '!tmp/.gitkeep' "${ROOT}/.gitignore"; then
+  ok=0
+fi
+if [[ ! -f "${ROOT}/tmp/.gitkeep" ]]; then
+  ok=0
+fi
+gitignore_log="${BASE}/gitignore-log"
+mkdir -p "${gitignore_log}"
+printf 'probe\n' >"${ROOT}/tmp/auto_check.last.log"
+set +e
+git -C "${ROOT}" check-ignore -q -- tmp/auto_check.last.log
+log_ignored=$?
+git -C "${ROOT}" check-ignore -q -- tmp/.gitkeep
+keep_ignored=$?
+set -e
+rm -f "${ROOT}/tmp/auto_check.last.log"
+printf 'log_ignored=%s keep_ignored=%s\n' "${log_ignored}" "${keep_ignored}" >"${gitignore_log}/status"
+# last.log 必须被忽略；.gitkeep 必须可跟踪
+if [[ "${log_ignored}" -ne 0 || "${keep_ignored}" -eq 0 ]]; then
+  ok=0
+fi
+if [[ "${ok}" -eq 1 ]]; then
+  pass 'systemd 模板与 tmp 日志忽略规则符合单文件覆盖约定'
+else
+  fail "systemd 模板或 gitignore 约定不符 status=$(cat "${gitignore_log}/status")"
+fi
+
+if command -v systemd-analyze >/dev/null 2>&1; then
+  render="${BASE}/systemd-units"
+  mkdir -p "${render}/system" "${render}/user"
+  repo_esc="${ROOT}"
+  user_esc="$(id -un)"
+  sed "s|@REPO@|${repo_esc}|g; s|@USER@|${user_esc}|g" "${sys_unit}" \
+    >"${render}/system/apt-hub-auto-check.service"
+  sed "s|@REPO@|${repo_esc}|g" "${timer_unit}" \
+    >"${render}/system/apt-hub-auto-check.timer"
+  sed "s|@REPO@|${repo_esc}|g" "${user_unit}" \
+    >"${render}/user/apt-hub-auto-check.service"
+  sed "s|@REPO@|${repo_esc}|g" "${timer_unit}" \
+    >"${render}/user/apt-hub-auto-check.timer"
+  verify_rc=0
+  systemd-analyze verify \
+    "${render}/system/apt-hub-auto-check.service" \
+    "${render}/system/apt-hub-auto-check.timer" \
+    >"${render}/system.verify" 2>&1 || verify_rc=$?
+  systemd-analyze verify \
+    "${render}/user/apt-hub-auto-check.service" \
+    "${render}/user/apt-hub-auto-check.timer" \
+    >"${render}/user.verify" 2>&1 || verify_rc=$?
+  if [[ "${verify_rc}" -eq 0 ]]; then
+    pass 'systemd-analyze verify 通过系统级与用户级单元'
+  else
+    fail "systemd-analyze verify 失败 rc=${verify_rc} system=$(cat "${render}/system.verify") user=$(cat "${render}/user.verify")"
+  fi
+else
+  pass '本机无 systemd-analyze，跳过单元语法校验'
+fi
+
 printf 'RESULT pass=%s fail=%s evidence=%s\n' "${PASS}" "${FAIL}" "${BASE}"
 [[ "${FAIL}" -eq 0 ]]

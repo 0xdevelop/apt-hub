@@ -1,6 +1,6 @@
 [Unit]
 Description=每天巡检 apt-hub 已支持软件并在有更新时触发发版
-Documentation=file://@REPO@/README.md
+Documentation=file://@REPO@/docs/maintenance.md
 
 [Timer]
 # 与原先 Actions 定时一致：UTC 04:17，北京时间 12:17。
