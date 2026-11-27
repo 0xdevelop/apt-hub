@@ -2,13 +2,13 @@ Acquire-By-Hash: yes
 Architectures: amd64 arm64
 Codename: jammy
 Components: main
-Date: Wed, 25 Nov 2026 14:24:06 +0000
+Date: Fri, 27 Nov 2026 03:11:07 +0000
 Label: apt-hub
 Origin: apt-hub
 Suite: jammy
-Valid-Until: Wed, 09 Dec 2026 14:24:06 +0000
+Valid-Until: Fri, 11 Dec 2026 03:11:07 +0000
 SHA256:
- 1ff29e73b5fd9af925e7bb7eeeb4fa418c9a7a478a1ff9699a6a93a23cb7fdf9              575 main/binary-amd64/Packages
- 05e3bb15c864139d59e93c79914076ce4652bdcab3e65116e0b3e387c6577fc9              394 main/binary-amd64/Packages.gz
- 4e5126648c50cbc607a22c6fca9874ecddfb90bfa1faa53587b73cd209148a9b              575 main/binary-arm64/Packages
- 33e518ab677b6bc0e408dce0813bb85e117400764df9b5fd7cf47441765737ba              394 main/binary-arm64/Packages.gz
+ 47215f81979badffb3f405a8b1431c3f15c953d1318b69167ddb739869ec6b99              575 main/binary-amd64/Packages
+ f454c7adae98e0782286f340b1d4d852cc46daf133da0ee8fc8858536613e393              394 main/binary-amd64/Packages.gz
+ 0a0126613c1f75756ed376172a4c4c2ba94ceb095f0e040c71bab7f4fb8460f2              575 main/binary-arm64/Packages
+ eae612ebd19680d0d029a4e5d5a5591560c854e015902a34ab4bf5418f25427c              394 main/binary-arm64/Packages.gz
