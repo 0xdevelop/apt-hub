@@ -297,6 +297,30 @@ end
 '
 
 # shellcheck disable=SC2016 # jq 程序字面量，故意单引号不插值
+md_checks_jq='
+def md_cell:
+  tostring
+  | gsub("\r"; "")
+  | gsub("\n"; " ")
+  | gsub("&"; "&amp;")
+  | gsub("<"; "&lt;")
+  | gsub(">"; "&gt;")
+  | gsub("\""; "&quot;")
+  | gsub("'\''"; "&#39;")
+  | gsub("\\\\"; "\\\\")
+  | gsub("\\|"; "\\|")
+  | gsub("\\["; "\\[")
+  | gsub("\\]"; "\\]")
+  | gsub("`"; "\\`")
+  | gsub("\\*"; "\\*")
+  | gsub("_"; "\\_");
+if (.packages | length) == 0 then empty
+else
+  .packages[] | "- [x] " + (.package | md_cell)
+end
+'
+
+# shellcheck disable=SC2016 # jq 程序字面量，故意单引号不插值
 site_base_jq='
 def site:
   . as $p
@@ -324,6 +348,13 @@ def support:
   (.ubuntu_series | join(", ")) + " · " + (.architectures | join(", "));
 def row:
   "<tr><td><a href=\"\(.release_url | html_escape)\">\(.package | html_escape)</a></td><td>\(.version | html_escape)</td><td>\(support | html_escape)</td><td>\(.description | html_escape)</td></tr>";
+def supported_list:
+  if (.packages | length) == 0 then []
+  else
+    ["<h2>已支持软件</h2>", "<ul>"]
+    + [.packages[] | "<li>[x] " + (.package | html_escape) + "</li>"]
+    + ["</ul>"]
+  end;
 def legacy:
   if (.packages | length) == 0 then
     "<p>" + ($empty | sub("\n+$";"") | html_escape) + "</p>"
@@ -332,6 +363,7 @@ def legacy:
       (if $cmd != "" then
         ["<a id=\"apt-hub-add-source\"></a>", "<pre><code>" + ($cmd | html_escape) + "</code></pre>"]
       else [] end)
+      + supported_list
       + [
         "<table>",
         "<thead><tr><th>软件</th><th>版本</th><th>支持环境</th><th>说明</th></tr></thead>",
@@ -342,7 +374,6 @@ def legacy:
     ) | join("\n")
   end;
 def gh($suffix): "https://github.com/" + $repo + $suffix;
-def pkgs: [.packages[].package] | join(" ");
 def versioned:
   (
     ["<h2>维护版本</h2>",
@@ -355,9 +386,12 @@ def versioned:
         ["<h2>一键加源</h2>",
           "<p>成功后脚本自删，不安装软件。</p>",
           "<a id=\"apt-hub-add-source\"></a>",
-          "<pre><code>" + ($cmd | html_escape) + "</code></pre>",
-          "<h2>安装</h2>",
-          "<pre><code>" + (("sudo apt update && sudo apt install " + pkgs) | html_escape) + "</code></pre>",
+          "<pre><code>" + ($cmd | html_escape) + "</code></pre>"]
+      else [] end)
+    + supported_list
+    + (if $cmd != "" then
+        ["<h2>安装</h2>",
+          "<pre><code>" + ("sudo apt update && sudo apt install <软件包名>" | html_escape) + "</code></pre>",
           "<h2>更新</h2>",
           "<pre><code>" + ("sudo apt update && sudo apt upgrade" | html_escape) + "</code></pre>"]
       else [] end)
@@ -426,9 +460,11 @@ tmp_html="$work/index.html"
 tmp_readme="$work/README.md"
 section_md="$work/section.md"
 rows_md="$work/rows.md"
+checks_md="$work/checks.md"
 body_html="$work/body.html"
 
 jq -r "$md_jq" "$state" >"$rows_md"
+jq -r "$md_checks_jq" "$state" >"$checks_md"
 jq -r --rawfile empty "$readme_empty" --arg cmd "$repo_cmd" --arg repo "$repository_arg" --arg tag "$release_tag_arg" --arg base "$repo_base" "$html_jq" "$state" >"$body_html"
 
 if [[ ! -s "$rows_md" ]]; then
@@ -438,6 +474,11 @@ else
     if [[ -n "$repo_cmd" ]]; then
       # shellcheck disable=SC2016 # Markdown 围栏字面量反引号
       printf '<a id="apt-hub-add-source"></a>\n\n```bash\n%s\n```\n\n' "$repo_cmd"
+    fi
+    if [[ -s "$checks_md" ]]; then
+      printf '已支持：\n\n'
+      cat -- "$checks_md"
+      printf '\n'
     fi
     cat -- "$readme_header"
     cat -- "$rows_md"

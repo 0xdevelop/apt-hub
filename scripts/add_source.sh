@@ -150,6 +150,21 @@ under_dir() {
   [[ "${child}" == "${parent}" || "${child}" == "${parent}/"* ]]
 }
 
+# 根为 / 时拼出 /etc/...，避免显示成 //etc/...
+join_root_path() {
+  local root="$1" rel="$2"
+  [[ -n "${rel}" && "${rel}" != /* ]] || die "join_root_path 相对路径非法: ${rel}"
+  if [[ "${root}" == "/" ]]; then
+    printf '/%s\n' "${rel}"
+  else
+    printf '%s/%s\n' "${root}" "${rel}"
+  fi
+}
+
+print_next_step() {
+  printf '下一步: apt update && apt install <软件包名>\n'
+}
+
 discover_project_root() {
   local start="$1" cur
   cur="$(realpath -e -- "${start}")"
@@ -748,8 +763,8 @@ add_all_applicable_sources() {
   local stanza_count=0 stanza_i=0 stanza_file
   local types uris suites components signed_by archs id path pkg
   local prefix suffix id_base pkg_hash got_hash new_fpr old_fpr
-  local all_same=1 install_line="" seen_file="${scratch}/seen-ids"
-  local -a applicable_ids=() applicable_pkgs=() applicable_paths=() applicable_stanzas=()
+  local all_same=1 seen_file="${scratch}/seen-ids"
+  local -a applicable_ids=() applicable_paths=() applicable_stanzas=()
   mkdir -p -- "${stanza_dir}"
   : >"${seen_file}"
   curl_get "${site_url}/apt-hub.gpg" "${scratch}/apt-hub.gpg" || die "下载公钥失败"
@@ -852,7 +867,6 @@ add_all_applicable_sources() {
     pkg="$(awk -F': ' '$1=="Package"{print $2; exit}' "${scratch}/ids/${id}/Packages")"
     [[ -n "${pkg}" ]] || die "已签名 Packages 中无 Package 字段"
     write_final_sources "${stanza_file}" "${scratch}/ids/${id}/final.sources" "${signed_by_final}"
-    applicable_pkgs+=("${pkg}")
     stanza_i=$((stanza_i + 1))
   done
 
@@ -899,10 +913,7 @@ add_all_applicable_sources() {
       printf '已添加（幂等）: %s\n' "${applicable_paths[${stanza_i}]}"
       stanza_i=$((stanza_i + 1))
     done
-    for pkg in "${applicable_pkgs[@]}"; do
-      install_line="${install_line}${install_line:+ }${pkg}"
-    done
-    printf '下一步: apt update && apt install %s\n' "${install_line}"
+    print_next_step
     success=1
     exit 0
   fi
@@ -925,10 +936,7 @@ add_all_applicable_sources() {
     printf '已添加: %s\n' "${applicable_paths[${stanza_i}]}"
     stanza_i=$((stanza_i + 1))
   done
-  for pkg in "${applicable_pkgs[@]}"; do
-    install_line="${install_line}${install_line:+ }${pkg}"
-  done
-  printf '下一步: apt update && apt install %s\n' "${install_line}"
+  print_next_step
   success=1
   exit 0
 }
@@ -983,8 +991,8 @@ if [[ -n "${cacert}" ]]; then
   cacert="$(realpath -e -- "${cacert}")"
 fi
 
-key_dir="${target_root}/etc/apt/keyrings"
-sources_dir="${target_root}/etc/apt/sources.list.d"
+key_dir="$(join_root_path "${target_root}" "etc/apt/keyrings")"
+sources_dir="$(join_root_path "${target_root}" "etc/apt/sources.list.d")"
 key_path="${key_dir}/apt-hub.gpg"
 # 同根一把锁：覆盖共享 apt-hub.gpg，不同 software 串行
 lock_file="${key_dir}/.apt-hub-add-source.lock"
@@ -1124,7 +1132,7 @@ if [[ -f "${sources_path}" && ! -L "${sources_path}" ]]; then
   if cmp -s -- "${sources_path}" "${scratch}/final.sources"; then
     if [[ -f "${key_path}" ]] && cmp -s -- "${key_path}" "${scratch}/final.gpg"; then
       printf '已添加（幂等）: %s\n' "${sources_path}"
-      printf '下一步: apt update && apt install %s\n' "${package_name}"
+      print_next_step
       success=1
       exit 0
     fi
@@ -1144,6 +1152,6 @@ if [[ "${sources_missing}" -eq 1 ]] || ! cmp -s -- "${sources_path}" "${scratch}
 fi
 
 printf '已添加: %s\n' "${sources_path}"
-printf '下一步: apt update && apt install %s\n' "${package_name}"
+print_next_step
 success=1
 exit 0

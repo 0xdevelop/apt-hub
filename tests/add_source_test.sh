@@ -534,6 +534,30 @@ else
   log "shellcheck 不可用：需要 tmp/metadata-C/bin/shellcheck 或 PATH 中的 shellcheck；本测试不安装"
 fi
 
+log "== join_root_path 路径拼接 =="
+# shellcheck disable=SC2317 # 仅由抽取出的 join_root_path 间接调用
+die() { printf 'die: %s\n' "$*" >&2; return 1; }
+eval "$(sed -n '/^join_root_path()/,/^}/p' "${ADD}")"
+got="$(join_root_path / etc/apt/sources.list.d)"
+if [[ "${got}" == "/etc/apt/sources.list.d" ]]; then
+  pass "join_root_path_system_root"
+else
+  fail "join_root_path_system_root"
+fi
+got="$(join_root_path /tmp/isolated-root etc/apt/sources.list.d)"
+if [[ "${got}" == "/tmp/isolated-root/etc/apt/sources.list.d" ]]; then
+  pass "join_root_path_isolated"
+else
+  fail "join_root_path_isolated"
+fi
+got="$(join_root_path / etc/apt/keyrings)"
+if [[ "${got}" == "/etc/apt/keyrings" ]]; then
+  pass "join_root_path_keyrings"
+else
+  fail "join_root_path_keyrings"
+fi
+unset -f die join_root_path
+
 log "== 构建唯一测试身份与站点 =="
 make_gpg_home "${GNUPG}"
 FP="$(gpg --homedir "${GNUPG}" --batch --list-keys --with-colons | awk -F: '$1=="fpr"{print $10; exit}')"
@@ -558,10 +582,11 @@ if [[ "${rc}" -eq 0 ]]; then
   else
     fail "first_add_signed_by_isolated"
   fi
-  if grep -q "apt install ${PKG_NAME}" "${BASE}/first.log"; then
-    pass "first_add_package_name"
+  if grep -qx '下一步: apt update && apt install <软件包名>' "${BASE}/first.log" \
+    && ! grep -q "apt install ${PKG_NAME}" "${BASE}/first.log"; then
+    pass "first_add_next_step"
   else
-    fail "first_add_package_name"
+    fail "first_add_next_step"
   fi
   mode_k="$(stat -c '%a' "${R1}/etc/apt/keyrings/apt-hub.gpg")"
   mode_s="$(stat -c '%a' "${R1}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources")"
@@ -1604,10 +1629,12 @@ if [[ -f "${Rall}/etc/apt/sources.list.d/apt-hub-${SOFTWARE_ID}.sources" \
 else
   fail "all_sources_per_id_files_only"
 fi
-if grep -q "apt install ${PKG_NAME} ${PKG_NAME2}" "${BASE}/all.log"; then
-  pass "all_sources_install_line"
+if grep -qx '下一步: apt update && apt install <软件包名>' "${BASE}/all.log" \
+  && ! grep -q "apt install ${PKG_NAME}" "${BASE}/all.log" \
+  && ! grep -q "apt install ${PKG_NAME2}" "${BASE}/all.log"; then
+  pass "all_sources_next_step"
 else
-  fail "all_sources_install_line"
+  fail "all_sources_next_step"
 fi
 write_apt_conf_for_root "${Rall}" amd64 "${Rall}/etc/apt/apt.conf"
 arc="$(capture_rc "${BASE}/all-apt-update.log" env APT_CONFIG="${Rall}/etc/apt/apt.conf" timeout 90 apt-get update)"

@@ -231,6 +231,7 @@ empty_outside_before=$(readme_outside_hash "$empty_readme")
 run_expect "render_empty" 0 "$RENDER" --state "$EVIDENCE/published.empty.json" --readme "$empty_readme" --site "$empty_site"
 assert_same_hash "empty 不改 state 输入" "$EVIDENCE/published.empty.json" "$empty_state_hash"
 assert_file_has "empty readme message" "$empty_readme" "尚未完成首次发布"
+assert_file_lacks "empty readme 无勾选" "$empty_readme" "- [x]"
 assert_file_lacks "empty readme no fake version" "$empty_readme" "1.5.0"
 assert_file_lacks "empty readme no https" "$empty_readme" "https://"
 assert_file_lacks "empty readme no http" "$empty_readme" "http://"
@@ -238,6 +239,7 @@ assert_file_lacks "empty readme no mirror+" "$empty_readme" "mirror+"
 assert_file_lacks "empty readme no command" "$empty_readme" "curl -fsSL"
 assert_file_lacks "empty readme no software" "$empty_readme" "--software"
 assert_file_has "empty html message" "$empty_site/index.html" "尚未完成首次发布"
+assert_file_lacks "empty html 无支持列表" "$empty_site/index.html" "已支持软件"
 assert_file_lacks "empty html no table row" "$empty_site/index.html" "<tbody>"
 assert_file_lacks "empty html no https" "$empty_site/index.html" "https://"
 assert_file_lacks "empty html no http" "$empty_site/index.html" "http://"
@@ -290,8 +292,14 @@ html_command=${repo_command//&/\&amp;}
 html_command=${html_command//\'/\&#39;}
 assert_file_has "two md 锚点" "$readme_two" '<a id="apt-hub-add-source"></a>'
 assert_file_has "two md 仓库命令" "$readme_two" "$repo_command"
+assert_file_has "two md 已支持标题" "$readme_two" "已支持："
+assert_file_has "two md 勾选 alpha" "$readme_two" "- [x] alpha-app"
+assert_file_has "two md 勾选 beta" "$readme_two" "- [x] beta-tool"
 assert_file_has "two html 仓库命令" "$site_two/index.html" "<pre><code>${html_command}</code></pre>"
 assert_file_has "two html 锚点" "$site_two/index.html" '<a id="apt-hub-add-source"></a>'
+assert_file_has "two html 已支持标题" "$site_two/index.html" "<h2>已支持软件</h2>"
+assert_file_has "two html 勾选 alpha" "$site_two/index.html" "<li>[x] alpha-app</li>"
+assert_file_has "two html 勾选 beta" "$site_two/index.html" "<li>[x] beta-tool</li>"
 assert_eq "two md 恰一命令" "$(grep -F -o -- 'curl -fsSL ' "$readme_two" | wc -l)" "1"
 assert_eq "two html 恰一代码块" "$(grep -F -o -- '<pre><code>' "$site_two/index.html" | wc -l)" "1"
 assert_file_lacks "two md 无 software" "$readme_two" "--software"
@@ -445,6 +453,7 @@ assert_file_has "inject html escaped lt" "$inject_site/index.html" "&lt;script&g
 assert_file_has "inject html escaped img" "$inject_site/index.html" "&lt;img src=x onerror=alert(1)&gt;"
 assert_file_has "inject html escaped amp" "$inject_site/index.html" "&amp;"
 assert_file_has "inject html escaped package" "$inject_site/index.html" "alpha&lt;app&gt;"
+assert_file_has "inject html 勾选转义" "$inject_site/index.html" "<li>[x] alpha&lt;app&gt;</li>"
 assert_file_has "inject html escaped quote" "$inject_site/index.html" "&quot;quotes&quot;"
 # shellcheck disable=SC2016 # fixture 字面量，故意单引号
 assert_file_has "inject html literal tick" "$inject_site/index.html" '`code`'
@@ -459,6 +468,7 @@ assert_file_has "inject md escaped script" "$inject_readme" "&lt;script&gt;"
 assert_file_has "inject md escaped img" "$inject_readme" "&lt;img src=x onerror=alert(1)&gt;"
 assert_file_has "inject md escaped amp" "$inject_readme" "&amp;"
 assert_file_has "inject md escaped package" "$inject_readme" "alpha&lt;app&gt;"
+assert_file_has "inject md 勾选转义" "$inject_readme" "- [x] alpha&lt;app&gt;"
 assert_file_has "inject md escaped pipe" "$inject_readme" "\|"
 # shellcheck disable=SC2016 # fixture 字面量，故意单引号
 assert_file_has "inject md escaped tick" "$inject_readme" '\`code\`'
@@ -795,9 +805,13 @@ assert_file_has "软件表保留 RustDesk 版本" "$ver_site_ok/index.html" "1.4
 assert_file_has "固定站点根" "$ver_site_ok/index.html" "<code>https://apt.example.test</code>"
 assert_file_has "加源自删一句" "$ver_site_ok/index.html" "成功后脚本自删，不安装软件。"
 assert_file_lacks "加源命令无 software" "$ver_site_ok/index.html" "--software"
-assert_file_has "安装命令" "$ver_site_ok/index.html" "<pre><code>sudo apt update &amp;&amp; sudo apt install golang rustdesk</code></pre>"
+assert_file_has "安装命令" "$ver_site_ok/index.html" "<pre><code>sudo apt update &amp;&amp; sudo apt install &lt;软件包名&gt;</code></pre>"
 assert_file_lacks "安装不加引号" "$ver_site_ok/index.html" "install &#39;golang&#39;"
+assert_file_lacks "安装不列举包名" "$ver_site_ok/index.html" "apt install golang"
 assert_file_has "更新命令" "$ver_site_ok/index.html" "<pre><code>sudo apt update &amp;&amp; sudo apt upgrade</code></pre>"
+assert_file_has "版本页已支持标题" "$ver_site_ok/index.html" "<h2>已支持软件</h2>"
+assert_file_has "版本页勾选 golang" "$ver_site_ok/index.html" "<li>[x] golang</li>"
+assert_file_has "版本页勾选 rustdesk" "$ver_site_ok/index.html" "<li>[x] rustdesk</li>"
 assert_file_lacks "更新不附包名" "$ver_site_ok/index.html" "apt upgrade golang"
 assert_eq "显式版本三条代码" "$(grep -F -o -- '<pre><code>' "$ver_site_ok/index.html" | wc -l)" "3"
 assert_file_has "四列表头" "$ver_site_ok/index.html" "支持环境"
@@ -832,6 +846,8 @@ assert_file_has "空态仍给维护版本" "$empty_ver_site/index.html" 'href="h
 assert_file_lacks "空态不伪造命令" "$empty_ver_site/index.html" "curl -fsSL"
 assert_file_lacks "空态不伪造提权" "$empty_ver_site/index.html" "sudo"
 assert_file_lacks "空态不伪造代码块" "$empty_ver_site/index.html" "<pre>"
+assert_file_lacks "空态不伪造支持列表" "$empty_ver_site/index.html" "已支持软件"
+assert_file_lacks "空态不伪造勾选" "$empty_ver_site/index.html" "[x]"
 assert_file_lacks "空态不伪造站根" "$empty_ver_site/index.html" "apt.example.test"
 
 http_ver_site="$EVIDENCE/site-http-version"
@@ -853,7 +869,9 @@ run_expect "render_path_explicit_version" 0 "$RENDER" --state "$path_state" --re
 assert_file_has "子路径站根" "$path_ver_site/index.html" "<code>https://apt.example.test:8443/team/site_v2</code>"
 assert_file_has "子路径命令" "$path_ver_site/index.html" "--site-url &#39;https://apt.example.test:8443/team/site_v2&#39;"
 assert_file_lacks "子路径命令无 software" "$path_ver_site/index.html" "--software"
-assert_file_has "子路径安装命令" "$path_ver_site/index.html" "sudo apt update &amp;&amp; sudo apt install alpha-app"
+assert_file_has "子路径安装命令" "$path_ver_site/index.html" "sudo apt update &amp;&amp; sudo apt install &lt;软件包名&gt;"
+assert_file_lacks "子路径安装不列举包名" "$path_ver_site/index.html" "apt install alpha-app"
+assert_file_has "子路径勾选 alpha" "$path_ver_site/index.html" "<li>[x] alpha-app</li>"
 
 # git_tag.sh：手动入口一律拒绝。无参数入口由脏工作区用例覆盖。
 tag_repo="$EVIDENCE/tag-repo"

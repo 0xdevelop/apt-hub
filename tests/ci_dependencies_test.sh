@@ -21,14 +21,14 @@ awk '
   dep && $0~/^        run: / && $0!="        run: |" {print substr($0,14) > (base "/step-" n ".sh"); next}
   cap && substr($0,1,10)=="          " {print substr($0,11) > (base "/step-" n ".sh"); next}
   cap && $0!~/^$/ {cap=0}
-  END {if(n!=3)exit 1}
+  END {if(n!=4)exit 1}
 ' base="${BASE}" "${ROOT}/.github/workflows/release.yml"
-for step in 1 2 3; do
+for step in 1 2 3 4; do
   rc=0
   (cd "${BASE}" && PATH="${BASE}/bin:${PATH}" bash "${BASE}/step-${step}.sh") >"${BASE}/step-${step}.log" 2>&1 || rc=$?
   if [[ "${rc}" -ne 0 ]]; then printf 'FAIL 依赖已齐仍执行APT step=%s rc=%s evidence=%s\n' "${step}" "${rc}" "${BASE}"; exit 1; fi
 done
-printf 'PASS 三个原依赖步骤复用预装工具，不执行APT\n'
+printf 'PASS 四个原依赖步骤复用预装工具，不执行APT\n'
 
 # 缺少 apt-ftparchive 时只补 apt-utils；sudo 和 apt-get 均为明确夹具。
 mkdir -p "${BASE}/missing-bin"

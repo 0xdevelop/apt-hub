@@ -812,8 +812,11 @@ if grep -Fq 'scripts/update_sources.sh' "$SITE" && grep -Fq 'publish_apt_site.sh
 else
   fail "发布构建步未改为单入口或不干净"
 fi
-if grep -Fq 'permissions: {}' "$PUB" && grep -Fq 'pages: write' "$PUB" \
-  && ! grep -Fq 'id-token:' "$PUB"; then
+# 母版不写工作流级 permissions: {}，否则上传 job 在非 tag 触发时会 403；
+# Pages 仍用内置 GITHUB_TOKEN 的 pages: write，不用 OIDC id-token。
+if grep -Fq 'pages: write' "$PUB" \
+  && ! grep -Fq 'id-token:' "$PUB" \
+  && ! grep -Fq 'permissions: {}' "$PUB"; then
   pass "Pages 分支构建只用内置工作流令牌"
 else
   fail "job 权限拆分不符合契约"
