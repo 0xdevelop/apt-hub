@@ -389,18 +389,34 @@ if grep -Eq '^fingerprint=[A-F0-9]{40}$' "${GITHUB_OUTPUT}"; then pass '私钥�
 WF="${ROOT}/.github/workflows/release.yml"
 if [[ ! -e "${ROOT}/.github/workflows/ubuntu-publish.yml" && ! -e "${ROOT}/.github/workflows/ubuntu-test.yml" ]]; then pass '无影子工作流'; else fail '仍有额外工作流'; fi
 if ! grep -Eq 'upload-pages-artifact|deploy-pages@|upload-artifact|download-artifact|id-token:' "${WF}"; then pass '无 Actions Artifact 与 OIDC 部署链'; else fail 'Artifact 影子链残留'; fi
-if grep -q '^  release:' "${WF}" && grep -q '^  Build:' "${WF}" && grep -q '^  RemoveOldRelease:' "${WF}"; then pass '母版三段保留'; else fail '三段缺失'; fi
+if grep -q '^  release:' "${WF}" && grep -q '^  Build:' "${WF}" && grep -q '^  PublishPages:' "${WF}" && grep -q '^  RemoveOldRelease:' "${WF}"; then pass '母版三段保留且独立 PublishPages'; else fail 'Release/Build/PublishPages/RemoveOldRelease 缺失'; fi
 # 成功依赖由 GitHub Actions 执行；不得用构包、事件或手动输入门禁漏掉同版恢复。
+# RemoveOldRelease 内部不动，只把 needs 接到 PublishPages（及 release）之后。
 if ! grep -Fq cleanup_release "${WF}" \
-  && awk '/^  RemoveOldRelease:/{job=1;next} job && /^    if:/{bad=1} job && /^      - release$/{release=1} job && /^      - Build$/{build=1} END{exit (bad || !release || !build)}' "${WF}"; then
-  pass '成功 Release/Build 后自动清理，同版本恢复不漏；前序失败按 needs 阻止清理'
+  && awk '/^  RemoveOldRelease:/{job=1;next} job && /^    if:/{bad=1} job && /^      - release$/{release=1} job && /^      - PublishPages$/{pages=1} END{exit (bad || !release || !pages)}' "${WF}"; then
+  pass '成功 Release/Build/PublishPages 后自动清理，同版本恢复不漏；前序失败按 needs 阻止清理'
 else
   fail '母版清理存在事件/构包门禁或缺少成功依赖'
 fi
-if awk '/^  Build:/{job=1;next} /^  RemoveOldRelease:/{job=0} job && /^    if:/{bad=1} job && /^    needs: release$/{needs=1} /^      - name: /{step=($0 ~ /生成并发布 Pages/)} step && /^        if:/{bad=1} step && /run: bash scripts\/publish_apt_site.sh publish$/{publish=1} END{exit (bad || !needs || !publish)}' "${WF}"; then
-  pass '有变构包与无变复用都进入 Pages/README 发布链，不被 build_packages 门禁跳过'
+# Build 仅在 push: tags 上传，避免 schedule/workflow_dispatch 在 refs/heads/main 调用上传 action。
+# Pages 独立 job，有变构包与无变复用都进入发布链，不被 build_packages 门禁跳过。
+if awk '
+  /^  Build:/{job="Build"; next}
+  /^  PublishPages:/{job="PublishPages"; next}
+  /^  [A-Za-z0-9_]+:/{if(job!="" && job!="Build" && job!="PublishPages") job=""}
+  job=="Build" && /^    needs: release$/{bneeds=1}
+  job=="Build" && /^    if: github.event_name == '\''push'\''$/{bpush=1}
+  job=="PublishPages" && /^    if:/{pbad=1}
+  job=="PublishPages" && /^      - release$/{prelease=1}
+  job=="PublishPages" && /^      - Build$/{pbuild=1}
+  job=="PublishPages" && /^      - name: /{step=($0 ~ /生成并发布 Pages/)}
+  job=="PublishPages" && step && /^        if:/{pbad=1}
+  job=="PublishPages" && step && /run: bash scripts\/publish_apt_site.sh publish$/{publish=1}
+  END{exit (pbad || !bneeds || !bpush || !prelease || !pbuild || !publish)}
+' "${WF}"; then
+  pass '有变构包与无变复用都进入独立 PublishPages，Build 仅在 tag 推送上传'
 else
-  fail 'Build 或 Pages 发布被条件跳过，或缺少 Release 成功依赖'
+  fail 'Build 缺 push 门禁，或 PublishPages 被条件跳过/缺 Release、Build 依赖'
 fi
 # shellcheck disable=SC2016 # 匹配工作流原始表达式，不在测试进程展开
 if grep -Fq '          EVENT_NAME: push' "${WF}" \
@@ -412,7 +428,10 @@ else
 fi
 if grep -Fq 'uses: george012/upload_github_release_assets_action@latest' "${WF}" \
   && grep -Fq 'id: upload_file_to_release' "${WF}" \
-  && grep -Fq 'path: ./tmp/release-assets/*' "${WF}" \
+  && grep -Fq 'path: ./build/upload_tmp_dir/*' "${WF}" \
+  && ! grep -Fq 'tmp/release-assets' "${WF}" \
+  && ! grep -Fq 'stage-upload' "${WF}" \
+  && ! grep -Fq 'tag_name:' "${WF}" \
   && grep -Fq 'bash ./build.sh test' "${WF}" \
   && ! grep -Fq 'gh release upload' "${WF}"; then
   pass '母版构建检验与直传 assets'
@@ -431,7 +450,9 @@ awk '
 if [[ -s "${assets_run}" ]] \
   && grep -Fq 'scripts/release_assets.sh prepare-archives --go-version "${GO_VERSION}" --downloads-json tmp/go-downloads.json --archive-dir tmp/go-archives || exit $?' "${assets_run}" \
   && grep -Fq 'bash ./build.sh --go-version "${GO_VERSION}" --downloads-json tmp/go-downloads.json --archive-dir tmp/go-archives && bash ./build.sh test || exit $?' "${assets_run}" \
-  && grep -Fq 'local-status --asset-dir build/upload_tmp_dir || exit $?' "${assets_run}"; then
+  && grep -Fq 'local-status --asset-dir build/upload_tmp_dir || exit $?' "${assets_run}" \
+  && grep -Fq "printf 'upload=1\\n' >>\"\$GITHUB_OUTPUT\"" "${assets_run}" \
+  && ! grep -Fq 'stage-upload' "${assets_run}"; then
   pass '抽出的 assets run 含失败传播与 local-status'
 else
   fail '抽出的 assets run 不符'
@@ -442,7 +463,7 @@ if [[ -n "${up_n}" && -n "${pub_n}" && "${up_n}" -lt "${pub_n}" ]]; then pass '�
 # shellcheck disable=SC2016 # 匹配工作流原始表达式，不在测试进程展开
 if grep -Fq 'actions/cache@' "${WF}" \
   && grep -Fq 'path: tmp/go-archives' "${WF}" \
-  && grep -Fq 'tag_name: ${{ needs.release.outputs.release_tag }}' "${WF}" \
+  && ! grep -Fq 'tag_name:' "${WF}" \
   && grep -Fq 'TAG: ${{ needs.release.outputs.release_tag }}' "${WF}"; then
   pass '构包使用上游载荷缓存且上传/远端核验严格绑定目标 release_tag'
 else
@@ -516,7 +537,9 @@ if [[ -s "${reuse_run}" ]] \
   && grep -Fq 'reuse_from_tag: ${{ steps.tag.outputs.reuse_from_tag }}' "${WF}" \
   && grep -Fq 'steps.reuse.outputs.upload == '\''1'\''' "${WF}" \
   && grep -Fq 'scripts/release_assets.sh prepare-reuse --repository "${REPOSITORY}" --source-tag "${REUSE_FROM_TAG}" --tag "${TAG}" --downloads-json tmp/go-downloads.json --asset-dir build/upload_tmp_dir || exit $?' "${reuse_run}" \
-  && grep -Fq 'scripts/release_assets.sh local-status --repository "${REPOSITORY}" --tag "${TAG}" --asset-dir build/upload_tmp_dir || exit $?' "${reuse_run}"; then
+  && grep -Fq 'scripts/release_assets.sh local-status --repository "${REPOSITORY}" --tag "${TAG}" --asset-dir build/upload_tmp_dir || exit $?' "${reuse_run}" \
+  && grep -Fq "printf 'upload=1\\n' >>\"\$GITHUB_OUTPUT\"" "${reuse_run}" \
+  && ! grep -Fq 'stage-upload' "${reuse_run}"; then
   pass '抽出的 reuse run 与 upload 接线完整'
 else
   fail '抽出的 reuse run 或 upload 接线不符'

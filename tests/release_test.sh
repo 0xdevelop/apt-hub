@@ -564,10 +564,14 @@ fi
 # ---------- workflow 骨架 ----------
 if grep -Eq '^  release:' "${WF_REL}" \
   && grep -Eq '^  Build:' "${WF_REL}" \
+  && grep -Eq '^  PublishPages:' "${WF_REL}" \
   && grep -Eq '^  RemoveOldRelease:' "${WF_REL}" \
   && grep -Fq 'ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd' "${WF_REL}" \
   && grep -Fq 'george012/upload_github_release_assets_action@latest' "${WF_REL}" \
-  && grep -Fq 'path: ./tmp/release-assets/*' "${WF_REL}" \
+  && grep -Fq 'path: ./build/upload_tmp_dir/*' "${WF_REL}" \
+  && ! grep -Fq 'tmp/release-assets' "${WF_REL}" \
+  && ! grep -Fq 'stage-upload' "${WF_REL}" \
+  && ! grep -Fq 'tag_name:' "${WF_REL}" \
   && ! grep -Eq 'upload-pages-artifact|deploy-pages@|upload-artifact|download-artifact' "${WF_REL}" \
   && grep -Fq 'site#http://' "${PUBLISH}" \
   && grep -Fq 'publish_apt_site.sh publish' "${WF_REL}" \
@@ -576,7 +580,7 @@ if grep -Eq '^  release:' "${WF_REL}" \
   && ! grep -Fq 'release_golang.sh' "${WF_REL}" \
   && ! grep -Fq 'go-downloads-json' "${WF_REL}" \
   && [[ ! -e "${ROOT}/.github/workflows/ubuntu-test.yml" && ! -e "${ROOT}/.github/workflows/ubuntu-publish.yml" ]]; then
-  pass "release.yml 三条 job + 母版 Action + Pages"
+  pass "release.yml 四条 job + 母版 Action + 独立 Pages"
 else
   fail "release.yml 未按统一链收口"
 fi
